@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/pg-unified.db
+data/pg-unified.db-wal
+data/pg-unified.db-shm
+data/.api-key
+data/.gemini-key
+data/.app-secret
+data/pg-unified-autobackup.db
+data/page-thumbnails/
+/tmp/
+*.log

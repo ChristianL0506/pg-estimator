@@ -1,0 +1,373 @@
+import { useState, useMemo } from "react";
+import type { TakeoffItem } from "@shared/schema";
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+
+interface TakeoffBomTableProps {
+  items: TakeoffItem[];
+  discipline: "mechanical" | "structural" | "civil";
+}
+
+const CATEGORY_COLORS: Record<string, string> = {
+  pipe: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300",
+  elbow: "bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300",
+  tee: "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-300",
+  reducer: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
+  valve: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300",
+  flange: "bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300",
+  bolt: "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300",
+  gasket: "bg-pink-100 text-pink-800 dark:bg-pink-900/40 dark:text-pink-300",
+  coupling: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300",
+  cap: "bg-stone-100 text-stone-800 dark:bg-stone-800 dark:text-stone-300",
+  union: "bg-lime-100 text-lime-800 dark:bg-lime-900/40 dark:text-lime-300",
+  weld: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+  support: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
+  wide_flange: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300",
+  hss_tube: "bg-cyan-100 text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-300",
+  rebar: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+  footing: "bg-stone-100 text-stone-800 dark:bg-stone-800 dark:text-stone-300",
+  slab: "bg-stone-100 text-stone-800 dark:bg-stone-800 dark:text-stone-300",
+  storm_pipe: "bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300",
+  sewer_pipe: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300",
+  water_pipe: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300",
+  earthwork: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
+  paving: "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-300",
+};
+
+const CONFIDENCE_DOT: Record<string, { color: string; label: string }> = {
+  high: { color: "bg-green-500", label: "High confidence" },
+  medium: { color: "bg-yellow-500", label: "Medium confidence — verify" },
+  low: { color: "bg-red-500", label: "Low confidence — needs review" },
+};
+
+export default function TakeoffBomTable({ items, discipline }: TakeoffBomTableProps) {
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [sizeFilter, setSizeFilter] = useState<string>("all");
+  const [sheetFilter, setSheetFilter] = useState<string>("all");
+  const [confidenceFilter, setConfidenceFilter] = useState<"all" | "low" | "medium">("all");
+  const [cloudFilter, setCloudFilter] = useState<"all" | "clouded" | "non-clouded">("all");
+
+  // Derive filter options from data
+  const categories = useMemo(() => {
+    const cats: Record<string, number> = {};
+    for (const item of items) {
+      cats[item.category] = (cats[item.category] || 0) + 1;
+    }
+    return Object.entries(cats).sort((a, b) => b[1] - a[1]);
+  }, [items]);
+
+  const sizes = useMemo(() => {
+    const s: Record<string, number> = {};
+    for (const item of items) {
+      const sz = item.size || "N/A";
+      s[sz] = (s[sz] || 0) + 1;
+    }
+    return Object.entries(s).sort((a, b) => {
+      const na = parseFloat(a[0]); const nb = parseFloat(b[0]);
+      return isNaN(na) || isNaN(nb) ? a[0].localeCompare(b[0]) : na - nb;
+    });
+  }, [items]);
+
+  const sheets = useMemo(() => {
+    const s: Record<string, number> = {};
+    for (const item of items) {
+      const pg = (item as any).sourcePage;
+      const sheet = pg != null ? `Sheet ${pg}` : (item.notes?.match(/Sheet\s+(\d+)/i)?.[0] || "Unknown");
+      s[sheet] = (s[sheet] || 0) + 1;
+    }
+    return Object.entries(s).sort((a, b) => {
+      const na = parseInt(a[0].replace(/\D/g, "")); const nb = parseInt(b[0].replace(/\D/g, ""));
+      return (isNaN(na) ? 999 : na) - (isNaN(nb) ? 999 : nb);
+    });
+  }, [items]);
+
+  if (!items.length) {
+    return (
+      <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">
+        No items in this project.
+      </div>
+    );
+  }
+
+  const isMechanical = discipline === "mechanical";
+  const isStructural = discipline === "structural";
+  const isCivil = discipline === "civil";
+
+  const lowCount = items.filter(i => (i as any).confidence === "low").length;
+  const medCount = items.filter(i => (i as any).confidence === "medium").length;
+  const cloudedCount = items.filter(i => i.revisionClouded).length;
+  const hasCloudedItems = cloudedCount > 0;
+
+  // Apply all filters
+  let filteredItems = items;
+  if (categoryFilter !== "all") filteredItems = filteredItems.filter(i => i.category === categoryFilter);
+  if (sizeFilter !== "all") filteredItems = filteredItems.filter(i => (i.size || "N/A") === sizeFilter);
+  if (sheetFilter !== "all") {
+    filteredItems = filteredItems.filter(i => {
+      const pg = (i as any).sourcePage;
+      const sheet = pg != null ? `Sheet ${pg}` : (i.notes?.match(/Sheet\s+(\d+)/i)?.[0] || "Unknown");
+      return sheet === sheetFilter;
+    });
+  }
+  if (confidenceFilter !== "all") filteredItems = filteredItems.filter(i => (i as any).confidence === confidenceFilter);
+  if (cloudFilter === "clouded") filteredItems = filteredItems.filter(i => i.revisionClouded);
+  else if (cloudFilter === "non-clouded") filteredItems = filteredItems.filter(i => !i.revisionClouded);
+
+  const activeFilterCount = [categoryFilter !== "all", sizeFilter !== "all", sheetFilter !== "all", confidenceFilter !== "all", cloudFilter !== "all"].filter(Boolean).length;
+
+  return (
+    <div className="space-y-2">
+      {/* Filter bar */}
+      <div className="flex items-center gap-2 flex-wrap md:flex-nowrap overflow-x-auto border border-border bg-muted/20 rounded-md px-3 py-2">
+        <span className="text-xs text-muted-foreground font-medium shrink-0">Filters:</span>
+
+        {/* Category filter */}
+        <select
+          className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
+          value={categoryFilter}
+          onChange={e => setCategoryFilter(e.target.value)}
+        >
+          <option value="all">All Categories ({items.length})</option>
+          {categories.map(([cat, count]) => (
+            <option key={cat} value={cat}>{cat.replace(/_/g, " ")} ({count})</option>
+          ))}
+        </select>
+
+        {/* Size filter */}
+        <select
+          className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
+          value={sizeFilter}
+          onChange={e => setSizeFilter(e.target.value)}
+        >
+          <option value="all">All Sizes</option>
+          {sizes.map(([sz, count]) => (
+            <option key={sz} value={sz}>{sz} ({count})</option>
+          ))}
+        </select>
+
+        {/* Sheet filter */}
+        <select
+          className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
+          value={sheetFilter}
+          onChange={e => setSheetFilter(e.target.value)}
+        >
+          <option value="all">All Sheets</option>
+          {sheets.map(([sheet, count]) => (
+            <option key={sheet} value={sheet}>{sheet} ({count})</option>
+          ))}
+        </select>
+
+        {/* Confidence filter */}
+        {(lowCount > 0 || medCount > 0) && (
+          <select
+            className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
+            value={confidenceFilter}
+            onChange={e => setConfidenceFilter(e.target.value as any)}
+          >
+            <option value="all">All Confidence</option>
+            {lowCount > 0 && <option value="low">Low ({lowCount})</option>}
+            {medCount > 0 && <option value="medium">Medium ({medCount})</option>}
+          </select>
+        )}
+
+        {/* Cloud filter */}
+        {hasCloudedItems && (
+          <select
+            className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
+            value={cloudFilter}
+            onChange={e => setCloudFilter(e.target.value as any)}
+          >
+            <option value="all">All Revisions</option>
+            <option value="clouded">Clouded ({cloudedCount})</option>
+            <option value="non-clouded">Non-Clouded ({items.length - cloudedCount})</option>
+          </select>
+        )}
+
+        {activeFilterCount > 0 && (
+          <button
+            className="h-7 text-xs px-2 rounded border border-border hover:bg-accent text-muted-foreground"
+            onClick={() => { setCategoryFilter("all"); setSizeFilter("all"); setSheetFilter("all"); setConfidenceFilter("all"); setCloudFilter("all"); }}
+          >
+            Clear ({activeFilterCount})
+          </button>
+        )}
+
+        <span className="text-xs text-muted-foreground ml-auto shrink-0">
+          {filteredItems.length} of {items.length} items
+        </span>
+      </div>
+
+      {/* Mobile card layout (< md) */}
+      <div className="md:hidden space-y-2">
+        {filteredItems.length === 0 ? (
+          <div className="text-center text-xs text-muted-foreground py-8">No items match the selected filters.</div>
+        ) : filteredItems.map((item) => {
+          const conf = CONFIDENCE_DOT[(item as any).confidence || "high"] || CONFIDENCE_DOT.high;
+          const isClouded = item.revisionClouded;
+          const sourcePageNum = (item as any).sourcePage as number | undefined;
+          return (
+            <div
+              key={item.id}
+              className={`rounded-md border border-border p-3 space-y-1.5 ${isClouded ? "bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800" : ""}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${conf.color}`} />
+                  <Badge variant="outline" className={`text-[10px] px-1.5 py-0 shrink-0 ${CATEGORY_COLORS[item.category] || ""}`}>
+                    {item.category.replace(/_/g, " ")}
+                  </Badge>
+                  <span className="font-mono text-xs text-muted-foreground shrink-0">{item.size}</span>
+                  {isClouded && <Badge variant="outline" className="text-[8px] px-1 py-0 bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 shrink-0">REV</Badge>}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="font-mono text-xs font-semibold">
+                    {item.unit === "LF" || item.unit === "CY" || item.unit === "SF" || item.unit === "SY"
+                      ? item.quantity.toFixed(2)
+                      : item.quantity.toLocaleString()} {item.unit}
+                  </span>
+                </div>
+              </div>
+              <p className="text-xs leading-snug">{item.description}</p>
+              <div className="flex items-center gap-2 text-[10px] text-muted-foreground flex-wrap">
+                <span>#{item.lineNumber}</span>
+                {sourcePageNum != null && <span>Pg {sourcePageNum}</span>}
+                {isMechanical && item.schedule && <span>Sch: {item.schedule}</span>}
+                {isMechanical && item.rating && <span>Rating: {item.rating}</span>}
+                {isStructural && item.mark && <span>Mark: {item.mark}</span>}
+                {isStructural && item.grade && <span>Grade: {item.grade}</span>}
+                {isCivil && item.material && <span>{item.material}</span>}
+                {item.notes && <span className="italic">{item.notes}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Desktop table layout (>= md) */}
+      <div className="overflow-auto rounded-md border border-border hidden md:block">
+        <TooltipProvider delayDuration={200}>
+        <Table>
+          <TableHeader>
+            <TableRow className="bg-muted/50">
+              <TableHead className="w-10 text-xs">#</TableHead>
+              {hasCloudedItems && <TableHead className="w-6 text-xs px-1">Rev</TableHead>}
+              <TableHead className="w-6 text-xs"></TableHead>
+              <TableHead className="text-xs">Category</TableHead>
+              <TableHead className="text-xs">Size</TableHead>
+              <TableHead className="text-xs max-w-xs">Description</TableHead>
+              {isStructural && <TableHead className="text-xs">Mark</TableHead>}
+              {isStructural && <TableHead className="text-xs">Grade</TableHead>}
+              {isStructural && <TableHead className="text-xs">Weight</TableHead>}
+              {isMechanical && <TableHead className="text-xs">Schedule</TableHead>}
+              {isMechanical && <TableHead className="text-xs">Rating</TableHead>}
+              {isCivil && <TableHead className="text-xs">Material</TableHead>}
+              {isCivil && <TableHead className="text-xs">Depth</TableHead>}
+              <TableHead className="text-xs text-right">Qty</TableHead>
+              <TableHead className="text-xs">Unit</TableHead>
+              <TableHead className="text-xs text-muted-foreground">Notes</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {filteredItems.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={20} className="text-center text-xs text-muted-foreground py-8">
+                  No items match the selected filters.
+                </TableCell>
+              </TableRow>
+            ) : filteredItems.map((item) => {
+              const conf = CONFIDENCE_DOT[(item as any).confidence || "high"] || CONFIDENCE_DOT.high;
+              const isClouded = item.revisionClouded;
+              const isDedupCandidate = !!(item as any)._dedupCandidate;
+              const sourcePageNum = (item as any).sourcePage as number | undefined;
+              return (
+                <TableRow
+                  key={item.id}
+                  className={`hover:bg-muted/30 text-xs ${isClouded ? "bg-amber-50/50 dark:bg-amber-950/20" : ""} ${isDedupCandidate ? "opacity-50" : ""}`}
+                  data-testid={`row-item-${item.id}`}
+                >
+                  <TableCell className="text-muted-foreground">{item.lineNumber}</TableCell>
+                  {hasCloudedItems && (
+                    <TableCell className="px-1">
+                      {isClouded ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-100 dark:bg-amber-900/40">
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3 text-amber-600 dark:text-amber-400">
+                                <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+                              </svg>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="text-[10px]">Inside revision cloud</TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <span className="inline-block w-5" />
+                      )}
+                    </TableCell>
+                  )}
+                  <TableCell className="px-1">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className={`inline-block w-2 h-2 rounded-full ${conf.color}`} />
+                      </TooltipTrigger>
+                      <TooltipContent side="right" className="text-[10px]">{conf.label}{(item as any).confidenceNotes ? `: ${(item as any).confidenceNotes}` : ""}</TooltipContent>
+                    </Tooltip>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${CATEGORY_COLORS[item.category] || ""}`}>
+                      {item.category.replace(/_/g, " ")}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{item.size}</TableCell>
+                  <TableCell className="max-w-xs">
+                    <span className="line-clamp-2 text-xs">{item.description}</span>
+                  </TableCell>
+                  {isStructural && <TableCell className="font-mono text-xs">{item.mark || ""}</TableCell>}
+                  {isStructural && <TableCell className="text-xs">{item.grade || ""}</TableCell>}
+                  {isStructural && (
+                    <TableCell className="text-xs text-right">
+                      {item.weight ? item.weight.toLocaleString() + " lbs" : ""}
+                    </TableCell>
+                  )}
+                  {isMechanical && <TableCell className="text-xs text-muted-foreground">{item.schedule || ""}</TableCell>}
+                  {isMechanical && <TableCell className="text-xs text-muted-foreground">{item.rating || ""}</TableCell>}
+                  {isCivil && <TableCell className="text-xs">{item.material || ""}</TableCell>}
+                  {isCivil && <TableCell className="text-xs">{item.depth || ""}</TableCell>}
+                  <TableCell className="text-right font-mono">
+                    {item.unit === "LF" || item.unit === "CY" || item.unit === "SF" || item.unit === "SY"
+                      ? item.quantity.toFixed(2)
+                      : item.quantity.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{item.unit}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                    <span className="flex items-center gap-1">
+                      {isDedupCandidate && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Badge variant="outline" className="text-[8px] px-1 py-0 bg-orange-50 text-orange-600 border-orange-200 dark:bg-orange-950/40 dark:text-orange-400 dark:border-orange-800 shrink-0">
+                              dup?
+                            </Badge>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="text-[10px] max-w-xs">{(item as any).dedupNote || "Possible duplicate"}</TooltipContent>
+                        </Tooltip>
+                      )}
+                      {sourcePageNum != null && (
+                        <Badge variant="outline" className="text-[8px] px-1 py-0 bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-900/40 dark:text-slate-400 dark:border-slate-700 shrink-0">
+                          Pg {sourcePageNum}
+                        </Badge>
+                      )}
+                      {item.notes || ""}
+                    </span>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+        </TooltipProvider>
+      </div>
+    </div>
+  );
+}
