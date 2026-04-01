@@ -186,12 +186,15 @@ export default function CrewPlanner({ totalLaborHours, laborRate, perDiemRate }:
           </div>
 
           {/* Calculate button */}
-          <Button size="sm" variant="outline" onClick={() => setShowResults(true)} className="gap-1.5">
+          <Button size="sm" variant="outline" onClick={() => setShowResults(true)} disabled={customResult.productiveWorkers === 0} className="gap-1.5">
             <Calculator size={13} />
             Calculate
           </Button>
 
           {/* Custom Results */}
+          {showResults && customResult.productiveMHPerDay === 0 && (
+            <p className="text-xs text-destructive">Add at least one welder, fitter, or helper to calculate duration.</p>
+          )}
           {showResults && customResult.productiveMHPerDay > 0 && (
             <Card className="bg-muted/30 border-primary/20">
               <CardContent className="p-4 space-y-3">

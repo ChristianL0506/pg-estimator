@@ -20,24 +20,16 @@ export default function ProjectHistoryPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showAddForm, setShowAddForm] = useState(false);
 
-  // Form state
-  const [formName, setFormName] = useState("");
-  const [formClient, setFormClient] = useState("");
-  const [formLocation, setFormLocation] = useState("");
-  const [formScope, setFormScope] = useState("");
-  const [formStartDate, setFormStartDate] = useState("");
-  const [formEndDate, setFormEndDate] = useState("");
-  const [formWelderHours, setFormWelderHours] = useState(0);
-  const [formFitterHours, setFormFitterHours] = useState(0);
-  const [formHelperHours, setFormHelperHours] = useState(0);
-  const [formForemanHours, setFormForemanHours] = useState(0);
-  const [formOperatorHours, setFormOperatorHours] = useState(0);
-  const [formMaterialCost, setFormMaterialCost] = useState(0);
-  const [formLaborCost, setFormLaborCost] = useState(0);
-  const [formPeakCrew, setFormPeakCrew] = useState(0);
-  const [formDuration, setFormDuration] = useState(0);
-  const [formTags, setFormTags] = useState("");
-  const [formNotes, setFormNotes] = useState("");
+  // Form state — consolidated into a single object
+  const EMPTY_FORM = {
+    name: "", client: "", location: "", scope: "",
+    startDate: "", endDate: "",
+    welderHours: 0, fitterHours: 0, helperHours: 0, foremanHours: 0, operatorHours: 0,
+    materialCost: 0, laborCost: 0, peakCrew: 0, duration: 0,
+    tags: "", notes: "",
+  };
+  const [form, setForm] = useState(EMPTY_FORM);
+  const updateForm = (field: string, value: string | number) => setForm(prev => ({ ...prev, [field]: value }));
 
   // Query: either search or list all
   const queryKey = searchQuery.trim()
@@ -75,36 +67,33 @@ export default function ProjectHistoryPage() {
   });
 
   function resetForm() {
-    setFormName(""); setFormClient(""); setFormLocation(""); setFormScope("");
-    setFormStartDate(""); setFormEndDate(""); setFormWelderHours(0); setFormFitterHours(0);
-    setFormHelperHours(0); setFormForemanHours(0); setFormOperatorHours(0);
-    setFormMaterialCost(0); setFormLaborCost(0); setFormPeakCrew(0);
-    setFormDuration(0); setFormTags(""); setFormNotes("");
+    setForm(EMPTY_FORM);
   }
 
   function handleSubmit() {
-    if (!formName.trim() || !formScope.trim()) {
+    if (!form.name.trim() || !form.scope.trim()) {
       toast({ title: "Required", description: "Name and scope description are required.", variant: "destructive" });
       return;
     }
     addMutation.mutate({
-      name: formName.trim(),
-      client: formClient.trim() || undefined,
-      location: formLocation.trim() || undefined,
-      scopeDescription: formScope.trim(),
-      startDate: formStartDate || undefined,
-      endDate: formEndDate || undefined,
-      welderHours: formWelderHours,
-      fitterHours: formFitterHours,
-      helperHours: formHelperHours,
-      foremanHours: formForemanHours,
-      operatorHours: formOperatorHours,
-      materialCost: formMaterialCost,
-      laborCost: formLaborCost,
-      peakCrewSize: formPeakCrew || undefined,
-      durationDays: formDuration || undefined,
-      tags: formTags.trim() || undefined,
-      notes: formNotes.trim() || undefined,
+      name: form.name.trim(),
+      client: form.client.trim() || undefined,
+      location: form.location.trim() || undefined,
+      scopeDescription: form.scope.trim(),
+      startDate: form.startDate || undefined,
+      endDate: form.endDate || undefined,
+      welderHours: form.welderHours,
+      fitterHours: form.fitterHours,
+      helperHours: form.helperHours,
+      foremanHours: form.foremanHours,
+      operatorHours: form.operatorHours,
+      totalManhours: form.welderHours + form.fitterHours + form.helperHours + form.foremanHours + form.operatorHours,
+      materialCost: form.materialCost,
+      laborCost: form.laborCost,
+      peakCrewSize: form.peakCrew || undefined,
+      durationDays: form.duration || undefined,
+      tags: form.tags.trim() || undefined,
+      notes: form.notes.trim() || undefined,
     });
   }
 
@@ -311,15 +300,15 @@ export default function ProjectHistoryPage() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
                   <Label className="text-xs">Project Name *</Label>
-                  <Input className="h-8 text-xs mt-1" value={formName} onChange={e => setFormName(e.target.value)} placeholder="e.g. Tank Farm Piping Phase 2" data-testid="input-ph-name" />
+                  <Input className="h-8 text-xs mt-1" value={form.name} onChange={e => updateForm("name", e.target.value)} placeholder="e.g. Tank Farm Piping Phase 2" data-testid="input-ph-name" />
                 </div>
                 <div>
                   <Label className="text-xs">Client</Label>
-                  <Input className="h-8 text-xs mt-1" value={formClient} onChange={e => setFormClient(e.target.value)} placeholder="e.g. ExxonMobil" />
+                  <Input className="h-8 text-xs mt-1" value={form.client} onChange={e => updateForm("client", e.target.value)} placeholder="e.g. ExxonMobil" />
                 </div>
                 <div>
                   <Label className="text-xs">Location</Label>
-                  <Input className="h-8 text-xs mt-1" value={formLocation} onChange={e => setFormLocation(e.target.value)} placeholder="e.g. Baton Rouge, LA" />
+                  <Input className="h-8 text-xs mt-1" value={form.location} onChange={e => updateForm("location", e.target.value)} placeholder="e.g. Baton Rouge, LA" />
                 </div>
               </div>
 
@@ -328,8 +317,8 @@ export default function ProjectHistoryPage() {
                 <Label className="text-xs">Scope Description *</Label>
                 <textarea
                   className="w-full h-20 text-xs mt-1 border border-input rounded-md px-3 py-2 bg-background resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-                  value={formScope}
-                  onChange={e => setFormScope(e.target.value)}
+                  value={form.scope}
+                  onChange={e => updateForm("scope", e.target.value)}
                   placeholder={"e.g. Install 6\" screw conveyor, run 500' of 8\" SS pipe, fabricate & install 3 process skids"}
                   data-testid="input-ph-scope"
                 />
@@ -339,19 +328,19 @@ export default function ProjectHistoryPage() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div>
                   <Label className="text-xs">Start Date</Label>
-                  <Input className="h-8 text-xs mt-1" type="date" value={formStartDate} onChange={e => setFormStartDate(e.target.value)} />
+                  <Input className="h-8 text-xs mt-1" type="date" value={form.startDate} onChange={e => updateForm("startDate", e.target.value)} />
                 </div>
                 <div>
                   <Label className="text-xs">End Date</Label>
-                  <Input className="h-8 text-xs mt-1" type="date" value={formEndDate} onChange={e => setFormEndDate(e.target.value)} />
+                  <Input className="h-8 text-xs mt-1" type="date" value={form.endDate} onChange={e => updateForm("endDate", e.target.value)} />
                 </div>
                 <div>
                   <Label className="text-xs">Duration (days)</Label>
-                  <Input className="h-8 text-xs mt-1" type="number" value={formDuration || ""} onChange={e => setFormDuration(parseFloat(e.target.value) || 0)} />
+                  <Input className="h-8 text-xs mt-1" type="number" value={form.duration || ""} onChange={e => setFormDuration(parseFloat(e.target.value) || 0)} />
                 </div>
                 <div>
                   <Label className="text-xs">Peak Crew Size</Label>
-                  <Input className="h-8 text-xs mt-1" type="number" value={formPeakCrew || ""} onChange={e => setFormPeakCrew(parseFloat(e.target.value) || 0)} />
+                  <Input className="h-8 text-xs mt-1" type="number" value={form.peakCrew || ""} onChange={e => setFormPeakCrew(parseFloat(e.target.value) || 0)} />
                 </div>
               </div>
 
@@ -378,11 +367,11 @@ export default function ProjectHistoryPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label className="text-xs">Material Cost ($)</Label>
-                  <Input className="h-8 text-xs mt-1" type="number" value={formMaterialCost || ""} onChange={e => setFormMaterialCost(parseFloat(e.target.value) || 0)} />
+                  <Input className="h-8 text-xs mt-1" type="number" value={form.materialCost || ""} onChange={e => updateForm("materialCost", parseFloat(e.target.value) || 0)} />
                 </div>
                 <div>
                   <Label className="text-xs">Labor Cost ($)</Label>
-                  <Input className="h-8 text-xs mt-1" type="number" value={formLaborCost || ""} onChange={e => setFormLaborCost(parseFloat(e.target.value) || 0)} />
+                  <Input className="h-8 text-xs mt-1" type="number" value={form.laborCost || ""} onChange={e => updateForm("laborCost", parseFloat(e.target.value) || 0)} />
                 </div>
               </div>
 
@@ -390,11 +379,11 @@ export default function ProjectHistoryPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <Label className="text-xs">Tags (comma-separated)</Label>
-                  <Input className="h-8 text-xs mt-1" value={formTags} onChange={e => setFormTags(e.target.value)} placeholder="conveyor, stainless, 8-inch, tank farm" />
+                  <Input className="h-8 text-xs mt-1" value={form.tags} onChange={e => updateForm("tags", e.target.value)} placeholder="conveyor, stainless, 8-inch, tank farm" />
                 </div>
                 <div>
                   <Label className="text-xs">Notes</Label>
-                  <Input className="h-8 text-xs mt-1" value={formNotes} onChange={e => setFormNotes(e.target.value)} placeholder="Any additional notes..." />
+                  <Input className="h-8 text-xs mt-1" value={form.notes} onChange={e => updateForm("notes", e.target.value)} placeholder="Any additional notes..." />
                 </div>
               </div>
 

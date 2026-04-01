@@ -325,6 +325,9 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
           </div>
           <button
             type="button"
+            role="switch"
+            aria-checked={dualModel}
+            aria-label="Dual-Model Verification"
             onClick={() => setDualModel(!dualModel)}
             className={`relative w-9 h-5 rounded-full transition-colors ${dualModel ? "bg-primary" : "bg-muted-foreground/30"}`}
           >

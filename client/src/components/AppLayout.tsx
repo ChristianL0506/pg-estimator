@@ -37,12 +37,17 @@ export default function AppLayout({ children, subtitle }: AppLayoutProps) {
     document.documentElement.classList.toggle("dark", next);
   };
 
-  if (dark) document.documentElement.classList.add("dark");
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark);
+  }, [dark]);
 
-  // Fetch recent takeoff projects for sidebar
+  // Fetch recent takeoff projects for sidebar — only poll on relevant pages
+  const shouldPoll = ["/", "/mechanical", "/structural", "/civil"].some(
+    p => p === "/" ? location === "/" : location.startsWith(p)
+  );
   const { data: recentProjects = [] } = useQuery<TakeoffProject[]>({
     queryKey: ["/api/takeoff/projects"],
-    refetchInterval: 10000, // Poll every 10s to catch new projects
+    refetchInterval: shouldPoll ? 10000 : false,
   });
 
   // Show only the 5 most recent non-archived projects

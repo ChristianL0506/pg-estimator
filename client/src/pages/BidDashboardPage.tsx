@@ -256,7 +256,7 @@ export default function BidDashboardPage() {
                           <button className="p-1 hover:text-primary" onClick={() => startEdit(bid)} title="Edit">
                             <Edit2 size={13} />
                           </button>
-                          <button className="p-1 hover:text-destructive" onClick={() => deleteMutation.mutate(bid.id)} title="Delete">
+                          <button className="p-1 hover:text-destructive" onClick={() => { if (window.confirm(`Delete bid "${bid.projectName}"?`)) deleteMutation.mutate(bid.id); }} title="Delete" aria-label={`Delete bid ${bid.projectName}`}>
                             <Trash2 size={13} />
                           </button>
                         </div>

@@ -67,5 +67,6 @@ export default function SummaryCards({ items, discipline }: SummaryCardsProps) {
     );
   }
 
+  console.warn(`SummaryCards: unknown discipline "${discipline}"`);
   return null;
 }

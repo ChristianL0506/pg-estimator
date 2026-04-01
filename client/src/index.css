@@ -59,6 +59,8 @@
   --tracking-normal: 0em;
   --spacing: 0.25rem;
 
+  /* Border tokens: first declaration is the Firefox fallback (< 128),
+     second uses CSS relative color syntax (Chrome 119+, Safari 16.4+, Firefox 128+) */
   --sidebar-primary-border: hsl(var(--sidebar-primary));
   --sidebar-primary-border: hsl(from hsl(var(--sidebar-primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
   --sidebar-accent-border: hsl(var(--sidebar-accent));

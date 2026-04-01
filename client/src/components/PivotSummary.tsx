@@ -5,6 +5,16 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 
+const PIVOT_CATEGORY_COLORS: Record<string, string> = {
+  pipe: "bg-blue-100 text-blue-800",
+  elbow: "bg-purple-100 text-purple-800",
+  tee: "bg-indigo-100 text-indigo-800",
+  valve: "bg-green-100 text-green-800",
+  flange: "bg-orange-100 text-orange-800",
+  bolt: "bg-gray-100 text-gray-800",
+  gasket: "bg-pink-100 text-pink-800",
+};
+
 interface PivotSummaryProps {
   items: TakeoffItem[];
 }
@@ -300,11 +310,7 @@ export default function PivotSummary({ items }: PivotSummaryProps) {
               onClick={() => setCategoryFilter(categoryFilter === cat ? "all" : cat)}
             >
               <div className="flex items-center gap-1.5 mb-1">
-                <Badge variant="outline" className={`text-[9px] px-1 py-0 ${
-                  cat in ({"pipe":"bg-blue-100 text-blue-800","elbow":"bg-purple-100 text-purple-800","tee":"bg-indigo-100 text-indigo-800","valve":"bg-green-100 text-green-800","flange":"bg-orange-100 text-orange-800","bolt":"bg-gray-100 text-gray-800","gasket":"bg-pink-100 text-pink-800"} as Record<string,string>)
-                    ? ({"pipe":"bg-blue-100 text-blue-800","elbow":"bg-purple-100 text-purple-800","tee":"bg-indigo-100 text-indigo-800","valve":"bg-green-100 text-green-800","flange":"bg-orange-100 text-orange-800","bolt":"bg-gray-100 text-gray-800","gasket":"bg-pink-100 text-pink-800"} as Record<string,string>)[cat]
-                    : ""
-                }`}>
+                <Badge variant="outline" className={`text-[9px] px-1 py-0 ${PIVOT_CATEGORY_COLORS[cat] || ""}`}>
                   {cat.replace(/_/g, " ")}
                 </Badge>
               </div>

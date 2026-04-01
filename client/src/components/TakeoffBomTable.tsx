@@ -122,7 +122,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
   return (
     <div className="space-y-2">
       {/* Filter bar */}
-      <div className="flex items-center gap-2 flex-wrap md:flex-nowrap overflow-x-auto border border-border bg-muted/30 rounded-lg px-3 py-2.5 shadow-sm">
+      <div className="flex items-start gap-2 flex-wrap border border-border bg-muted/30 rounded-lg px-3 py-2.5 shadow-sm">
         <span className="text-xs text-muted-foreground font-medium shrink-0">Filters:</span>
 
         {/* Category filter */}
@@ -130,6 +130,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
           className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
           value={categoryFilter}
           onChange={e => setCategoryFilter(e.target.value)}
+          aria-label="Filter by category"
         >
           <option value="all">All Categories ({items.length})</option>
           {categories.map(([cat, count]) => (
@@ -142,6 +143,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
           className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
           value={sizeFilter}
           onChange={e => setSizeFilter(e.target.value)}
+          aria-label="Filter by size"
         >
           <option value="all">All Sizes</option>
           {sizes.map(([sz, count]) => (
@@ -154,6 +156,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
           className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
           value={sheetFilter}
           onChange={e => setSheetFilter(e.target.value)}
+          aria-label="Filter by sheet"
         >
           <option value="all">All Sheets</option>
           {sheets.map(([sheet, count]) => (
@@ -167,6 +170,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
             className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
             value={confidenceFilter}
             onChange={e => setConfidenceFilter(e.target.value as any)}
+            aria-label="Filter by confidence"
           >
             <option value="all">All Confidence</option>
             {lowCount > 0 && <option value="low">Low ({lowCount})</option>}
@@ -180,6 +184,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
             className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
             value={cloudFilter}
             onChange={e => setCloudFilter(e.target.value as any)}
+            aria-label="Filter by revision status"
           >
             <option value="all">All Revisions</option>
             <option value="clouded">Clouded ({cloudedCount})</option>

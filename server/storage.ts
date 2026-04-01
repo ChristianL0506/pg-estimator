@@ -446,6 +446,7 @@ const sessionStmts = {
   get: db.prepare(`SELECT * FROM auth_sessions WHERE token = ?`),
   delete: db.prepare(`DELETE FROM auth_sessions WHERE token = ?`),
   cleanup: db.prepare(`DELETE FROM auth_sessions WHERE createdAt < ?`),
+  touch: db.prepare(`UPDATE auth_sessions SET createdAt = ? WHERE token = ?`),
 };
 
 // API key encryption helpers — generate unique secret per installation if not set via env
@@ -510,29 +511,24 @@ setInterval(() => {
   try { sessionStmts.cleanup.run(Date.now() - SESSION_EXPIRY_MS); } catch (e) { console.warn("Session cleanup error:", e); }
 }, 5 * 60 * 1000);
 
-// Automatic daily backup — save a copy of the database every 24 hours
-setInterval(() => {
+// Automatic daily backup — alternating between two copies for safety
+let backupSlot = 0;
+function runAutoBackup(label: string) {
   try {
-    const backupPath = path.join(process.cwd(), "data", `pg-unified-autobackup.db`);
+    backupSlot = (backupSlot + 1) % 2;
+    const backupPath = path.join(process.cwd(), "data", `pg-unified-autobackup-${backupSlot + 1}.db`);
     db.backup(backupPath).then(() => {
-      console.log(`Auto-backup saved to ${backupPath}`);
+      console.log(`${label} auto-backup saved to ${backupPath}`);
     }).catch((err: any) => {
-      console.warn("Auto-backup failed:", err?.message || err);
+      console.warn(`${label} auto-backup failed:`, err?.message || err);
     });
-  } catch (e) { console.warn("Auto-backup error:", e); }
-}, 24 * 60 * 60 * 1000); // Every 24 hours
+  } catch (e) { console.warn(`${label} auto-backup error:`, e); }
+}
+
+setInterval(() => runAutoBackup("Scheduled"), 24 * 60 * 60 * 1000); // Every 24 hours
 
 // Run first backup 5 minutes after startup
-setTimeout(() => {
-  try {
-    const backupPath = path.join(process.cwd(), "data", `pg-unified-autobackup.db`);
-    db.backup(backupPath).then(() => {
-      console.log(`Initial auto-backup saved to ${backupPath}`);
-    }).catch((err: any) => {
-      console.warn("Initial auto-backup failed:", err?.message || err);
-    });
-  } catch (e) { console.warn("Initial auto-backup error:", e); }
-}, 5 * 60 * 1000);
+setTimeout(() => runAutoBackup("Initial"), 5 * 60 * 1000);
 
 // ============================================================
 // Helper: serialize/deserialize
@@ -695,7 +691,10 @@ const stmts = {
   getCompletedProjects: db.prepare(`SELECT * FROM completed_projects ORDER BY createdAt DESC`),
   getCompletedProject: db.prepare(`SELECT * FROM completed_projects WHERE id = ?`),
   deleteCompletedProject: db.prepare(`DELETE FROM completed_projects WHERE id = ?`),
-  searchCompletedProjects: db.prepare(`SELECT * FROM completed_projects WHERE scopeDescription LIKE ? OR tags LIKE ? OR name LIKE ? OR notes LIKE ? ORDER BY createdAt DESC`),
+  searchCompletedProjects: db.prepare(`SELECT * FROM completed_projects WHERE scopeDescription LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\' ORDER BY createdAt DESC`),
+
+  // Targeted cost lookup for auto-pricing
+  getLatestCostForItem: db.prepare(`SELECT * FROM purchase_history WHERE LOWER(description) LIKE LOWER(?) AND (? = '' OR LOWER(size) LIKE LOWER(?)) ORDER BY invoiceDate DESC, createdAt DESC LIMIT 1`),
 
   // Bid tracking
   insertBid: db.prepare(`INSERT INTO bid_tracking (id, projectName, client, bidDate, dueDate, bidAmount, status, awardAmount, competitor, estimateId, notes, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
@@ -795,13 +794,8 @@ class Storage {
   }
 
   async getTakeoffProjects(discipline?: string): Promise<TakeoffProject[]> {
-    const rows = discipline
-      ? stmts.getTakeoffProjectsByDiscipline.all(discipline) as any[]
-      : stmts.getTakeoffProjects.all() as any[];
-    return rows.map(row => {
-      const items = (stmts.getTakeoffItems.all(row.id) as any[]).map(rowToTakeoffItem);
-      return serializeTakeoffProject(row, items);
-    });
+    // Delegate to lite version to avoid N+1 query on list views
+    return this.getTakeoffProjectsLite(discipline);
   }
 
   // Lite version: returns projects with item count but no items (avoids N+1 query)
@@ -981,6 +975,20 @@ class Storage {
     return { ...data, id, lastUpdated };
   }
 
+  addCostEntriesBulk(entries: InsertCostDatabaseEntry[]): number {
+    const insertMany = db.transaction((items: InsertCostDatabaseEntry[]) => {
+      let count = 0;
+      for (const data of items) {
+        const id = randomUUID();
+        const lastUpdated = new Date().toISOString();
+        stmts.insertCostEntry.run(id, data.description, data.size, data.category, data.unit, data.materialUnitCost, data.laborUnitCost, data.laborHoursPerUnit, lastUpdated);
+        count++;
+      }
+      return count;
+    });
+    return insertMany(entries);
+  }
+
   updateCostEntry(id: string, data: Partial<CostDatabaseEntry>): CostDatabaseEntry | undefined {
     const existing = stmts.getCostEntry.get(id) as any;
     if (!existing) return undefined;
@@ -1115,23 +1123,11 @@ class Storage {
   }
 
   getLatestCostForItem(description: string, size?: string): any | undefined {
-    // Find the most recent purchase of a matching item for auto-pricing in estimates
-    const rows = stmts.getPurchaseRecords.all() as any[];
-    const descLower = description.toLowerCase().trim();
-    const sizeLower = (size || '').toLowerCase().trim();
-    
-    const matches = rows.filter((r: any) => {
-      const rDesc = (r.description || '').toLowerCase().trim();
-      const rSize = (r.size || '').toLowerCase().trim();
-      // Exact match or description contains the search term
-      const descMatch = rDesc === descLower || rDesc.includes(descLower) || descLower.includes(rDesc);
-      const sizeMatch = !sizeLower || !rSize || rSize === sizeLower || rSize.includes(sizeLower);
-      return descMatch && sizeMatch;
-    });
-    
-    if (matches.length === 0) return undefined;
-    // Return the first one (already sorted by date DESC)
-    return matches[0];
+    // Find the most recent purchase matching description (and optionally size) via SQL
+    const descPat = `%${description.trim()}%`;
+    const sizePat = size ? `%${size.trim()}%` : '';
+    const row = stmts.getLatestCostForItem.get(descPat, sizePat, sizePat) as any;
+    return row || undefined;
   }
 
   // ---- Completed Projects (Project History) ----
@@ -1222,7 +1218,8 @@ class Storage {
   }
 
   searchCompletedProjects(query: string): CompletedProject[] {
-    const q = `%${query}%`;
+    const escaped = query.replace(/[%_\\]/g, '\\$&');
+    const q = `%${escaped}%`;
     return (stmts.searchCompletedProjects.all(q, q, q, q) as any[]).map(row => ({
       id: row.id,
       name: row.name,
@@ -1282,11 +1279,13 @@ class Storage {
   validateToken(token: string): { userId: string; username: string } | null {
     const session = sessionStmts.get.get(token) as any;
     if (!session) return null;
-    // Check session expiry
+    // Check session expiry (sliding window — refreshed on each validation)
     if (Date.now() - session.createdAt > SESSION_EXPIRY_MS) {
       sessionStmts.delete.run(token);
       return null;
     }
+    // Sliding expiry: refresh timestamp so active sessions stay alive
+    try { sessionStmts.touch.run(Date.now(), token); } catch {}
     return { userId: session.userId, username: session.username };
   }
 
@@ -1375,12 +1374,16 @@ class Storage {
   }
 
   getEstimateVersions(estimateId: string): any[] {
-    return (db.prepare(`SELECT id, estimateId, createdAt, notes, laborRate, perDiem, estimateMethod FROM estimate_versions WHERE estimateId = ? ORDER BY createdAt DESC`).all(estimateId) as any[]).map(row => ({
-      ...row,
-      itemCount: JSON.parse(
-        (db.prepare(`SELECT items_json FROM estimate_versions WHERE id = ?`).get(row.id) as any)?.items_json || "[]"
-      ).length,
-    }));
+    const rows = db.prepare(
+      `SELECT id, estimateId, createdAt, notes, laborRate, perDiem, estimateMethod, items_json
+       FROM estimate_versions WHERE estimateId = ? ORDER BY createdAt DESC`
+    ).all(estimateId) as any[];
+    return rows.map(row => {
+      let itemCount = 0;
+      try { itemCount = JSON.parse(row.items_json || "[]").length; } catch {}
+      const { items_json, ...rest } = row;
+      return { ...rest, itemCount };
+    });
   }
 
   restoreEstimateVersion(estimateId: string, versionId: string): boolean {

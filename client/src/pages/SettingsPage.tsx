@@ -139,7 +139,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <AppLayout title="Settings" activePath="/settings">
+    <AppLayout subtitle="Settings">
       <div className="max-w-2xl mx-auto space-y-6 p-5">
         <div>
           <h2 className="text-lg font-semibold text-foreground">AI API Configuration</h2>
@@ -175,11 +175,13 @@ export default function SettingsPage() {
 
           <div className="flex gap-2">
             <Input
+              id="anthropic-key"
               type="password"
               placeholder="sk-ant-api03-..."
               value={apiKey}
               onChange={e => setApiKey(e.target.value)}
               className="font-mono text-xs"
+              aria-label="Anthropic API Key"
             />
             <Button variant="outline" size="sm" onClick={handleTest} disabled={testing || (!apiKey && !status?.configured)}>
               {testing ? "Testing..." : "Test"}
@@ -229,11 +231,13 @@ export default function SettingsPage() {
 
           <div className="flex gap-2">
             <Input
+              id="gemini-key"
               type="password"
               placeholder="AIzaSy..."
               value={geminiKey}
               onChange={e => setGeminiKey(e.target.value)}
               className="font-mono text-xs"
+              aria-label="Google Gemini API Key"
             />
             <Button variant="outline" size="sm" onClick={handleGeminiTest} disabled={geminiTesting || (!geminiKey && !geminiStatus?.configured)}>
               {geminiTesting ? "Testing..." : "Test"}

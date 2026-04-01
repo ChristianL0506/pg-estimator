@@ -80,6 +80,9 @@ const autoCalculateBodySchema = z.object({
   elevation: z.string().default("0-20ft"),
   alloyGroup: z.string().default("4"),
   rackFactor: z.number().min(1).max(5).default(1.3),
+}).refine(data => data.overtimePercent + data.doubleTimePercent <= 100, {
+  message: "overtimePercent + doubleTimePercent cannot exceed 100",
+  path: ["overtimePercent"],
 });
 
 const patchEstimateSchema = z.object({
@@ -942,11 +945,14 @@ async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "
           // Get image dimensions
           let dims = "";
           try {
-            dims = execSync(`identify -format "%wx%h" "${imgPath}"`, { timeout: 10000 }).toString().trim();
+            dims = execFileSync("identify", ["-format", "%wx%h", imgPath], { timeout: 10000 }).toString().trim();
           } catch { return; } // skip unreadable images
-          const [wStr, hStr] = dims.replace(/"/g, "").split("x");
-          const w = parseInt(wStr), h = parseInt(hStr);
-          if (!w || w < 100) return;
+          // BUG-7 fix: validate identify output format before parsing
+          const dimsMatch = dims.replace(/"/g, "").match(/^(\d+)x(\d+)$/);
+          if (!dimsMatch) return;
+          const w = parseInt(dimsMatch[1], 10);
+          const h = parseInt(dimsMatch[2], 10);
+          if (w < 100 || h < 100) return;
           const cx = Math.floor(w * 50 / 100);
           const cw = w - cx;
           const ch = Math.floor(h * 65 / 100);
@@ -1257,7 +1263,7 @@ function parseSizeNPSFromString(s: string): number {
 }
 
 function isReducerSize(sizeStr: string): boolean {
-  return /x/i.test(sizeStr) && !/x\d+[\s"]*$/i.test(sizeStr) === false;
+  return /^\d[\d\-\/]*["\s]*x\s*\d[\d\-\/]*["\s]*$/.test(sizeStr.trim()) && !isBoltSize(sizeStr);
 }
 
 function isBoltSize(sizeStr: string): boolean {
@@ -3807,7 +3813,7 @@ Picou Group Contractors`;
     }
 
     // Compute blended rate from ST/OT/DT percentages
-    const stPercent = (100 - overtimePercent - doubleTimePercent) / 100;
+    const stPercent = Math.max(0, (100 - overtimePercent - doubleTimePercent) / 100);
     const otPercent = overtimePercent / 100;
     const dtPercent = doubleTimePercent / 100;
     const blendedRate = (laborRate * stPercent) + (overtimeRate * otPercent) + (doubleTimeRate * dtPercent);
@@ -4039,6 +4045,16 @@ Picou Group Contractors`;
       if (!data || typeof data !== "object") {
         return res.status(400).json({ message: "Invalid backup data" });
       }
+      // Validate backup structure
+      const requiredKeys = ["takeoffProjects", "estimateProjects", "costDatabase", "purchaseHistory", "completedProjects"];
+      for (const key of requiredKeys) {
+        if (data[key] !== undefined && !Array.isArray(data[key])) {
+          return res.status(400).json({ message: `Invalid backup: "${key}" must be an array` });
+        }
+      }
+      if (!requiredKeys.some(k => Array.isArray(data[k]))) {
+        return res.status(400).json({ message: "Invalid backup: must contain at least one data array (takeoffProjects, estimateProjects, costDatabase, purchaseHistory, or completedProjects)" });
+      }
       const result = storage.restoreFromBackup(data);
       res.json({ message: "Restore complete", ...result });
     } catch (err: any) {
@@ -4110,8 +4126,8 @@ Picou Group Contractors`;
         // Clean up temp file
         try { fs.unlinkSync(filePath); } catch (e) { console.warn("Suppressed error:", e); }
 
-        // Map columns
-        let imported = 0;
+        // Map columns — collect valid entries, then bulk insert in transaction
+        const validEntries: Array<{description: string; size: string; category: string; unit: string; materialUnitCost: number; laborUnitCost: number; laborHoursPerUnit: number}> = [];
         for (const row of records) {
           const description = String(row.Description || row.description || row.DESCRIPTION || "").trim();
           const size = String(row.Size || row.size || row.SIZE || "").trim();
@@ -4122,10 +4138,10 @@ Picou Group Contractors`;
           const laborHoursPerUnit = parseFloat(row["Labor Hours"] || row.laborHoursPerUnit || row.labor_hours || 0) || 0;
 
           if (!description) continue;
-          storage.addCostEntry({ description, size, category, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit });
-          imported++;
+          validEntries.push({ description, size, category, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit });
         }
 
+        const imported = storage.addCostEntriesBulk(validEntries);
         res.json({ message: `Imported ${imported} entries`, imported });
       } catch (err: any) {
         res.status(500).json({ error: err.message || "Import failed" });

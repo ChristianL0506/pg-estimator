@@ -38,6 +38,7 @@ export default function EstimatingPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState("");
   const [showNewProject, setShowNewProject] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [quickEntry, setQuickEntry] = useState("");
   const [editingMarkups, setEditingMarkups] = useState(false);
   const [dbSearch, setDbSearch] = useState("");
@@ -338,9 +339,23 @@ export default function EstimatingPage() {
 
   return (
     <AppLayout subtitle="Estimating">
-      <div className="flex h-full">
+      <div className="flex h-full relative">
+        {/* Mobile sidebar toggle FAB */}
+        <button
+          className="md:hidden fixed bottom-6 right-4 z-50 w-12 h-12 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center"
+          aria-label={mobileSidebarOpen ? "Close estimate list" : "Open estimate list"}
+          onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}
+        >
+          {mobileSidebarOpen ? <XIcon size={20} /> : <Calculator size={20} />}
+        </button>
+
+        {/* Mobile overlay */}
+        {mobileSidebarOpen && (
+          <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={() => setMobileSidebarOpen(false)} />
+        )}
+
         {/* Left panel */}
-        <div className="w-60 shrink-0 border-r border-border flex flex-col">
+        <div className={`${mobileSidebarOpen ? "fixed inset-y-0 left-0 z-50 w-60" : "hidden"} md:relative md:block w-60 shrink-0 border-r border-border flex flex-col bg-card`}>
           <div className="p-3 border-b border-border flex items-center justify-between">
             <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Estimates</h2>
             <Button
@@ -424,7 +439,7 @@ export default function EstimatingPage() {
                 ) : (
                   <>
                     {/* Project info */}
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div key={p.id} className="grid grid-cols-2 md:grid-cols-4 gap-3">
                       {[
                         { field: "name", label: "Project Name", val: p.name },
                         { field: "projectNumber", label: "Project #", val: p.projectNumber || "" },

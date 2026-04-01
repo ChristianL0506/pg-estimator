@@ -163,7 +163,8 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
       <div className="flex h-full relative">
         {/* Mobile project list toggle */}
         <button
-          className="md:hidden fixed bottom-4 right-4 z-50 w-12 h-12 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center"
+          className="md:hidden fixed bottom-6 right-4 z-50 w-12 h-12 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center"
+          aria-label={mobileSidebarOpen ? "Close project list" : "Open project list"}
           onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}
         >
           {mobileSidebarOpen ? <XIcon size={20} /> : <FileText size={20} />}
@@ -227,14 +228,16 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                         className="text-muted-foreground hover:text-foreground p-0.5"
                         onClick={e => { e.stopPropagation(); archiveMutation.mutate({ id: p.id, archived: !p.archived }); }}
                         title={p.archived ? "Restore" : "Archive"}
+                        aria-label={p.archived ? `Restore ${p.name}` : `Archive ${p.name}`}
                       >
                         {p.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
                       </button>
                       <button
                         className="text-muted-foreground hover:text-destructive p-0.5"
-                        onClick={e => { e.stopPropagation(); deleteMutation.mutate(p.id); }}
+                        onClick={e => { e.stopPropagation(); if (window.confirm(`Delete "${p.name}"? This cannot be undone.`)) deleteMutation.mutate(p.id); }}
                         data-testid={`btn-delete-${p.id}`}
                         title="Delete permanently"
+                        aria-label={`Delete ${p.name}`}
                       >
                         <Trash2 size={13} />
                       </button>

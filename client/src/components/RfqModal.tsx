@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Copy, Mail, ExternalLink, Check, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,10 @@ export default function RfqModal({ open, onOpenChange, project }: RfqModalProps)
   const { toast } = useToast();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(project.items.map(i => i.id)));
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setSelectedIds(new Set(project.items.map(i => i.id)));
+  }, [project.id]);
 
   const allSelected = selectedIds.size === project.items.length;
   const noneSelected = selectedIds.size === 0;

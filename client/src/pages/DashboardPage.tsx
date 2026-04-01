@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import AppLayout from "@/components/AppLayout";
 import { apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import type { TakeoffProject, EstimateProject } from "@shared/schema";
 
 const DISCIPLINE_CONFIG = {
@@ -31,6 +32,7 @@ function relativeDate(dateStr: string): string {
 }
 
 export default function DashboardPage() {
+  const { toast } = useToast();
   const { data: takeoffs = [], isLoading: loadingTakeoffs } = useQuery<TakeoffProject[]>({
     queryKey: ["/api/takeoff/projects"],
   });
@@ -73,6 +75,7 @@ export default function DashboardPage() {
                   URL.revokeObjectURL(url);
                 } catch (err: any) {
                   console.error("Backup failed:", err);
+                  toast({ title: "Backup failed", description: err.message || "Could not download backup.", variant: "destructive" });
                 }
               }}
             >
