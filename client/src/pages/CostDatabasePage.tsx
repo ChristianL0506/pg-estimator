@@ -251,7 +251,7 @@ export default function CostDatabasePage() {
       <div className="p-5 max-w-7xl mx-auto space-y-5">
         {/* Stats row */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Card className="border-card-border">
+          <Card className="border-card-border shadow-sm">
             <CardContent className="p-4">
               <div className="flex items-center gap-2 text-muted-foreground mb-1">
                 <Package size={14} />
@@ -260,7 +260,7 @@ export default function CostDatabasePage() {
               <p className="text-2xl font-semibold">{records.length.toLocaleString()}</p>
             </CardContent>
           </Card>
-          <Card className="border-card-border">
+          <Card className="border-card-border shadow-sm">
             <CardContent className="p-4">
               <div className="flex items-center gap-2 text-muted-foreground mb-1">
                 <DollarSign size={14} />
@@ -269,7 +269,7 @@ export default function CostDatabasePage() {
               <p className="text-2xl font-semibold">{formatCurrency(totalSpend)}</p>
             </CardContent>
           </Card>
-          <Card className="border-card-border">
+          <Card className="border-card-border shadow-sm">
             <CardContent className="p-4">
               <div className="flex items-center gap-2 text-muted-foreground mb-1">
                 <Building2 size={14} />
@@ -278,7 +278,7 @@ export default function CostDatabasePage() {
               <p className="text-2xl font-semibold">{uniqueSuppliers}</p>
             </CardContent>
           </Card>
-          <Card className="border-card-border">
+          <Card className="border-card-border shadow-sm">
             <CardContent className="p-4">
               <div className="flex items-center gap-2 text-muted-foreground mb-1">
                 {alerts.length > 0 ? <AlertTriangle size={14} className="text-amber-500" /> : <BarChart3 size={14} />}
@@ -331,7 +331,7 @@ export default function CostDatabasePage() {
 
           {/* Purchase History Table */}
           <TabsContent value="history">
-            <Card className="border-card-border">
+            <Card className="border-card-border shadow-sm">
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -387,7 +387,7 @@ export default function CostDatabasePage() {
           {/* Supplier Comparison */}
           <TabsContent value="suppliers">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Card className="border-card-border">
+              <Card className="border-card-border shadow-sm">
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Supplier Spend Ranking</CardTitle></CardHeader>
                 <CardContent>
                   <div className="space-y-2">
@@ -413,7 +413,7 @@ export default function CostDatabasePage() {
                   </div>
                 </CardContent>
               </Card>
-              <Card className="border-card-border">
+              <Card className="border-card-border shadow-sm">
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Price Comparison (Same Items)</CardTitle></CardHeader>
                 <CardContent><PriceComparison records={records} /></CardContent>
               </Card>
@@ -587,7 +587,7 @@ export default function CostDatabasePage() {
 
               {/* Comparison section */}
               {vendorComparisons.length > 0 && (
-                <Card className="border-card-border">
+                <Card className="border-card-border shadow-sm">
                   <CardHeader className="pb-2"><CardTitle className="text-sm">Vendor Price Comparison</CardTitle></CardHeader>
                   <CardContent>
                     <div className="space-y-3">
@@ -620,7 +620,7 @@ export default function CostDatabasePage() {
               )}
 
               {/* Quote list */}
-              <Card className="border-card-border">
+              <Card className="border-card-border shadow-sm">
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>

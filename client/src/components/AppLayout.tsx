@@ -1,7 +1,7 @@
 import { Link, useLocation } from "wouter";
 import { useState, useEffect } from "react";
 import {
-  LayoutDashboard, Wrench, Building2, HardHat, Calculator, Moon, Sun, Menu, X, FileText, Loader2, Settings, DollarSign, Clock, Target
+  LayoutDashboard, Wrench, Building2, HardHat, Calculator, Moon, Sun, Menu, X, FileText, Loader2, Settings, DollarSign, Clock, Target, Sparkles
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useQuery } from "@tanstack/react-query";
@@ -62,10 +62,10 @@ export default function AppLayout({ children, subtitle }: AppLayoutProps) {
           ${mobileOpen ? "translate-x-0" : "-translate-x-full"} md:relative md:translate-x-0`}
       >
         {/* Logo / Branding */}
-        <div className="flex items-center gap-3 px-4 py-4 border-b border-sidebar-border">
-          <img src={logoPic} alt="Picou Group" className="h-8 w-8 rounded object-contain" />
+        <div className="flex items-center gap-3 px-4 py-5 border-b border-sidebar-border bg-gradient-to-r from-sidebar to-transparent">
+          <img src={logoPic} alt="Picou Group" className="h-9 w-9 rounded-lg object-contain shadow-sm ring-1 ring-black/5 dark:ring-white/10" />
           <div className="min-w-0">
-            <p className="text-xs font-semibold leading-tight text-sidebar-foreground truncate">Picou Group</p>
+            <p className="text-sm font-bold leading-tight text-sidebar-foreground truncate">Picou Group</p>
             <p className="text-[10px] text-muted-foreground truncate">Takeoff & Estimating</p>
           </div>
         </div>
@@ -79,22 +79,28 @@ export default function AppLayout({ children, subtitle }: AppLayoutProps) {
                 <a
                   onClick={() => setMobileOpen(false)}
                   data-testid={`nav-${label.toLowerCase()}`}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors cursor-pointer
+                  className={`group relative flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all duration-150 cursor-pointer
                     ${active
-                      ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                      ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"
                       : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                     }`}
                 >
-                  <Icon size={16} className="shrink-0" />
+                  {active && (
+                    <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full bg-[#01696F] dark:bg-teal-400" />
+                  )}
+                  <Icon size={16} className={`shrink-0 transition-colors ${active ? "text-sidebar-primary-foreground" : "text-muted-foreground group-hover:text-sidebar-accent-foreground"}`} />
                   {label}
                 </a>
               </Link>
             );
           })}
 
+          {/* Divider */}
+          <div className="my-2 mx-3 border-t border-sidebar-border" />
+
           {/* Recent Projects section */}
           {sidebarProjects.length > 0 && (
-            <div className="pt-3 mt-2 border-t border-sidebar-border">
+            <div className="pt-1">
               <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider px-3 mb-1">Recent Projects</p>
               {sidebarProjects.map(p => (
                 <a
@@ -104,11 +110,11 @@ export default function AppLayout({ children, subtitle }: AppLayoutProps) {
                     const basePath = disciplinePath[p.discipline] || "/mechanical";
                     setLocation(`${basePath}?project=${p.id}`);
                   }}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground cursor-pointer transition-colors"
+                  className="group flex items-center gap-2 px-3 py-1.5 rounded-md text-xs text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground cursor-pointer transition-all duration-150"
                 >
-                  <FileText size={12} className="shrink-0 text-muted-foreground" />
+                  <FileText size={12} className="shrink-0 text-muted-foreground group-hover:text-sidebar-accent-foreground transition-colors" />
                   <span className="truncate flex-1">{p.name}</span>
-                  <span className="text-[9px] text-muted-foreground shrink-0">{p.items.length} items</span>
+                  <span className="text-[9px] text-muted-foreground shrink-0">{p.items.length}</span>
                 </a>
               ))}
             </div>
@@ -116,7 +122,11 @@ export default function AppLayout({ children, subtitle }: AppLayoutProps) {
         </nav>
 
         {/* Footer */}
-        <div className="px-4 pb-4 pt-2 border-t border-sidebar-border">
+        <div className="px-4 pb-3 pt-2 border-t border-sidebar-border space-y-2">
+          <div className="flex items-center gap-1.5 px-1">
+            <Sparkles size={10} className="text-teal-500 dark:text-teal-400" />
+            <p className="text-[10px] text-muted-foreground">Powered by AI</p>
+          </div>
           <PerplexityAttribution />
         </div>
       </aside>

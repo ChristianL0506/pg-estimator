@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
-import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon } from "lucide-react";
+import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon , FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -195,9 +195,12 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                 {[1, 2, 3].map(i => <Skeleton key={i} className="h-16 rounded" />)}
               </div>
             ) : projects.filter(p => showArchived || !p.archived).length === 0 ? (
-              <div className="p-4 text-xs text-muted-foreground text-center mt-4">
-                No {discipline} projects yet.
-                <br />Upload a PDF to start.
+              <div className="p-4 flex flex-col items-center text-center mt-4">
+                <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mb-2">
+                  <FolderOpen size={16} className="text-muted-foreground" />
+                </div>
+                <p className="text-xs font-medium text-foreground">No {discipline} projects yet</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">Upload a PDF to start.</p>
               </div>
             ) : (
               <div className="p-2 space-y-1">
@@ -344,7 +347,7 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
 
                 {/* Verification Viewer */}
                 {verifyOpen && availablePages.length > 0 && (
-                  <Card className="border-card-border">
+                  <Card className="border-card-border shadow-sm">
                     <CardHeader className="p-3 pb-2">
                       <CardTitle className="text-xs flex items-center gap-1.5">
                         <Image size={12} /> Page Verification Viewer

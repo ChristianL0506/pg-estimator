@@ -335,10 +335,10 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
 
       {/* Main upload zone */}
       <div
-        className={`relative rounded-lg border-2 border-dashed p-8 transition-colors
+        className={`relative rounded-xl border-2 border-dashed p-8 transition-all duration-200
           ${isProcessing && state !== "done" && state !== "error"
             ? "cursor-not-allowed opacity-80 border-muted bg-muted/10"
-            : isDragOver ? "border-primary bg-primary/5 cursor-pointer" : "border-border hover:border-primary/60 hover:bg-accent/30 cursor-pointer"
+            : isDragOver ? "border-primary bg-primary/5 shadow-lg shadow-primary/10 scale-[1.01] cursor-pointer" : "border-border hover:border-primary/60 hover:bg-accent/30 hover:shadow-md cursor-pointer"
           }
           ${state !== "idle" ? "cursor-default" : ""}`}
         onDrop={handleDrop}
@@ -378,7 +378,7 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
               <FileText size={24} className="text-primary" />
             </div>
             <div className="w-full max-w-sm">
-              <Progress value={progress} className="h-2" />
+              <Progress value={progress} className="h-2.5 progress-gradient" />
               <p className="text-xs text-muted-foreground mt-2">{statusMsg}</p>
               {/* Poll connection warning */}
               {pollWarning && (
@@ -412,11 +412,11 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
         )}
 
         {state === "done" && (
-          <div className="flex flex-col items-center gap-3 text-center">
-            <div className="w-14 h-14 rounded-full bg-green-500/10 flex items-center justify-center">
-              <CheckCircle2 size={24} className="text-green-500" />
+          <div className="flex flex-col items-center gap-3 text-center animate-[fade-in_0.4s_ease-out]">
+            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-green-400 to-emerald-500 flex items-center justify-center shadow-lg shadow-green-500/25">
+              <CheckCircle2 size={28} className="text-white" />
             </div>
-            <p className="text-sm font-medium text-green-600 dark:text-green-400">{statusMsg}</p>
+            <p className="text-sm font-semibold text-green-600 dark:text-green-400">{statusMsg}</p>
             {warnings.length > 0 && (
               <div className="flex items-start gap-2 text-left rounded-md bg-yellow-500/10 border border-yellow-500/30 p-2 max-w-sm">
                 <AlertTriangle size={14} className="text-yellow-600 dark:text-yellow-400 mt-0.5 shrink-0" />

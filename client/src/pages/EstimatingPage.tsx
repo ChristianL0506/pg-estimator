@@ -357,10 +357,12 @@ export default function EstimatingPage() {
             {isLoading ? (
               <div className="p-3 space-y-2">{[1, 2].map(i => <Skeleton key={i} className="h-14 rounded" />)}</div>
             ) : estimates.length === 0 ? (
-              <div className="p-4 text-xs text-muted-foreground text-center mt-4">
-                No estimates yet.
-                <br />
-                <button className="text-primary mt-1 hover:underline" onClick={() => setShowNewProject(true)}>Create one</button>
+              <div className="p-4 flex flex-col items-center text-center mt-4">
+                <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mb-2">
+                  <Calculator size={16} className="text-muted-foreground" />
+                </div>
+                <p className="text-xs font-medium text-foreground">No estimates yet</p>
+                <button className="text-xs text-primary mt-1 hover:underline" onClick={() => setShowNewProject(true)}>Create one</button>
               </div>
             ) : (
               <div className="p-2 space-y-1">
@@ -408,9 +410,13 @@ export default function EstimatingPage() {
             <TabsContent value="estimate" className="flex-1 m-0">
               <div className="p-5 space-y-4">
                 {!selectedId ? (
-                  <Card className="border-dashed border-card-border">
-                    <CardContent className="p-8 text-center text-muted-foreground text-sm">
-                      Select an estimate from the left, or create a new one.
+                  <Card className="border-dashed border-card-border shadow-sm">
+                    <CardContent className="p-10 flex flex-col items-center justify-center text-center">
+                      <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
+                        <Calculator size={20} className="text-muted-foreground" />
+                      </div>
+                      <p className="text-sm font-medium text-foreground">No estimate selected</p>
+                      <p className="text-xs text-muted-foreground mt-1">Select an estimate from the left, or create a new one.</p>
                     </CardContent>
                   </Card>
                 ) : !p ? (
@@ -436,6 +442,36 @@ export default function EstimatingPage() {
                         </div>
                       ))}
                     </div>
+
+                    {/* Summary Cards */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <Card className="border-l-4 border-l-blue-500 shadow-sm">
+                        <CardContent className="p-3">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Material</p>
+                          <p className="text-lg font-bold font-mono text-blue-600 dark:text-blue-400">{fmt$(totalMaterial)}</p>
+                        </CardContent>
+                      </Card>
+                      <Card className="border-l-4 border-l-orange-500 shadow-sm">
+                        <CardContent className="p-3">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Labor</p>
+                          <p className="text-lg font-bold font-mono text-orange-600 dark:text-orange-400">{fmt$(totalLabor)}</p>
+                        </CardContent>
+                      </Card>
+                      <Card className="border-l-4 border-l-purple-500 shadow-sm">
+                        <CardContent className="p-3">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Manhours</p>
+                          <p className="text-lg font-bold font-mono text-purple-600 dark:text-purple-400">{totalHours.toFixed(1)}<span className="text-xs font-normal text-muted-foreground ml-1">hrs</span></p>
+                        </CardContent>
+                      </Card>
+                      <Card className="border-l-4 border-l-teal-500 shadow-sm">
+                        <CardContent className="p-3">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Grand Total</p>
+                          <p className="text-lg font-bold font-mono text-teal-600 dark:text-teal-400">{fmt$(grandTotal)}</p>
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    <Separator />
 
                     {/* LABOR ASSUMPTIONS — must be set BEFORE estimate */}
                     <Card className="border-primary/30 bg-primary/[0.02]">
@@ -1154,6 +1190,16 @@ export default function EstimatingPage() {
                     </div>
 
                     {/* Crew Planner */}
+                    <Separator />
+                    <div className="flex items-center gap-2 pt-2">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-100 dark:bg-indigo-900/40 flex items-center justify-center">
+                        <Calculator size={14} className="text-indigo-600 dark:text-indigo-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-semibold">Crew Planner</h3>
+                        <p className="text-[10px] text-muted-foreground">Schedule labor and crew assignments</p>
+                      </div>
+                    </div>
                     <CrewPlanner
                       totalLaborHours={totalHours}
                       laborRate={p.laborRate}

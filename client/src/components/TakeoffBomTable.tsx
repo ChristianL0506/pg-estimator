@@ -86,8 +86,9 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
 
   if (!items.length) {
     return (
-      <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">
-        No items in this project.
+      <div className="flex flex-col items-center justify-center h-32 text-center">
+        <p className="text-sm font-medium text-foreground">No items in this project</p>
+        <p className="text-xs text-muted-foreground mt-1">Upload a PDF to extract items.</p>
       </div>
     );
   }
@@ -121,7 +122,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
   return (
     <div className="space-y-2">
       {/* Filter bar */}
-      <div className="flex items-center gap-2 flex-wrap md:flex-nowrap overflow-x-auto border border-border bg-muted/20 rounded-md px-3 py-2">
+      <div className="flex items-center gap-2 flex-wrap md:flex-nowrap overflow-x-auto border border-border bg-muted/30 rounded-lg px-3 py-2.5 shadow-sm">
         <span className="text-xs text-muted-foreground font-medium shrink-0">Filters:</span>
 
         {/* Category filter */}
@@ -247,7 +248,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
       </div>
 
       {/* Desktop table layout (>= md) */}
-      <div className="overflow-auto rounded-md border border-border hidden md:block">
+      <div className="overflow-auto rounded-lg border border-border hidden md:block shadow-sm table-zebra table-hover-smooth">
         <TooltipProvider delayDuration={200}>
         <Table>
           <TableHeader>

@@ -159,19 +159,19 @@ export default function ProjectHistoryPage() {
 
         {/* Summary stats */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <Card className="border-card-border">
+          <Card className="border-card-border shadow-sm">
             <CardContent className="p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Total Projects</p>
               <p className="text-2xl font-bold text-foreground">{totalProjects}</p>
             </CardContent>
           </Card>
-          <Card className="border-card-border">
+          <Card className="border-card-border shadow-sm">
             <CardContent className="p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Total Manhours</p>
               <p className="text-2xl font-bold text-foreground">{fmtNum(totalManhours)}</p>
             </CardContent>
           </Card>
-          <Card className="border-card-border">
+          <Card className="border-card-border shadow-sm">
             <CardContent className="p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Avg Cost / MH</p>
               <p className="text-2xl font-bold text-foreground">{fmt$(avgCostPerMH)}</p>
@@ -192,7 +192,7 @@ export default function ProjectHistoryPage() {
         </div>
 
         {/* Quick Re-Estimate */}
-        <Card className="border-card-border">
+        <Card className="border-card-border shadow-sm">
           <CardHeader className="p-4 pb-2 cursor-pointer" onClick={() => setShowQuickEstimate(!showQuickEstimate)}>
             <CardTitle className="text-sm flex items-center gap-2">
               <Calculator size={14} className="text-primary" />
@@ -438,7 +438,7 @@ function ProjectCard({ project, onDelete }: { project: CompletedProject; onDelet
   const tags = (project.tags || "").split(",").map(t => t.trim()).filter(Boolean);
 
   return (
-    <Card className="border-card-border hover:border-primary/30 transition-colors">
+    <Card className="border-card-border shadow-sm hover:shadow-md transition-all hover:border-primary/30">
       <CardContent className="p-4">
         {/* Header row */}
         <div className="flex items-start justify-between gap-3">

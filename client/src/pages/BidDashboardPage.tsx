@@ -233,7 +233,10 @@ export default function BidDashboardPage() {
                 </thead>
                 <tbody>
                   {bids.length === 0 ? (
-                    <tr><td colSpan={9} className="text-center py-8 text-muted-foreground">No bids yet. Add your first bid above.</td></tr>
+                    <tr><td colSpan={9} className="text-center py-10 text-muted-foreground">
+                      <p className="text-sm font-medium text-foreground">No bids yet</p>
+                      <p className="text-xs text-muted-foreground mt-1">Add your first bid using the form above.</p>
+                    </td></tr>
                   ) : bids.map((bid: any) => (
                     <tr key={bid.id} className="border-b hover:bg-muted/20">
                       <td className="px-3 py-2 font-medium">{bid.projectName}</td>
