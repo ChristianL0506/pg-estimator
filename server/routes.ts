@@ -413,6 +413,131 @@ function isTitlePage(text: string): boolean {
   return false;
 }
 
+
+// ============================================================
+// CALIBRATION DATA — Known-good factors from completed projects
+// ============================================================
+
+const CALIBRATION_DATA: Record<string, {
+  project: string;
+  benchmark: { actual_ipmh: number; target_ipmh: number; variance_pct: number; total_mh: number };
+  ss_weld_factors: Record<string, { mh_per_weld: number; schedule: string; material: string }>;
+  bolt_methodology: string;
+  small_bore_threshold: number;
+  pipe_scope_note: string;
+}> = {
+  "stolthaven_phase6": {
+    project: "Stolthaven Phase 6 Expansion",
+    benchmark: {
+      actual_ipmh: 0.437,
+      target_ipmh: 0.45,
+      variance_pct: 3.8,
+      total_mh: 56412,
+    },
+    ss_weld_factors: {
+      "3": { mh_per_weld: 4.68, schedule: "10S", material: "SS316" },
+      "4": { mh_per_weld: 5.56, schedule: "10S", material: "SS316" },
+    },
+    bolt_methodology: "field_only",
+    small_bore_threshold: 1.5,
+    pipe_scope_note: "Branch ISOs only — rack/header pipe tracked separately",
+  }
+};
+
+function isSmallBoreRollup(item: any): boolean {
+  const nps = parseSizeNPSFromString(item.size || "");
+  if (nps > 1.5) return false;
+  const desc = (item.description || "").toLowerCase();
+  const cat = (item.category || "").toLowerCase();
+  if (/\b(plug|nipple|coupling|sockolet|weldolet|threadolet)\b/.test(desc)) return true;
+  if (cat === "coupling" && nps <= 1.5) return true;
+  return false;
+}
+
+function detectValveType(description: string): "actuated" | "manual" {
+  const d = description.toUpperCase();
+  if (/\bAOV\b/.test(d)) return "actuated";
+  if (/\bMOV\b/.test(d)) return "actuated";
+  if (/\bACTUATED\b/.test(d)) return "actuated";
+  if (/\bMOTOR\s*OPERATED\b/.test(d)) return "actuated";
+  if (/\bPNEUMATIC\b/.test(d)) return "actuated";
+  if (/\bCONTROL\s*VALVE\b/.test(d)) return "actuated";
+  if (/\bCV[-\s]/.test(d)) return "actuated";
+  return "manual";
+}
+
+function detectBranchISOPattern(items: any[]): { detected: boolean; note: string } {
+  const pipeItems = items.filter((it: any) => (it.category || "").toLowerCase() === "pipe");
+  const reducerItems = items.filter((it: any) => {
+    const cat = (it.category || "").toLowerCase();
+    return cat === "reducer" || (it.description || "").toLowerCase().includes("reducer");
+  });
+  
+  if (pipeItems.length === 0) return { detected: false, note: "" };
+  
+  const allSmallPipe = pipeItems.every((it: any) => {
+    const nps = parseSizeNPSFromString(it.size || "");
+    return nps <= 4;
+  });
+  
+  if (allSmallPipe && reducerItems.length > 0) {
+    return {
+      detected: true,
+      note: "These appear to be branch ISOs. Header/rack pipe may not be included. Add rack pipe quantities separately if needed."
+    };
+  }
+  
+  return { detected: false, note: "" };
+}
+
+function buildCalibrationSummary(items: any[]): any {
+  let totalFieldBoltUps = 0;
+  let totalShopBoltUps = 0;
+  let totalFieldWelds = 0;
+  let totalShopWelds = 0;
+  const valveSummary: { manual: Record<string, number>; actuated: Record<string, number> } = { manual: {}, actuated: {} };
+  let smallBoreItems = 0;
+  
+  for (const item of items) {
+    const cat = (item.category || "").toLowerCase();
+    const loc = item.installLocation || "shop";
+    const qty = item.quantity || 0;
+    const size = item.size || "unknown";
+    
+    if (cat === "bolt" || (item.description || "").toLowerCase().includes("bolt")) {
+      if (loc === "field") totalFieldBoltUps += qty;
+      else totalShopBoltUps += qty;
+    }
+    
+    if (cat === "weld" || (item.description || "").toLowerCase().includes("weld")) {
+      if (loc === "field") totalFieldWelds += qty;
+      else totalShopWelds += qty;
+    }
+    
+    if (cat === "valve") {
+      const vType = item.valveType || "manual";
+      const bucket = vType === "actuated" ? valveSummary.actuated : valveSummary.manual;
+      bucket[size] = (bucket[size] || 0) + qty;
+    }
+    
+    if (item.smallBoreRollup) smallBoreItems += qty;
+  }
+  
+  const branchISO = detectBranchISOPattern(items);
+  
+  return {
+    totalFieldBoltUps,
+    totalShopBoltUps,
+    totalFieldWelds,
+    totalShopWelds,
+    valveSummary,
+    smallBoreItems,
+    smallBoreRolledUp: smallBoreItems > 0,
+    branchISODetected: branchISO.detected,
+    rackPipeNote: branchISO.detected ? branchISO.note : undefined,
+  };
+}
+
 // ============================================================
 // MECHANICAL BOM EXTRACTION
 // ============================================================
@@ -1889,6 +2014,9 @@ async function extractMechanicalChunk(
           notes: `Sheet ${page.globalPageNum} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
           revisionClouded: entry.clouded === true,
+        installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
+        valveType: category === "valve" ? detectValveType(entry.description) : undefined,
+        smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
         };
         if (qtyNotes.length > 0) {
           rawItem._validationNotes = rawItem._validationNotes || [];
@@ -1956,6 +2084,9 @@ async function extractMechanicalChunk(
           notes: `Sheet ${page.globalPageNum} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
           revisionClouded: entry.clouded === true,
+        installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
+        valveType: category === "valve" ? detectValveType(entry.description) : undefined,
+        smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
         };
         if (qtyNotes.length > 0) {
           rawItem._validationNotes = rawItem._validationNotes || [];
@@ -2559,6 +2690,12 @@ async function processUploadedPdf(
     ? [...warnings, `${chunksFailed} of ${chunks.length} chunks had issues. ${chunksCompleted} chunks processed successfully.`]
     : warnings;
 
+  // Calibration: build cross-validation summary
+  const calibrationSummary = buildCalibrationSummary(itemsWithIds);
+  if (calibrationSummary.branchISODetected) {
+    warnings.push(calibrationSummary.rackPipeNote || "Branch ISOs detected - header/rack pipe may not be included");
+  }
+
   console.log(`Done: ${itemsWithIds.length} items from ${pageCount} pages`);
 
   storage.setJobProgress(jobId, {
@@ -2745,6 +2882,11 @@ function calculateBillLaborHours(
 
   const catLower = (item.category || "").toLowerCase();
   const descLower = (item.description || "").toLowerCase();
+
+  // Calibration: small-bore items have MH rolled into weld factors
+  if (item.smallBoreRollup) {
+    return { mh: 0, calcBasis: "Included in weld factor (small-bore rollup)", sizeMatchExact: true };
+  }
   let sizeMatchExact = true;
 
   // Helper for size warnings
@@ -3057,7 +3199,19 @@ function calculateJustinLaborHours(
     if (match) {
       const schedNorm = normalizeSchedule(schedule);
       let mh = 0; let col = "";
-      if (material === "SS") { mh = match.val.ss_mh_per_weld || 0; col = "SS"; }
+      if (material === "SS") {
+        // Check calibrated SS weld factors first
+        const sizeKey = parseSizeNPS(item.size || "").toString();
+        const calibProfile = Object.values(CALIBRATION_DATA)[0];
+        const calibFactor = calibProfile?.ss_weld_factors?.[sizeKey];
+        if (calibFactor) {
+          mh = calibFactor.mh_per_weld;
+          col = `SS-CAL(${calibProfile.project.slice(0,15)})`;
+        } else {
+          mh = match.val.ss_mh_per_weld || 0;
+          col = "SS";
+        }
+      }
       else if (schedNorm === "80" || schedNorm === "XH") { mh = match.val.sch80_mh_per_weld || 0; col = "SCH80"; }
       else { mh = match.val.std_mh_per_weld || 0; col = "STD"; }
       const warn = jSizeWarn(match);
@@ -3082,6 +3236,10 @@ function calculateJustinLaborHours(
       const rating = normalizeRating(item.rating || "150");
       const mh = Number(rating) >= 300 ? (match.val["300_mh_per_set"] || 0) : (match.val["150_mh_per_set"] || 0);
       const warn = jSizeWarn(match);
+      // Calibration: shop bolt-ups have MH included in shop fab
+      if (item.installLocation === "shop") {
+        return { mh: 0, calcBasis: `Justin: Bolt ${match.matchKey} (${rating}#) shop bolt-up (MH included in shop fab)${warn}`, sizeMatchExact: match.exact };
+      }
       return { mh, calcBasis: `Justin: Bolt ${match.matchKey} (${rating}#) → ${mh} MH/set${warn}`, sizeMatchExact: match.exact };
     }
   }
@@ -3209,6 +3367,12 @@ function inferWeldsFromFittings(items: any[]): any[] {
     const desc = (item.description || "").toLowerCase();
     const qty = item.quantity || 0;
     const size = item.size || "";
+
+    // Skip small-bore items (<=1.5") — their MH is rolled into weld factors
+    // Exception: branch connections like sockolets that DO need a weld on the header
+    if (isSmallBoreRollup(item) && !desc.includes("sockolet") && !desc.includes("weldolet")) {
+      continue;
+    }
 
     if (cat === "elbow" || desc.includes("elbow") || desc.includes("ell")) {
       welds.push(computeEstimateItem({
@@ -4898,6 +5062,22 @@ Picou Group Contractors`;
     const deleted = storage.deleteBid(req.params.id);
     if (!deleted) return res.status(404).json({ error: "Bid not found" });
     res.json({ deleted: true });
+  });
+
+
+  // ===== CALIBRATION PROFILES =====
+
+  app.get("/api/calibration-profiles", (_req, res) => {
+    const profiles = Object.entries(CALIBRATION_DATA).map(([key, data]) => ({
+      id: key,
+      project: data.project,
+      benchmark: data.benchmark,
+      ssWeldFactors: data.ss_weld_factors,
+      boltMethodology: data.bolt_methodology,
+      smallBoreThreshold: data.small_bore_threshold,
+      pipeScopeNote: data.pipe_scope_note,
+    }));
+    res.json(profiles);
   });
 
   return httpServer;
