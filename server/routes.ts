@@ -1121,9 +1121,17 @@ async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promi
   const jobDir = path.join(RENDER_DIR, Date.now().toString());
   fs.mkdirSync(jobDir, { recursive: true });
 
-  await execFileAsync("pdftoppm", ["-r", "300", "-png", pdfPath, path.join(jobDir, "page")], {
-    maxBuffer: 200 * 1024 * 1024, timeout: 180000,
-  });
+  // Render page-by-page to avoid OOM on limited-memory servers
+  for (let p = 1; p <= pageCount; p++) {
+    try {
+      await execFileAsync("pdftoppm", [
+        "-r", "200", "-png", "-f", String(p), "-l", String(p),
+        pdfPath, path.join(jobDir, "page")
+      ], { maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
+    } catch (err: any) {
+      console.warn(`  pdftoppm page ${p} failed: ${err.message?.substring(0, 100)}`);
+    }
+  }
 
     await processRenderedPages(jobDir, "bom");
 
@@ -1152,9 +1160,17 @@ async function renderBomWithFullPages(pdfPath: string, pageCount: number): Promi
   const jobDir = path.join(RENDER_DIR, Date.now().toString() + "_cloud");
   fs.mkdirSync(jobDir, { recursive: true });
 
-  await execFileAsync("pdftoppm", ["-r", "300", "-png", pdfPath, path.join(jobDir, "page")], {
-    maxBuffer: 200 * 1024 * 1024, timeout: 180000,
-  });
+  // Render page-by-page to avoid OOM on limited-memory servers
+  for (let p = 1; p <= pageCount; p++) {
+    try {
+      await execFileAsync("pdftoppm", [
+        "-r", "200", "-png", "-f", String(p), "-l", String(p),
+        pdfPath, path.join(jobDir, "page")
+      ], { maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
+    } catch (err: any) {
+      console.warn(`  pdftoppm page ${p} (cloud) failed: ${err.message?.substring(0, 100)}`);
+    }
+  }
 
   // Crop BOM area but KEEP the full page image for cloud detection
     await processRenderedPages(jobDir, "bom+full");
@@ -1196,9 +1212,18 @@ async function renderFullPageImages(pdfPath: string, pageCount: number, dpi = 30
   const jobDir = path.join(RENDER_DIR, Date.now().toString() + "_" + Math.random().toString(36).slice(2));
   fs.mkdirSync(jobDir, { recursive: true });
 
-  await execFileAsync("pdftoppm", ["-r", String(dpi), "-png", pdfPath, path.join(jobDir, "page")], {
-    maxBuffer: 300 * 1024 * 1024, timeout: 240000,
-  });
+  // Render page-by-page to avoid OOM on limited-memory servers
+  const effectiveDpi = Math.min(dpi, 200); // Cap DPI for cloud deployment
+  for (let p = 1; p <= pageCount; p++) {
+    try {
+      await execFileAsync("pdftoppm", [
+        "-r", String(effectiveDpi), "-png", "-f", String(p), "-l", String(p),
+        pdfPath, path.join(jobDir, "page")
+      ], { maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
+    } catch (err: any) {
+      console.warn(`  pdftoppm page ${p} (full) failed: ${err.message?.substring(0, 100)}`);
+    }
+  }
 
     await processRenderedPages(jobDir, "ocr-only");
 
@@ -2310,8 +2335,11 @@ async function processUploadedPdf(
         renderedChunks.push({ chunkIndex: i, rendered });
         console.log(`  Render chunk ${chunkNum} done`);
       } catch (renderErr: any) {
-        console.error(`  Render chunk ${chunkNum} failed:`, renderErr.message || renderErr);
-        const renderWarning = `Render chunk ${chunkNum} (pages ${chunk.startPage}-${chunk.endPage}) failed: ${renderErr.message || "Unknown error"}`;
+        const errMsg = renderErr.message || String(renderErr);
+        const errStderr = renderErr.stderr?.toString().substring(0, 500) || "";
+        console.error(`  Render chunk ${chunkNum} failed:`, errMsg);
+        if (errStderr) console.error(`  stderr: ${errStderr}`);
+        const renderWarning = `Render chunk ${chunkNum} (pages ${chunk.startPage}-${chunk.endPage}) failed: ${errMsg}${errStderr ? " | stderr: " + errStderr.substring(0, 200) : ""}`;
         if (!warnings.includes(renderWarning)) warnings.push(renderWarning);
       }
 
@@ -2358,7 +2386,7 @@ async function processUploadedPdf(
       pagesProcessed: pageCount,
       totalPages: pageCount,
       itemsFound: 0,
-      error: `All ${chunks.length} render chunks failed. No pages could be prepared for extraction.`,
+      error: `All ${chunks.length} render chunks failed. No pages could be prepared for extraction.${warnings.length > 0 ? " Details: " + warnings[0] : ""}`,
       warnings: warnings.length > 0 ? warnings : undefined,
     });
     try { if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath); } catch (e) { console.warn("Suppressed error:", e); }
@@ -3453,6 +3481,36 @@ function inferWeldsFromFittings(items: any[]): any[] {
 // ============================================================
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+
+  // ===== PUBLIC DIAGNOSTIC ENDPOINT (before auth) =====
+  app.get("/api/system-check", (_req, res) => {
+    const checks: Record<string, { installed: boolean; version?: string; error?: string }> = {};
+    for (const tool of ["pdftoppm", "qpdf", "convert", "identify", "tesseract"]) {
+      try {
+        const ver = execFileSync(tool, tool === "qpdf" ? ["--version"] : ["--version"], {
+          timeout: 5000, encoding: "utf-8",
+        }).toString().trim().split("\n")[0];
+        checks[tool] = { installed: true, version: ver };
+      } catch (err: any) {
+        // Some tools return version on stderr or exit non-zero
+        const stderr = err.stderr?.toString().trim().split("\n")[0] || "";
+        if (stderr && (stderr.includes("version") || stderr.includes("Version") || stderr.includes("ImageMagick") || stderr.includes("poppler") || stderr.includes("tesseract"))) {
+          checks[tool] = { installed: true, version: stderr };
+        } else if (err.status !== undefined && err.stdout) {
+          checks[tool] = { installed: true, version: err.stdout.toString().trim().split("\n")[0] };
+        } else {
+          checks[tool] = { installed: false, error: err.message?.substring(0, 100) || "not found" };
+        }
+      }
+    }
+    const allInstalled = Object.values(checks).every(c => c.installed);
+    res.json({
+      status: allInstalled ? "ok" : "missing_dependencies",
+      runtime: process.env.RENDER ? "render" : "local",
+      nodeVersion: process.version,
+      tools: checks,
+    });
+  });
 
   // Apply auth middleware
   app.use(authMiddleware);
