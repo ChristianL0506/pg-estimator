@@ -1845,57 +1845,49 @@ function computeConfidenceScore(item: any, pdfQuality?: "vector" | "clean_scan" 
   let score = 100;
   const notes: string[] = [];
 
-  // Size validation
+  // Size validation — only penalize truly missing or invalid sizes
   if (!item.size || item.size === "N/A" || item.size.trim() === "") {
-    score -= 40;
+    score -= 30;
     notes.push("Missing size");
   } else if (item.category !== "bolt" && !isValidNPS(item.size) && !/x/i.test(item.size)) {
-    score -= 20;
+    score -= 10;
     notes.push("Size not standard NPS");
   }
 
-  // Description quality
-  if (!item.description || item.description.length < 10) {
-    score -= 30;
-    notes.push("Description too short");
-  } else if (item.description.length < 20) {
-    score -= 10;
-    notes.push("Description may be incomplete");
+  // Description quality — only penalize very short or empty descriptions
+  if (!item.description || item.description.length < 5) {
+    score -= 25;
+    notes.push("Description too short or missing");
   }
-  if (item.description && !/ASME|ASTM/.test(item.description.toUpperCase())) {
-    score -= 10;
-    notes.push("No ASME/ASTM spec reference");
-  }
+  // ASME/ASTM spec reference is nice to have but not required — many valid
+  // BOM entries use abbreviated descriptions without full spec callouts
 
-  // Quantity plausibility
+  // Quantity plausibility — only flag truly implausible values
   const isPipe = item.category === "pipe";
-  if (isPipe && item.quantity > 500) {
-    score -= 30;
-    notes.push("Pipe qty >500 LF");
-  } else if (isPipe && item.quantity > 100) {
-    score -= 10;
-    notes.push("Pipe qty >100 LF");
+  if (isPipe && item.quantity > 1000) {
+    score -= 20;
+    notes.push("Pipe qty >1000 LF — verify");
   }
-  if (!isPipe && item.quantity > 100) {
-    score -= 15;
-    notes.push("Non-pipe qty >100");
+  if (!isPipe && item.quantity > 500) {
+    score -= 10;
+    notes.push("Large qty — verify count");
   }
   if (item.quantity <= 0) {
-    score -= 40;
+    score -= 35;
     notes.push("Qty is 0 or negative");
   }
 
   // Category consistency
   if (item.category === "other") {
-    score -= 15;
+    score -= 10;
     notes.push("Unclassified category");
   }
 
   // Incorporate validation flags from validateExtractedItems
   if (item._validationFlag === "low") {
-    score = Math.min(score, 50);
+    score = Math.min(score, 45);
   } else if (item._validationFlag === "medium") {
-    score = Math.min(score, 75);
+    score = Math.min(score, 70);
   }
 
   // Add validation notes
@@ -1906,21 +1898,29 @@ function computeConfidenceScore(item: any, pdfQuality?: "vector" | "clean_scan" 
   // Size warning from autoCorrect
   if (item._sizeWarning) {
     notes.push(item._sizeWarning);
-    score -= 15;
+    score -= 10;
   }
 
-  // If item came from a poor_scan page, subtract 25
+  // Inches-vs-feet auto-correction happened — slightly lower confidence
+  const itemNotes = item.notes || "";
+  if (itemNotes.includes("Auto-corrected") && itemNotes.includes("inches")) {
+    score -= 5;
+    notes.push("Pipe length auto-corrected (inches assumed)");
+  }
+
+  // If item came from a poor_scan page, penalize
   if (pdfQuality === "poor_scan") {
-    score -= 25;
-    notes.push("Poor scan quality — manual review recommended");
+    score -= 20;
+    notes.push("Poor scan quality");
   }
 
   // Clamp score
   score = Math.max(0, Math.min(100, score));
 
+  // Confidence thresholds — most well-extracted items should be "high"
   let confidence: "high" | "medium" | "low";
-  if (score >= 85) confidence = "high";
-  else if (score >= 60) confidence = "medium";
+  if (score >= 75) confidence = "high";
+  else if (score >= 50) confidence = "medium";
   else confidence = "low";
 
   return { confidence, confidenceScore: score, confidenceNotes: notes.length > 0 ? notes.join("; ") : "" };
