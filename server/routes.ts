@@ -133,7 +133,7 @@ const UPLOAD_DIR = "/tmp/pg-unified-uploads";
 const RENDER_DIR = "/tmp/pg-unified-renders";
 const CHUNK_SIZE = 40;
 const LARGE_PACKAGE_THRESHOLD = 100; // pages — switch to streaming mode above this
-const LARGE_CHUNK_SIZE = 20; // smaller chunks for large packages to save memory
+const LARGE_CHUNK_SIZE = 10; // much smaller chunks for large packages — only 10 images in memory at a time
 
 for (const dir of [UPLOAD_DIR, RENDER_DIR]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -1122,7 +1122,8 @@ function isTesseractAvailable(): boolean {
 
 async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "ocr-only"): Promise<void> {
   const files = fs.readdirSync(jobDir).filter(f => f.endsWith(".png") && !f.includes("_bom") && !f.includes("_full") && !f.includes("_ocr"));
-  const CONCURRENCY = 4;
+  // Reduce concurrency to limit peak memory usage (ImageMagick is memory-hungry)
+  const CONCURRENCY = 2;
   const hasTesseract = isTesseractAvailable();
   
   for (let i = 0; i < files.length; i += CONCURRENCY) {
@@ -1191,12 +1192,14 @@ async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promi
   fs.mkdirSync(jobDir, { recursive: true });
 
   // Render page-by-page to avoid OOM on limited-memory servers
+  // Use 150 DPI for BOM tables (text-heavy, doesn't need high res)
+  const dpiForBom = 150;
   for (let p = 1; p <= pageCount; p++) {
     try {
       await execFileAsync("pdftoppm", [
-        "-r", "200", "-png", "-f", String(p), "-l", String(p),
+        "-r", String(dpiForBom), "-png", "-f", String(p), "-l", String(p),
         pdfPath, path.join(jobDir, "page")
-      ], { maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
+      ], { maxBuffer: 30 * 1024 * 1024, timeout: 45000 });
     } catch (err: any) {
       console.warn(`  pdftoppm page ${p} failed: ${err.message?.substring(0, 100)}`);
     }
@@ -1229,13 +1232,13 @@ async function renderBomWithFullPages(pdfPath: string, pageCount: number): Promi
   const jobDir = path.join(RENDER_DIR, Date.now().toString() + "_cloud");
   fs.mkdirSync(jobDir, { recursive: true });
 
-  // Render page-by-page to avoid OOM on limited-memory servers
+  // Render page-by-page at reduced DPI to save memory
   for (let p = 1; p <= pageCount; p++) {
     try {
       await execFileAsync("pdftoppm", [
-        "-r", "200", "-png", "-f", String(p), "-l", String(p),
+        "-r", "150", "-png", "-f", String(p), "-l", String(p),
         pdfPath, path.join(jobDir, "page")
-      ], { maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
+      ], { maxBuffer: 30 * 1024 * 1024, timeout: 45000 });
     } catch (err: any) {
       console.warn(`  pdftoppm page ${p} (cloud) failed: ${err.message?.substring(0, 100)}`);
     }
@@ -1281,14 +1284,14 @@ async function renderFullPageImages(pdfPath: string, pageCount: number, dpi = 30
   const jobDir = path.join(RENDER_DIR, Date.now().toString() + "_" + Math.random().toString(36).slice(2));
   fs.mkdirSync(jobDir, { recursive: true });
 
-  // Render page-by-page to avoid OOM on limited-memory servers
-  const effectiveDpi = Math.min(dpi, 200); // Cap DPI for cloud deployment
+  // Render page-by-page at reduced DPI to save memory
+  const effectiveDpi = Math.min(dpi, 150); // Cap DPI for cloud deployment
   for (let p = 1; p <= pageCount; p++) {
     try {
       await execFileAsync("pdftoppm", [
         "-r", String(effectiveDpi), "-png", "-f", String(p), "-l", String(p),
         pdfPath, path.join(jobDir, "page")
-      ], { maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
+      ], { maxBuffer: 30 * 1024 * 1024, timeout: 45000 });
     } catch (err: any) {
       console.warn(`  pdftoppm page ${p} (full) failed: ${err.message?.substring(0, 100)}`);
     }
