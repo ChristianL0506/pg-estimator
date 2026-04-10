@@ -132,6 +132,8 @@ const MAX_FILE_SIZE = 300 * 1024 * 1024; // 300MB — supports large drawing pac
 const UPLOAD_DIR = "/tmp/pg-unified-uploads";
 const RENDER_DIR = "/tmp/pg-unified-renders";
 const CHUNK_SIZE = 40;
+const LARGE_PACKAGE_THRESHOLD = 100; // pages — switch to streaming mode above this
+const LARGE_CHUNK_SIZE = 20; // smaller chunks for large packages to save memory
 
 for (const dir of [UPLOAD_DIR, RENDER_DIR]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -331,7 +333,8 @@ function detectDrawingTemplate(ocrText: string): any | null {
 }
 
 async function splitPdfIntoChunks(pdfPath: string, pageCount: number): Promise<{ chunkPath: string; startPage: number; endPage: number }[]> {
-  if (pageCount <= CHUNK_SIZE) {
+  const effectiveChunkSize = pageCount > LARGE_PACKAGE_THRESHOLD ? LARGE_CHUNK_SIZE : CHUNK_SIZE;
+  if (pageCount <= effectiveChunkSize) {
     return [{ chunkPath: pdfPath, startPage: 1, endPage: pageCount }];
   }
   const chunks: { chunkPath: string; startPage: number; endPage: number }[] = [];
@@ -342,8 +345,8 @@ async function splitPdfIntoChunks(pdfPath: string, pageCount: number): Promise<{
   const pdfBytes = fs.readFileSync(pdfPath);
   const srcDoc = await PDFDocument.load(pdfBytes);
 
-  for (let start = 1; start <= pageCount; start += CHUNK_SIZE) {
-    const end = Math.min(start + CHUNK_SIZE - 1, pageCount);
+  for (let start = 1; start <= pageCount; start += effectiveChunkSize) {
+    const end = Math.min(start + effectiveChunkSize - 1, pageCount);
     const chunkPath = path.join(chunkDir, `chunk_${start}_${end}.pdf`);
     try {
       const chunkDoc = await PDFDocument.create();
@@ -2370,11 +2373,174 @@ async function processUploadedPdf(
   });
   console.log(`Created project ${project.id} (will save items incrementally)`);
 
+  const isLargePackage = pageCount > LARGE_PACKAGE_THRESHOLD;
+  if (isLargePackage) {
+    console.log(`\n=== LARGE PACKAGE MODE: ${pageCount} pages, processing ${chunks.length} chunks sequentially (render→extract→cleanup) ===`);
+  }
+
   // ============================================================
   // PHASE 1: PRE-RENDER ALL CHUNKS (no API calls needed)
+  // For large packages, this phase is SKIPPED — chunks are processed end-to-end below
+  // ============================================================
+  const renderedChunks: { chunkIndex: number; rendered: RenderedMechanicalChunk | RenderedStructuralChunk | RenderedCivilChunk }[] = [];
+
+  if (isLargePackage) {
+    // === STREAMING MODE for large packages ===
+    // Process each chunk end-to-end: render → extract → save → cleanup → next
+    // This keeps memory usage bounded regardless of total page count
+    console.log(`\n=== STREAMING MODE: Processing ${chunks.length} chunks end-to-end ===`);
+    let pdfQuality: "vector" | "clean_scan" | "poor_scan" = "clean_scan";
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const chunkNum = i + 1;
+      console.log(`\n--- Chunk ${chunkNum}/${chunks.length}: pages ${chunk.startPage}-${chunk.endPage} (stream) ---`);
+
+      storage.setJobProgress(jobId, {
+        jobId, status: "processing", phase: `Section ${chunkNum}/${chunks.length}`,
+        chunk: chunkNum, totalChunks: chunks.length,
+        pagesProcessed: chunk.startPage - 1, totalPages: pageCount,
+        itemsFound: allItems.length,
+        warnings: warnings.length > 0 ? warnings : undefined,
+      });
+
+      // Step 1: Render this chunk
+      let rendered: RenderedMechanicalChunk | RenderedStructuralChunk | RenderedCivilChunk;
+      try {
+        if (discipline === "mechanical") {
+          rendered = await renderMechanicalChunk(chunk.chunkPath, chunk.startPage, chunk.endPage, hasRevisions);
+        } else if (discipline === "structural") {
+          rendered = await renderStructuralChunk(chunk.chunkPath, chunk.startPage, chunk.endPage);
+        } else {
+          rendered = await renderCivilChunk(chunk.chunkPath, chunk.startPage, chunk.endPage);
+        }
+      } catch (renderErr: any) {
+        console.error(`  Render chunk ${chunkNum} failed:`, renderErr.message);
+        warnings.push(`Section ${chunkNum} render failed: ${renderErr.message?.substring(0, 100)}`);
+        chunksFailed++;
+        continue; // Skip to next chunk
+      }
+
+      // Classify PDF quality on first chunk
+      if (i === 0) {
+        const firstPageImages: any[] = (rendered as any).bomPageImages || (rendered as any).cloudPageImages || (rendered as any).pageImages || [];
+        if (firstPageImages.length > 0) pdfQuality = classifyPdfQuality(firstPageImages);
+      }
+
+      // Step 2: Extract from this chunk
+      try {
+        let chunkResult: { items: any[]; metadata: any; authFailures?: number };
+        if (discipline === "mechanical") {
+          chunkResult = await extractMechanicalChunk(
+            rendered as RenderedMechanicalChunk,
+            (pagesProcessed) => {
+              storage.setJobProgress(jobId, {
+                jobId, status: "processing", phase: `Section ${chunkNum}/${chunks.length}`,
+                chunk: chunkNum, totalChunks: chunks.length,
+                pagesProcessed, totalPages: pageCount,
+                itemsFound: allItems.length,
+                warnings: warnings.length > 0 ? warnings : undefined,
+              });
+            },
+            verifyExtraction
+          );
+        } else if (discipline === "structural") {
+          chunkResult = await extractStructuralChunk(rendered as RenderedStructuralChunk);
+        } else {
+          chunkResult = await extractCivilChunk(rendered as RenderedCivilChunk);
+        }
+
+        if (chunkResult.authFailures) totalAuthFailures += chunkResult.authFailures;
+        allItems.push(...chunkResult.items);
+        if (i === 0 && chunkResult.metadata) metadata = chunkResult.metadata;
+        chunksCompleted++;
+        console.log(`  Chunk ${chunkNum} complete: ${chunkResult.items.length} items (total: ${allItems.length})`);
+
+        // Save partial results after each chunk
+        await storage.updateTakeoffProject(project.id, { items: [...allItems] });
+        console.log(`  Saved ${allItems.length} items to project ${project.id}`);
+      } catch (extractErr: any) {
+        console.error(`  Extract chunk ${chunkNum} failed:`, extractErr.message);
+        warnings.push(`Section ${chunkNum} extraction failed: ${extractErr.message?.substring(0, 100)}`);
+        chunksFailed++;
+      }
+
+      // Step 3: Cleanup rendered images immediately to free memory/disk
+      try { cleanupJobDir(rendered.jobDir); } catch (e) { console.warn("Suppressed error:", e); }
+      // Clean up chunk PDF if it's not the original
+      if (chunk.chunkPath !== pdfPath) {
+        try { fs.unlinkSync(chunk.chunkPath); } catch (e) { console.warn("Suppressed error:", e); }
+      }
+    }
+
+    // Skip to post-processing (bypass the two-phase logic below)
+    console.log(`\n=== STREAMING COMPLETE: ${chunksCompleted}/${chunks.length} chunks, ${allItems.length} items ===`);
+
+    // Clean up original PDF
+    try { if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath); } catch (e) { console.warn("Suppressed error:", e); }
+
+    // Run post-processing pipeline on all items
+    if (allItems.length > 0) {
+      // Continuation page dedup
+      const dedupedItems = dedupContinuationPages([...allItems]);
+      allItems.length = 0;
+      allItems.push(...dedupedItems);
+
+      // Confidence scoring
+      for (const item of allItems) {
+        const { confidence, confidenceScore, confidenceNotes } = computeConfidenceScore(item, pdfQuality);
+        if (item._verifiedCorrect) {
+          item.confidence = "high";
+          item.confidenceScore = Math.max(confidenceScore, 90);
+        } else {
+          item.confidence = confidence;
+          item.confidenceScore = confidenceScore;
+        }
+        item.confidenceNotes = confidenceNotes;
+      }
+
+      // Assign line numbers and save
+      const validItems = allItems.filter((i: any) => i.quantity > 0 || i.category === "pipe");
+      validItems.forEach((item: any, idx: number) => { item.lineNumber = idx + 1; });
+
+      await storage.updateTakeoffProject(project.id, {
+        items: validItems,
+        pageCount,
+        metadata: JSON.stringify(metadata),
+      });
+
+      // Branch ISO detection
+      const branchDetection = detectBranchISOPattern(validItems);
+      const calSummary = buildCalibrationSummary(validItems);
+
+      storage.setJobProgress(jobId, {
+        jobId, status: "done", phase: "done",
+        chunk: chunks.length, totalChunks: chunks.length,
+        pagesProcessed: pageCount, totalPages: pageCount,
+        itemsFound: validItems.length,
+        projectId: project.id,
+        warnings: [
+          ...warnings,
+          ...(branchDetection.isBranchISO ? [branchDetection.note] : []),
+        ].filter(Boolean),
+      });
+      console.log(`\n======= DONE: ${validItems.length} items saved to project ${project.id} =======`);
+    } else {
+      storage.setJobProgress(jobId, {
+        jobId, status: "done", phase: "done",
+        chunk: chunks.length, totalChunks: chunks.length,
+        pagesProcessed: pageCount, totalPages: pageCount,
+        itemsFound: 0, projectId: project.id,
+        warnings: [...warnings, "No items extracted from any section."],
+      });
+    }
+    return; // Exit early — streaming mode handles everything
+  }
+
+  // ============================================================
+  // STANDARD MODE (small packages): Two-phase render-then-extract
   // ============================================================
   console.log(`\n=== PHASE 1: Rendering all ${chunks.length} chunks ===`);
-  const renderedChunks: { chunkIndex: number; rendered: RenderedMechanicalChunk | RenderedStructuralChunk | RenderedCivilChunk }[] = [];
 
   try {
     for (let i = 0; i < chunks.length; i++) {
