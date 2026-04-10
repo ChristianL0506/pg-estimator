@@ -21,6 +21,7 @@ import { generateBidReport } from "@/components/BidReportGenerator";
 import { parseQuickEntry } from "@/lib/quickEntryParser";
 import RfqModal from "@/components/RfqModal";
 import CrewPlanner from "@/components/CrewPlanner";
+import ProjectPlanner from "@/components/ProjectPlanner";
 import type { EstimateProject, EstimateItem, CostDatabaseEntry } from "@shared/schema";
 
 function fmt$(n: number) { return `$${n.toFixed(2)}`; }
@@ -1219,6 +1220,10 @@ export default function EstimatingPage() {
                       totalLaborHours={totalHours}
                       laborRate={p.laborRate}
                       perDiemRate={p.perDiem}
+                    />
+                    <ProjectPlanner
+                      totalManhours={totalHours}
+                      projectName={p.name}
                     />
                   </>
                 )}
