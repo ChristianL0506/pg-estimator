@@ -13,6 +13,7 @@ import UploadZone from "@/components/UploadZone";
 import TakeoffBomTable from "@/components/TakeoffBomTable";
 import SummaryCards from "@/components/SummaryCards";
 import PivotSummary from "@/components/PivotSummary";
+import ConnectionsSummary from "@/components/ConnectionsSummary";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { exportMechanicalPdf, exportStructuralPdf, exportCivilPdf } from "@/lib/pdfExport";
@@ -438,10 +439,14 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                 <Tabs defaultValue="bom">
                   <TabsList className="mb-3">
                     <TabsTrigger value="bom" className="text-xs" data-testid="tab-bom">BOM Table</TabsTrigger>
+                    <TabsTrigger value="connections" className="text-xs" data-testid="tab-connections">Connections</TabsTrigger>
                     <TabsTrigger value="pivot" className="text-xs" data-testid="tab-pivot">Pivot Summary</TabsTrigger>
                   </TabsList>
                   <TabsContent value="bom">
                     <TakeoffBomTable items={selectedProject.items} discipline={discipline} />
+                  </TabsContent>
+                  <TabsContent value="connections">
+                    <ConnectionsSummary items={selectedProject.items} />
                   </TabsContent>
                   <TabsContent value="pivot">
                     <PivotSummary items={selectedProject.items} />
