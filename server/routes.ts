@@ -128,7 +128,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILE_SIZE = 300 * 1024 * 1024; // 300MB — supports large drawing packages (500+ pages)
 const UPLOAD_DIR = "/tmp/pg-unified-uploads";
 const RENDER_DIR = "/tmp/pg-unified-renders";
 const CHUNK_SIZE = 40;
@@ -3738,7 +3738,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           itemsFound: 0,
         });
 
-        res.status(202).json({ jobId, pageCount, totalChunks });
+        const isLargePackage = pageCount > CHUNK_SIZE;
+        res.status(202).json({ 
+          jobId, 
+          pageCount, 
+          totalChunks,
+          isLargePackage,
+          message: isLargePackage 
+            ? `Large package detected (${pageCount} pages). Splitting into ${totalChunks} sections of ~${CHUNK_SIZE} pages each. This will take a while — progress will update as each section completes.`
+            : undefined,
+        });
 
         processUploadedPdf(jobId, fileName, pdfPath, pageCount, totalChunks, discipline, verifyExtraction, hasRevisions, dualModel).catch((err) => {
           console.error("Background processing error:", err);

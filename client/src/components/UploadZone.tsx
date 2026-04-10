@@ -153,7 +153,12 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
           // Fallback for legacy progress without phase field
           const pct = prog.totalPages > 0 ? Math.round((prog.pagesProcessed / prog.totalPages) * 85) + 10 : 20;
           setProgress(Math.min(pct, 90));
-          setStatusMsg(`Processing chunk ${prog.chunk}/${prog.totalChunks} — ${prog.pagesProcessed}/${prog.totalPages} pages — ${prog.itemsFound} items found...`);
+          const isLarge = prog.totalPages > 40;
+          if (isLarge) {
+            setStatusMsg(`Section ${prog.chunk} of ${prog.totalChunks} — ${prog.pagesProcessed}/${prog.totalPages} pages processed — ${prog.itemsFound} items found so far...`);
+          } else {
+            setStatusMsg(`Processing — ${prog.pagesProcessed}/${prog.totalPages} pages — ${prog.itemsFound} items found...`);
+          }
         } else {
           setStatusMsg(`Status: ${prog.status}...`);
         }
@@ -202,10 +207,14 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
         const err = await res.json();
         throw new Error(err.error || "Upload failed");
       }
-      const { jobId, pageCount, totalChunks } = await res.json();
+      const { jobId, pageCount, totalChunks, isLargePackage, message } = await res.json();
       setProgress(10);
       setState("processing");
-      setStatusMsg(`PDF received (${pageCount} pages, ${totalChunks} chunk${totalChunks > 1 ? "s" : ""}) — running AI vision...`);
+      if (isLargePackage) {
+        setStatusMsg(message || `Large package (${pageCount} pages) — splitting into ${totalChunks} sections...`);
+      } else {
+        setStatusMsg(`PDF received (${pageCount} pages) — running AI extraction...`);
+      }
       pollProgress(jobId);
     } catch (err: any) {
       setState("error");
