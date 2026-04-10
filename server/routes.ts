@@ -2524,7 +2524,7 @@ async function processUploadedPdf(
         projectId: project.id,
         warnings: [
           ...warnings,
-          ...(branchDetection.isBranchISO ? [branchDetection.note] : []),
+          ...(branchDetection.detected ? [branchDetection.note] : []),
         ].filter(Boolean),
       });
       console.log(`\n======= DONE: ${validItems.length} items saved to project ${project.id} =======`);
