@@ -1,9 +1,7 @@
 services:
   - type: web
     name: picou-group-estimator
-    runtime: node
-    buildCommand: npm install && npm run build && cp estimator-data.json dist/estimator-data.json
-    startCommand: NODE_ENV=production node dist/index.cjs
+    runtime: docker
     envVars:
       - key: NODE_ENV
         value: production
