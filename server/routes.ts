@@ -2459,8 +2459,9 @@ async function processUploadedPdf(
         chunksCompleted++;
         console.log(`  Chunk ${chunkNum} complete: ${chunkResult.items.length} items (total: ${allItems.length})`);
 
-        // Save partial results after each chunk
-        await storage.updateTakeoffProjectItems(project.id, [...allItems]);
+        // Save partial results after each chunk — assign lineNumbers first (DB requires NOT NULL)
+        const itemsToSave = allItems.map((item: any, idx: number) => ({ ...item, lineNumber: idx + 1 }));
+        await storage.updateTakeoffProjectItems(project.id, itemsToSave);
         console.log(`  Saved ${allItems.length} items to project ${project.id}`);
       } catch (extractErr: any) {
         console.error(`  Extract chunk ${chunkNum} failed:`, extractErr.message);
