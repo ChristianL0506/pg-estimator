@@ -5209,5 +5209,61 @@ Picou Group Contractors`;
     res.json(profiles);
   });
 
+  // ===== CHAT ASSISTANT =====
+
+  app.post("/api/chat-assistant", async (req, res) => {
+    const { message, context } = req.body || {};
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({ error: "Message required" });
+    }
+
+    const anthropicKey = getUserApiKey();
+    if (!anthropicKey) {
+      return res.json({
+        response: "AI mode requires a Claude API key. Go to Settings to configure one.",
+        mode: "error",
+      });
+    }
+
+    try {
+      const client = getAnthropicClient();
+      const systemPrompt = `You are PG Assistant, the built-in helper for the Picou Group Estimator — an AI-powered takeoff and estimating tool for industrial piping contractors.
+
+You help estimators with:
+- How to use the application features
+- Piping estimation questions (manhour factors, weld counts, material specs)
+- Cost database queries
+- Crew planning advice
+- General industrial piping knowledge
+
+Key facts about the app:
+- Mechanical, Structural, and Civil takeoff from PDF drawings
+- Estimating with Bill's Engineering Index or Justin's IPMH method
+- Labor rates: ST=$56/hr, OT=$79/hr, DT=$100/hr, Per Diem=$75/day
+- Rack factor: 1.3x default
+- Cost database with 232+ records
+- Stolthaven Phase 6 calibration: IPMH 0.437, within 3.8% of actual manhours
+- SS weld factors: 3" = 4.68 MH, 4" = 5.56 MH (calibrated)
+- Crew planning with role-specific rates from Phase 6 data
+
+The user is currently on: ${context || "unknown page"}
+
+Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use specific numbers when relevant.`;
+
+      const resp = await client.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 500,
+        system: systemPrompt,
+        messages: [{ role: "user", content: message }],
+      });
+
+      const text = resp.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
+      res.json({ response: text, mode: "ai" });
+    } catch (err: any) {
+      console.error("Chat assistant error:", err.message);
+      res.json({ response: "Sorry, I couldn't process that. Please try again.", mode: "error" });
+    }
+  });
+
   return httpServer;
 }

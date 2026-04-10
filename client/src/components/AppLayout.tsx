@@ -6,6 +6,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useQuery } from "@tanstack/react-query";
 import PerplexityAttribution from "./PerplexityAttribution";
+import ChatAssistant from "./ChatAssistant";
 import logoPic from "@assets/logo-pic.jpg";
 import type { TakeoffProject } from "@shared/schema";
 
@@ -179,6 +180,9 @@ export default function AppLayout({ children, subtitle }: AppLayoutProps) {
           {children}
         </main>
       </div>
+
+      {/* Chat Assistant — floating on all pages */}
+      <ChatAssistant pageContext={subtitle || NAV_ITEMS.find(n => n.path === "/" ? location === "/" : location.startsWith(n.path))?.label || "Unknown"} />
     </div>
   );
 }
