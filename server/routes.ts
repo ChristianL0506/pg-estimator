@@ -11,6 +11,7 @@ import type { JobProgress } from "@shared/schema";
 import { insertEstimateProjectSchema, insertCostDatabaseEntrySchema, estimateItemSchema, markupsSchema, insertPurchaseRecordSchema, insertBidSchema, insertVendorQuoteSchema } from "@shared/schema";
 import { z } from "zod";
 import { parse as csvParse } from "csv-parse/sync";
+import { PDFDocument } from "pdf-lib";
 
 // Login rate limiting: 5 failed attempts per IP in 15 min window
 const loginAttempts = new Map<string, { count: number; firstAttempt: number; blocked: boolean }>();
@@ -329,18 +330,30 @@ function detectDrawingTemplate(ocrText: string): any | null {
   return bestScore >= 10 ? bestMatch : null;
 }
 
-function splitPdfIntoChunks(pdfPath: string, pageCount: number): { chunkPath: string; startPage: number; endPage: number }[] {
+async function splitPdfIntoChunks(pdfPath: string, pageCount: number): Promise<{ chunkPath: string; startPage: number; endPage: number }[]> {
   if (pageCount <= CHUNK_SIZE) {
     return [{ chunkPath: pdfPath, startPage: 1, endPage: pageCount }];
   }
   const chunks: { chunkPath: string; startPage: number; endPage: number }[] = [];
   const chunkDir = path.join(RENDER_DIR, `chunks_${Date.now()}`);
   fs.mkdirSync(chunkDir, { recursive: true });
+
+  // Use pdf-lib (pure Node.js) instead of qpdf system dependency
+  const pdfBytes = fs.readFileSync(pdfPath);
+  const srcDoc = await PDFDocument.load(pdfBytes);
+
   for (let start = 1; start <= pageCount; start += CHUNK_SIZE) {
     const end = Math.min(start + CHUNK_SIZE - 1, pageCount);
     const chunkPath = path.join(chunkDir, `chunk_${start}_${end}.pdf`);
     try {
-      execFileSync("qpdf", [pdfPath, "--pages", ".", `${start}-${end}`, "--", chunkPath], { timeout: 60000 });
+      const chunkDoc = await PDFDocument.create();
+      const pageIndices = Array.from({ length: end - start + 1 }, (_, i) => start - 1 + i);
+      const copiedPages = await chunkDoc.copyPages(srcDoc, pageIndices);
+      for (const page of copiedPages) {
+        chunkDoc.addPage(page);
+      }
+      const chunkBytes = await chunkDoc.save();
+      fs.writeFileSync(chunkPath, chunkBytes);
       chunks.push({ chunkPath, startPage: start, endPage: end });
     } catch (err: any) {
       console.error(`  Failed to split pages ${start}-${end}:`, err.message);
@@ -406,6 +419,9 @@ function correctPipeLengthIfInches(qty: number, rawQty: string, description: str
 }
 
 function isTitlePage(text: string): boolean {
+  // If no OCR text available (tesseract not installed), assume it's NOT a title page
+  // — Claude will handle filtering during extraction
+  if (text.trim().length === 0) return false;
   if (text.trim().length < 50) return true;
   const hasBom = /\b(PIPE|ELBOW|TEE|VALVE|FLANGE|GASKET|BOLT|STUD|REDUCER|W\d+X|HSS|FOOTING|REBAR|STORM|SEWER|ASPHALT)\b/i.test(text);
   if (!hasBom && /\bAREA\s+\d+\b/i.test(text)) return true;
@@ -1056,9 +1072,24 @@ function execAsync(cmd: string, opts: any): Promise<void> {
 // ============================================================
 
 // Safe image processing without shell injection — processes pages using execFileAsync
+// Check if tesseract is available (cache result)
+let _tesseractAvailable: boolean | null = null;
+function isTesseractAvailable(): boolean {
+  if (_tesseractAvailable !== null) return _tesseractAvailable;
+  try {
+    execFileSync("tesseract", ["--version"], { timeout: 5000 });
+    _tesseractAvailable = true;
+  } catch {
+    console.warn("tesseract not available — OCR will be skipped, Claude will read images directly");
+    _tesseractAvailable = false;
+  }
+  return _tesseractAvailable;
+}
+
 async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "ocr-only"): Promise<void> {
   const files = fs.readdirSync(jobDir).filter(f => f.endsWith(".png") && !f.includes("_bom") && !f.includes("_full") && !f.includes("_ocr"));
   const CONCURRENCY = 4;
+  const hasTesseract = isTesseractAvailable();
   
   for (let i = 0; i < files.length; i += CONCURRENCY) {
     const batch = files.slice(i, i + CONCURRENCY);
@@ -1092,20 +1123,24 @@ async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "
             await execFileAsync("convert", [imgPath, "-resize", "50%", fullPath], { timeout: 30000 });
           }
           
-          // OCR the BOM crop
-          const ocrBase = path.join(jobDir, `${basename}_ocr`);
-          try {
-            await execFileAsync("tesseract", [bomPath, ocrBase, "--psm", "4", "-l", "eng"], { timeout: 30000 });
-          } catch (e) { console.warn("Suppressed error:", e); }
+          // OCR the BOM crop (skip if tesseract not available)
+          if (hasTesseract) {
+            const ocrBase = path.join(jobDir, `${basename}_ocr`);
+            try {
+              await execFileAsync("tesseract", [bomPath, ocrBase, "--psm", "4", "-l", "eng"], { timeout: 30000 });
+            } catch (e) { console.warn("Suppressed error:", e); }
+          }
           
           // Remove original full-res image (keep _bom and _full)
           try { fs.unlinkSync(imgPath); } catch (e) { console.warn("Suppressed error:", e); }
         } else {
-          // OCR-only mode (full page)
-          const ocrBase = path.join(jobDir, `${basename}_ocr`);
-          try {
-            await execFileAsync("tesseract", [imgPath, ocrBase, "--psm", "4", "-l", "eng"], { timeout: 30000 });
-          } catch (e) { console.warn("Suppressed error:", e); }
+          // OCR-only mode (full page) — skip if tesseract not available
+          if (hasTesseract) {
+            const ocrBase = path.join(jobDir, `${basename}_ocr`);
+            try {
+              await execFileAsync("tesseract", [imgPath, ocrBase, "--psm", "4", "-l", "eng"], { timeout: 30000 });
+            } catch (e) { console.warn("Suppressed error:", e); }
+          }
         }
       } catch (e) { console.warn("Suppressed error processing", imgFile, e); }
     }));
@@ -2285,7 +2320,7 @@ async function processUploadedPdf(
   let chunksCompleted = 0;
   let chunksFailed = 0;
 
-  const chunks = splitPdfIntoChunks(pdfPath, pageCount);
+  const chunks = await splitPdfIntoChunks(pdfPath, pageCount);
   console.log(`Split into ${chunks.length} chunks`);
   const chunkCleanup: string[] = [];
 
