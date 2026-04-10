@@ -1735,32 +1735,48 @@ function validatePipingBom(items: any[]): any[] {
 // ============================================================
 
 function dedupContinuationPages(items: any[]): any[] {
-  // Group items by sheet number
-  const sheetGroups: Record<number, any[]> = {};
+  // CONTINUATION PAGE DEDUP — Only flag items as duplicates when two adjacent PDF
+  // pages contain EXACTLY the same BOM table. This handles the case where a multi-page
+  // ISO has its BOM repeated on a continuation sheet.
+  //
+  // IMPORTANT: Different ISO drawings on consecutive pages will legitimately have
+  // similar fittings (e.g., two 4" lines both have elbows). These are NOT duplicates.
+  // We use very strict criteria to avoid false positives:
+  //   1. Pages must be adjacent (consecutive PDF page numbers)
+  //   2. Item counts must be identical (same number of BOM entries)
+  //   3. 95%+ of items must match on category+size+description+quantity
+  //   4. Material/spec/schedule must also match
+
+  // Group items by source page (PDF page number)
+  const pageGroups: Record<number, any[]> = {};
   for (const item of items) {
-    const sheetMatch = (item.notes || "").match(/Sheet\s+(\d+)/i);
-    const sheet = sheetMatch ? parseInt(sheetMatch[1], 10) : 0;
-    if (!sheetGroups[sheet]) sheetGroups[sheet] = [];
-    sheetGroups[sheet].push(item);
+    const page = item.sourcePage || 0;
+    if (!pageGroups[page]) pageGroups[page] = [];
+    pageGroups[page].push(item);
   }
 
-  const sheetNums = Object.keys(sheetGroups).map(Number).sort((a, b) => a - b);
+  const pageNums = Object.keys(pageGroups).map(Number).sort((a, b) => a - b);
 
-  // Only dedup when the ENTIRE page has >80% identical items to the previous page
-  for (let i = 0; i < sheetNums.length - 1; i++) {
-    const curSheet = sheetNums[i];
-    const nextSheet = sheetNums[i + 1];
-    // Only check adjacent sheets
-    if (nextSheet - curSheet !== 1) continue;
+  for (let i = 0; i < pageNums.length - 1; i++) {
+    const curPage = pageNums[i];
+    const nextPage = pageNums[i + 1];
+    // Must be truly adjacent PDF pages (not just sequential sheet numbers)
+    if (nextPage - curPage !== 1) continue;
 
-    const curItems = sheetGroups[curSheet];
-    const nextItems = sheetGroups[nextSheet];
+    const curItems = pageGroups[curPage];
+    const nextItems = pageGroups[nextPage];
 
-    // Build key sets for comparison
-    const curKeys = new Set(curItems.map((item: any) => `${item.category}|${item.size}|${item.description}|${item.quantity}`));
-    const nextKeys = new Set(nextItems.map((item: any) => `${item.category}|${item.size}|${item.description}|${item.quantity}`));
+    // Item counts must be identical — different drawings have different item counts
+    if (curItems.length !== nextItems.length) continue;
+    // Skip tiny pages (≤2 items) — too easy to accidentally match
+    if (curItems.length <= 2) continue;
 
-    // Count how many items on next page match current page
+    // Build full keys including material/spec for strict matching
+    const makeKey = (item: any) => `${item.category}|${item.size}|${item.description}|${item.quantity}|${item.material || ""}|${item.schedule || ""}|${item.spec || ""}`;
+    const curKeys = new Set(curItems.map(makeKey));
+    const nextKeys = nextItems.map(makeKey);
+
+    // Count matches
     let matchCount = 0;
     for (const key of nextKeys) {
       if (curKeys.has(key)) matchCount++;
@@ -1768,34 +1784,23 @@ function dedupContinuationPages(items: any[]): any[] {
 
     const overlapPct = nextItems.length > 0 ? matchCount / nextItems.length : 0;
 
-    // Only dedup when >80% of the ENTIRE next page matches
-    if (overlapPct <= 0.8) continue;
+    // Must be 95%+ overlap with identical item counts — this is very strict
+    // and should only trigger on true continuation pages (same BOM repeated)
+    if (overlapPct < 0.95) continue;
 
-    // For matching items: mark as dedup candidates (don't hard-delete)
+    // Mark as dedup candidates (don't hard-delete)
     for (const nextItem of nextItems) {
-      const nextKey = `${nextItem.category}|${nextItem.size}|${nextItem.description}|${nextItem.quantity}`;
-      // Find matching item on previous page
-      const matchingCurItem = curItems.find((ci: any) =>
-        `${ci.category}|${ci.size}|${ci.description}|${ci.quantity}` === nextKey
-      );
-
-      if (matchingCurItem) {
-        // Keep items that match but have different notes or specs
-        const sameNotes = (matchingCurItem.spec || "") === (nextItem.spec || "") &&
-                         (matchingCurItem.material || "") === (nextItem.material || "") &&
-                         (matchingCurItem.schedule || "") === (nextItem.schedule || "");
-        if (!sameNotes) continue; // Different specs, keep both
-
-        // Mark as dedup candidate instead of hard-deleting — do NOT add quantity to avoid double-counting
+      const key = makeKey(nextItem);
+      if (curKeys.has(key)) {
         nextItem._dedupCandidate = true;
-        nextItem.dedupNote = `Possible duplicate from Sheet ${curSheet} — review and delete if confirmed`;
+        nextItem.dedupNote = `Likely continuation page duplicate from page ${curPage} — review and delete if confirmed`;
       }
     }
   }
 
   const dedupCount = items.filter((i: any) => i._dedupCandidate).length;
   if (dedupCount > 0) {
-    console.log(`  Continuation page dedup: marked ${dedupCount} items as dedup candidates`);
+    console.log(`  Continuation page dedup: marked ${dedupCount} items as dedup candidates (strict 95% match)`);
   }
   // Return ALL items (including dedup candidates - UI will dim them)
   return items;
