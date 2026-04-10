@@ -2460,7 +2460,7 @@ async function processUploadedPdf(
         console.log(`  Chunk ${chunkNum} complete: ${chunkResult.items.length} items (total: ${allItems.length})`);
 
         // Save partial results after each chunk
-        await storage.updateTakeoffProject(project.id, { items: [...allItems] });
+        await storage.updateTakeoffProjectItems(project.id, [...allItems]);
         console.log(`  Saved ${allItems.length} items to project ${project.id}`);
       } catch (extractErr: any) {
         console.error(`  Extract chunk ${chunkNum} failed:`, extractErr.message);
@@ -2506,11 +2506,10 @@ async function processUploadedPdf(
       const validItems = allItems.filter((i: any) => i.quantity > 0 || i.category === "pipe");
       validItems.forEach((item: any, idx: number) => { item.lineNumber = idx + 1; });
 
-      await storage.updateTakeoffProject(project.id, {
-        items: validItems,
-        pageCount,
-        metadata: JSON.stringify(metadata),
-      });
+      await storage.updateTakeoffProjectItems(project.id, validItems);
+      if (metadata.lineNumber || metadata.area || metadata.revision || metadata.drawingDate) {
+        storage.updateTakeoffProjectMetadata(project.id, metadata);
+      }
 
       // Branch ISO detection
       const branchDetection = detectBranchISOPattern(validItems);
