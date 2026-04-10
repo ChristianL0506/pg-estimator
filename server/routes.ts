@@ -388,35 +388,66 @@ function parsePipeLength(raw: string): { feet: number; original: string; wasInch
 }
 
 /**
- * Detect if a pipe quantity is likely inches misread as feet.
- * On isometrics, short pipe runs (0'-11", 0'-8", etc.) are common.
- * If the AI outputs just "11" without any unit marker, and it's a small integer
- * ≤ 18, it's very likely inches (not 11 feet of pipe on one line).
- * Returns the corrected quantity in feet, or the original if no correction needed.
+ * Detect and correct pipe quantities where inches were misread as feet.
+ * On ISOs, short pipe runs (spool pieces, drops, branch connections) are common.
+ * When the AI extracts just "11" without a unit marker, it's ambiguous.
+ *
+ * Heuristic based on Stolthaven Phase 6 calibration data:
+ * - Values 1-11 without unit marker: auto-correct to inches (very common spool lengths)
+ * - Values 12-18: auto-correct for small bore (<=2"), flag for larger pipe
+ * - Values 19+: assume feet (longer runs are typically in feet)
  */
-function correctPipeLengthIfInches(qty: number, rawQty: string, description: string): { correctedQty: number; wasCorrection: boolean; note: string } {
+function correctPipeLengthIfInches(qty: number, rawQty: string, description: string, options?: { installLocation?: string; size?: string }): { correctedQty: number; wasCorrection: boolean; note: string } {
   // If the raw string already had feet/inch markers, parsePipeLength handled it
-  if (/[\u2018\u2019\u201C\u201D''""']/.test(rawQty)) {
+  if (/[\u2018\u2019\u201C\u201D''""\u0027]/.test(rawQty)) {
     return { correctedQty: qty, wasCorrection: false, note: "" };
   }
-  // Flag whole numbers 1-18 as ambiguous \u2014 do NOT auto-correct (too aggressive)
-  if (Number.isInteger(qty) && qty >= 1 && qty <= 18) {
+
+  // Parse the pipe size for context
+  const pipeSize = parseFloat(options?.size || "0") || 0;
+  const isSmallBore = pipeSize > 0 && pipeSize <= 2;
+
+  // Values 1-11 without unit marker: auto-correct to inches
+  // Rationale: 1-11 feet of pipe on a single ISO BOM line without a foot mark is
+  // unusual. But 1"-11" spool pieces are extremely common on branch ISOs.
+  if (Number.isInteger(qty) && qty >= 1 && qty <= 11) {
+    const correctedFeet = Math.round((qty / 12) * 100) / 100;
+    return {
+      correctedQty: correctedFeet,
+      wasCorrection: true,
+      note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF. No unit marker found.`
+    };
+  }
+
+  // Values 12-18: auto-correct for small bore (<=2") pipe, flag for larger
+  if (Number.isInteger(qty) && qty >= 12 && qty <= 18) {
+    if (isSmallBore) {
+      const correctedFeet = Math.round((qty / 12) * 100) / 100;
+      return {
+        correctedQty: correctedFeet,
+        wasCorrection: true,
+        note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF for ${pipeSize}" small-bore pipe.`
+      };
+    }
     return {
       correctedQty: qty,
       wasCorrection: false,
-      note: `Pipe qty ${qty}: no unit marker \u2014 could be ${qty}' (feet) or ${qty}" (inches = ${Math.round((qty / 12) * 100) / 100} LF). Verify against drawing.`
+      note: `\u26a0\ufe0f Ambiguous: ${qty} could be ${qty}' (${qty} feet) or ${qty}" (${Math.round((qty / 12) * 100) / 100} LF). Verify against drawing.`
     };
   }
-  // Values 19-36 are also ambiguous \u2014 flag but don't auto-correct.
+
+  // Values 19-36: assume feet but note for verification
   if (Number.isInteger(qty) && qty >= 19 && qty <= 36) {
     return {
       correctedQty: qty,
       wasCorrection: false,
-      note: `Pipe qty ${qty}: no unit marker \u2014 could be ${qty}' (feet) or ${qty}" (inches = ${Math.round((qty / 12) * 100) / 100} LF). Verify against drawing.`
+      note: `Pipe qty ${qty}: assumed feet. Verify if this should be inches.`
     };
   }
+
   return { correctedQty: qty, wasCorrection: false, note: "" };
 }
+
 
 function isTitlePage(text: string): boolean {
   // If no OCR text available (tesseract not installed), assume it's NOT a title page
@@ -2019,7 +2050,7 @@ async function extractMechanicalChunk(
   let authFailures = 0;
 
   // Helper: parse and correct pipe quantity from raw AI output
-  function parseMechanicalQty(rawQty: string, category: string, description: string): { qty: number; notes: string[] } {
+  function parseMechanicalQty(rawQty: string, category: string, description: string, size?: string): { qty: number; notes: string[] } {
     const rq = rawQty.trim();
     let numericQty: number;
     const notes: string[] = [];
@@ -2033,7 +2064,7 @@ async function extractMechanicalChunk(
     const isPipe = category === "pipe";
     let qty = isPipe ? Math.round(Math.max(numericQty, 0) * 100) / 100 : Math.max(1, Math.round(numericQty));
     if (isPipe) {
-      const correction = correctPipeLengthIfInches(qty, rq, description);
+      const correction = correctPipeLengthIfInches(qty, rq, description, { size: size || "" });
       if (correction.wasCorrection) qty = correction.correctedQty;
       if (correction.note) notes.push(correction.note);
     }
@@ -2063,7 +2094,7 @@ async function extractMechanicalChunk(
         const rawQty = String(entry.qty || "1").trim();
         const category = detectMechanicalCategory(entry.description);
         const isPipe = category === "pipe";
-        const { qty: parsedQty, notes: qtyNotes } = parseMechanicalQty(rawQty, category, entry.description);
+        const { qty: parsedQty, notes: qtyNotes } = parseMechanicalQty(rawQty, category, entry.description, entry.size);
         const validatedSize = validateSize(String(entry.size || "N/A"), category);
         const extraNotes = qtyNotes.length > 0 ? " | " + qtyNotes.join(" | ") : "";
         let rawItem: any = {
@@ -2133,7 +2164,7 @@ async function extractMechanicalChunk(
         const rawQty = String(entry.qty || "1").trim();
         const category = detectMechanicalCategory(entry.description);
         const isPipe = category === "pipe";
-        const { qty: parsedQty, notes: qtyNotes } = parseMechanicalQty(rawQty, category, entry.description);
+        const { qty: parsedQty, notes: qtyNotes } = parseMechanicalQty(rawQty, category, entry.description, entry.size);
         const validatedSize = validateSize(String(entry.size || "N/A"), category);
         const extraNotes = qtyNotes.length > 0 ? " | " + qtyNotes.join(" | ") : "";
         let rawItem: any = {
