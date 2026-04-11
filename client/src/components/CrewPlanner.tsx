@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { ChevronDown, ChevronUp, Users, Calculator, Zap, DollarSign, Flame, Info } from "lucide-react";
+import { ChevronDown, ChevronUp, Users, Calculator, Zap, DollarSign, Flame, Info, FileSpreadsheet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -213,6 +213,39 @@ export default function CrewPlanner({ totalLaborHours, laborRate, perDiemRate }:
     ];
   }, [totalLaborHours, pipeMix, areas, safetyRequired, hoursPerDay, daysPerWeek]);
 
+  const handleExportCrewPlan = async () => {
+    try {
+      const scenarioData = scenarios.map(s => ({
+        name: s.name,
+        duration: s.durationDays,
+        dailyBurn: s.roleSpecific.totalCost / Math.max(1, s.durationDays),
+        totalCost: s.roleSpecific.totalCost,
+        roles: s.roleSpecific.breakdown.map(b => ({
+          name: b.role, count: b.count, rate: b.rate, perDiem: b.perDiemRate,
+        })),
+      }));
+      const customCrewData = showCustom ? {
+        roles: ALL_ROLES.map(r => ({
+          name: ROLE_RATES[r].label, count: crew[r], rate: ROLE_RATES[r].rate, perDiem: ROLE_RATES[r].perDiem,
+        })),
+      } : undefined;
+      const rateCardData = ALL_ROLES.map(r => ({
+        name: ROLE_RATES[r].label, rate: ROLE_RATES[r].rate, perDiemEligible: ROLE_RATES[r].perDiem > 0,
+      }));
+      const res = await fetch("/api/export-crew-plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectName: "Estimate", scenarios: scenarioData, customCrew: customCrewData, rateCard: rateCardData }),
+      });
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "Crew Plan.xlsx";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) { console.error("Crew plan export failed", e); }
+  };
+
   return (
     <Card className="border-card-border">
       <CardHeader
@@ -224,7 +257,20 @@ export default function CrewPlanner({ totalLaborHours, laborRate, perDiemRate }:
             <Users size={15} className="text-primary" />
             Crew Planner
           </CardTitle>
-          {expanded ? <ChevronUp size={16} className="text-muted-foreground" /> : <ChevronDown size={16} className="text-muted-foreground" />}
+          <div className="flex items-center gap-2">
+            {expanded && scenarios.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 text-[10px] text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                onClick={e => { e.stopPropagation(); handleExportCrewPlan(); }}
+              >
+                <FileSpreadsheet size={12} className="mr-1" />
+                Export
+              </Button>
+            )}
+            {expanded ? <ChevronUp size={16} className="text-muted-foreground" /> : <ChevronDown size={16} className="text-muted-foreground" />}
+          </div>
         </div>
         {!expanded && (
           <p className="text-[10px] text-muted-foreground mt-0.5">

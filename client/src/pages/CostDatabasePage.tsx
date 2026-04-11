@@ -3,7 +3,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import {
   Search, Upload, Trash2, DollarSign, TrendingUp, Building2, Package,
   Filter, ChevronDown, ChevronRight, FileText, BarChart3, ArrowUpDown, X,
-  AlertTriangle, Plus, ShoppingCart,
+  AlertTriangle, Plus, ShoppingCart, FileSpreadsheet,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -312,6 +312,26 @@ export default function CostDatabasePage() {
           <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} disabled={importMutation.isPending}>
             <Upload size={14} className="mr-1.5" />
             {importMutation.isPending ? "Importing..." : "Import CSV"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+            onClick={async () => {
+              try {
+                const res = await fetch("/api/cost-database/export");
+                const blob = await res.blob();
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = "PG Cost Database.xlsx";
+                a.click();
+                URL.revokeObjectURL(a.href);
+                toast({ title: "Downloaded Cost Database workbook" });
+              } catch { toast({ title: "Export failed", variant: "destructive" }); }
+            }}
+          >
+            <FileSpreadsheet size={14} className="mr-1.5" />
+            Export Excel
           </Button>
         </div>
 

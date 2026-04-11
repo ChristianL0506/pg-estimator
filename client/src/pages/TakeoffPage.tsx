@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
-import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon, FolderOpen, FolderPlus, Folder, Plus, MoreVertical } from "lucide-react";
+import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon, FolderOpen, FolderPlus, Folder, Plus, MoreVertical, FileSpreadsheet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -441,13 +441,35 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <p className="text-xs text-muted-foreground mt-1">{folderBom.folder.description}</p>
                     )}
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setSelectedFolderId(null)}
-                  >
-                    Close Folder
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                      onClick={async () => {
+                        try {
+                          const res = await apiRequest("GET", `/api/folders/${selectedFolderId}/export-combined`);
+                          const blob = await res.blob();
+                          const a = document.createElement("a");
+                          a.href = URL.createObjectURL(blob);
+                          a.download = `${folderBom.folder?.name || "Combined"} - Combined BOM.xlsx`;
+                          a.click();
+                          URL.revokeObjectURL(a.href);
+                          toast({ title: "Downloaded Combined BOM workbook" });
+                        } catch { toast({ title: "Export failed", variant: "destructive" }); }
+                      }}
+                    >
+                      <FileSpreadsheet size={14} className="mr-1.5" />
+                      Export Combined
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSelectedFolderId(null)}
+                    >
+                      Close Folder
+                    </Button>
+                  </div>
                 </div>
 
                 {/* Folder projects */}
@@ -532,6 +554,46 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                     >
                       <Download size={14} className="mr-1.5" />
                       Export PDF
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                      onClick={async () => {
+                        try {
+                          const res = await apiRequest("GET", `/api/takeoff-projects/${selectedProject.id}/export-bom`);
+                          const blob = await res.blob();
+                          const a = document.createElement("a");
+                          a.href = URL.createObjectURL(blob);
+                          a.download = `${selectedProject.name} - BOM.xlsx`;
+                          a.click();
+                          URL.revokeObjectURL(a.href);
+                          toast({ title: "Downloaded BOM workbook" });
+                        } catch { toast({ title: "Export failed", variant: "destructive" }); }
+                      }}
+                    >
+                      <FileSpreadsheet size={14} className="mr-1.5" />
+                      Export BOM
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                      onClick={async () => {
+                        try {
+                          const res = await apiRequest("GET", `/api/takeoff-projects/${selectedProject.id}/export-connections`);
+                          const blob = await res.blob();
+                          const a = document.createElement("a");
+                          a.href = URL.createObjectURL(blob);
+                          a.download = `${selectedProject.name} - Connections.xlsx`;
+                          a.click();
+                          URL.revokeObjectURL(a.href);
+                          toast({ title: "Downloaded Connections workbook" });
+                        } catch { toast({ title: "Export failed", variant: "destructive" }); }
+                      }}
+                    >
+                      <FileSpreadsheet size={14} className="mr-1.5" />
+                      Export Connections
                     </Button>
                     {selectedProject.items.some(i => i.revisionClouded) && (
                       <Button

@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from "react";
-import { Calendar, ClipboardList, AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Play, Diamond } from "lucide-react";
+import { Calendar, ClipboardList, AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Play, Diamond, FileSpreadsheet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -300,6 +300,36 @@ export default function ProjectPlanner({
   // Gantt week markers
   const weekCount = Math.ceil(projectEnd / dpw);
 
+  const handleExportPlan = async () => {
+    try {
+      const activitiesData = schedule.map(a => ({
+        id: a.id, name: a.name, phase: a.phase, duration: a.durationDays,
+        manhours: a.manhours, crew: a.crew, predecessors: a.predecessors,
+        startDate: fmtDate(addWorkingDays(startDateObj, a.startDay, dpw)),
+        endDate: fmtDate(addWorkingDays(startDateObj, a.endDay, dpw)),
+        float: a.totalFloat, critical: a.isOnCriticalPath, milestone: a.isMilestone,
+      }));
+      const summaryData = {
+        totalDuration: projectEnd,
+        criticalPathDuration: criticalPathDays,
+        totalManhours: totalScheduledMH,
+        completionDate: fmtDate(endDateObj),
+        utilization: Math.round(crewUtilization),
+      };
+      const res = await fetch("/api/export-project-plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectName: projectName || "Project Plan", activities: activitiesData, summary: summaryData }),
+      });
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${projectName || "Project Plan"} - Project Plan.xlsx`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) { console.error("Project plan export failed", e); }
+  };
+
   return (
     <Card className="border-card-border">
       <CardHeader
@@ -312,7 +342,20 @@ export default function ProjectPlanner({
             Project Planner
             {projectName && <span className="text-xs font-normal text-muted-foreground ml-1">({projectName})</span>}
           </CardTitle>
-          {expanded ? <ChevronUp size={16} className="text-muted-foreground" /> : <ChevronDown size={16} className="text-muted-foreground" />}
+          <div className="flex items-center gap-2">
+            {expanded && schedule.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 text-[10px] text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                onClick={e => { e.stopPropagation(); handleExportPlan(); }}
+              >
+                <FileSpreadsheet size={12} className="mr-1" />
+                Export
+              </Button>
+            )}
+            {expanded ? <ChevronUp size={16} className="text-muted-foreground" /> : <ChevronDown size={16} className="text-muted-foreground" />}
+          </div>
         </div>
         {!expanded && (
           <p className="text-[10px] text-muted-foreground mt-0.5">

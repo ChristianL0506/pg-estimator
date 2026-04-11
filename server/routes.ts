@@ -5499,5 +5499,572 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     res.json({ folder, projects, combinedItems });
   });
 
+
+  // ===== EXCEL EXPORT ENDPOINTS =====
+
+  // Shared Excel styling helper
+  function applyExcelStyles(ws: any) {
+    const headerFill = { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF01696F" } };
+    const headerFont = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+    const headerAlignment = { horizontal: "center" as const, vertical: "middle" as const };
+    ws.getRow(1).eachCell((cell: any) => {
+      cell.fill = headerFill;
+      cell.font = headerFont;
+      cell.alignment = headerAlignment;
+    });
+    ws.columns.forEach((col: any) => {
+      let maxLen = 10;
+      col.eachCell({ includeEmpty: false }, (cell: any) => {
+        const len = cell.value ? String(cell.value).length : 0;
+        if (len > maxLen) maxLen = len;
+      });
+      col.width = Math.min(maxLen + 2, 40);
+    });
+    for (let r = 2; r <= ws.rowCount; r++) {
+      if (r % 2 === 0) {
+        ws.getRow(r).eachCell((cell: any) => {
+          cell.fill = { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF2F2F2" } };
+        });
+      }
+    }
+  }
+
+  // 1. Takeoff BOM Export
+  app.get("/api/takeoff-projects/:id/export-bom", async (req, res) => {
+    const project = await storage.getTakeoffProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Project not found" });
+    try {
+      const ExcelJS = await import("exceljs");
+      const wb = new ExcelJS.default.Workbook();
+
+      // Sheet 1: BOM
+      const ws = wb.addWorksheet("BOM");
+      ws.columns = [
+        { header: "Line #", key: "lineNumber" },
+        { header: "Category", key: "category" },
+        { header: "Size", key: "size" },
+        { header: "Description", key: "description" },
+        { header: "Quantity", key: "quantity" },
+        { header: "Unit", key: "unit" },
+        { header: "Material", key: "material" },
+        { header: "Schedule", key: "schedule" },
+        { header: "Spec", key: "spec" },
+        { header: "Rating", key: "rating" },
+        { header: "Confidence", key: "confidence" },
+        { header: "Source Page", key: "sourcePage" },
+        { header: "Notes", key: "notes" },
+      ];
+      for (const item of project.items) {
+        ws.addRow({
+          lineNumber: item.lineNumber || "",
+          category: item.category || "",
+          size: item.size || "",
+          description: item.description || "",
+          quantity: item.quantity ?? 0,
+          unit: item.unit || "EA",
+          material: item.material || "",
+          schedule: item.schedule || "",
+          spec: item.spec || "",
+          rating: item.rating || "",
+          confidence: item.confidence ? `${Math.round(item.confidence * 100)}%` : "",
+          sourcePage: item.sourcePage ?? "",
+          notes: item.notes || "",
+        });
+      }
+      applyExcelStyles(ws);
+
+      // Sheet 2: Summary pivot
+      const ws2 = wb.addWorksheet("Summary");
+      ws2.columns = [
+        { header: "Category", key: "category" },
+        { header: "Size", key: "size" },
+        { header: "Item Count", key: "count" },
+        { header: "Total Qty", key: "totalQty" },
+      ];
+      const pivot = new Map<string, { count: number; totalQty: number }>();
+      for (const item of project.items) {
+        const key = `${item.category || "other"}|${item.size || "N/A"}`;
+        const existing = pivot.get(key) || { count: 0, totalQty: 0 };
+        existing.count++;
+        existing.totalQty += item.quantity ?? 0;
+        pivot.set(key, existing);
+      }
+      for (const [key, val] of pivot) {
+        const [category, size] = key.split("|");
+        ws2.addRow({ category, size, count: val.count, totalQty: val.totalQty });
+      }
+      // Totals row
+      ws2.addRow({ category: "TOTAL", size: "", count: project.items.length, totalQty: project.items.reduce((s, i) => s + (i.quantity ?? 0), 0) });
+      const totalRow = ws2.getRow(ws2.rowCount);
+      totalRow.font = { bold: true };
+      applyExcelStyles(ws2);
+
+      const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "");
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - BOM.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("BOM export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
+  // 2. Connections Export
+  app.get("/api/takeoff-projects/:id/export-connections", async (req, res) => {
+    const project = await storage.getTakeoffProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Project not found" });
+    try {
+      const ExcelJS = await import("exceljs");
+      const wb = new ExcelJS.default.Workbook();
+
+      // Infer connections from items
+      const connectionDetails: Array<{ size: string; fitting: string; qty: number; connectionType: string; connectionCount: number; location: string }> = [];
+      const sizeMap = new Map<string, { buttWelds: number; socketWelds: number; boltUps: number; threaded: number }>();
+
+      for (const item of project.items) {
+        const catLower = (item.category || "").toLowerCase();
+        const descLower = (item.description || "").toLowerCase();
+        const size = item.size || "N/A";
+        const qty = item.quantity ?? 0;
+        const isThreaded = descLower.includes("threaded") || descLower.includes("npt");
+        const isSocketWeld = descLower.includes("sw ") || descLower.includes("socket") || descLower.includes("sw-");
+        const location = descLower.includes("shop") ? "shop" : "field";
+
+        if (!sizeMap.has(size)) sizeMap.set(size, { buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: 0 });
+        const sm = sizeMap.get(size)!;
+
+        if (catLower === "elbow" || catLower === "ell") {
+          const conns = isThreaded ? 0 : isSocketWeld ? 2 : 2;
+          const connType = isThreaded ? "threaded" : isSocketWeld ? "socket weld" : "butt weld";
+          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
+          if (isThreaded) sm.threaded += conns * qty;
+          else if (isSocketWeld) sm.socketWelds += conns * qty;
+          else sm.buttWelds += conns * qty;
+        } else if (catLower === "tee") {
+          const conns = isThreaded ? 0 : isSocketWeld ? 3 : 3;
+          const connType = isThreaded ? "threaded" : isSocketWeld ? "socket weld" : "butt weld";
+          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
+          if (isThreaded) sm.threaded += conns * qty;
+          else if (isSocketWeld) sm.socketWelds += conns * qty;
+          else sm.buttWelds += conns * qty;
+        } else if (catLower === "reducer" || catLower === "reducing") {
+          const conns = isSocketWeld ? 2 : 2;
+          const connType = isSocketWeld ? "socket weld" : "butt weld";
+          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
+          if (isSocketWeld) sm.socketWelds += conns * qty;
+          else sm.buttWelds += conns * qty;
+        } else if (catLower === "cap") {
+          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "butt weld", connectionCount: 1 * qty, location });
+          sm.buttWelds += 1 * qty;
+        } else if (catLower === "coupling") {
+          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
+          sm.socketWelds += 2 * qty;
+        } else if (catLower === "valve") {
+          if (isThreaded) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "threaded", connectionCount: 2 * qty, location });
+            sm.threaded += 2 * qty;
+          } else {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "butt weld", connectionCount: 2 * qty, location });
+            sm.buttWelds += 2 * qty;
+          }
+        } else if (catLower === "flange") {
+          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "butt weld + bolt-up", connectionCount: qty, location });
+          sm.buttWelds += qty;
+          sm.boltUps += Math.ceil(qty / 2);
+        }
+      }
+
+      // Sheet 1: Connections by Size
+      const ws = wb.addWorksheet("Connections by Size");
+      ws.columns = [
+        { header: "Size", key: "size" },
+        { header: "Butt Welds", key: "buttWelds" },
+        { header: "Socket Welds", key: "socketWelds" },
+        { header: "Bolt-Ups", key: "boltUps" },
+        { header: "Threaded", key: "threaded" },
+        { header: "Total", key: "total" },
+      ];
+      let totBW = 0, totSW = 0, totBU = 0, totTH = 0;
+      for (const [size, vals] of sizeMap) {
+        const total = vals.buttWelds + vals.socketWelds + vals.boltUps + vals.threaded;
+        ws.addRow({ size, ...vals, total });
+        totBW += vals.buttWelds; totSW += vals.socketWelds; totBU += vals.boltUps; totTH += vals.threaded;
+      }
+      ws.addRow({ size: "TOTAL", buttWelds: totBW, socketWelds: totSW, boltUps: totBU, threaded: totTH, total: totBW + totSW + totBU + totTH });
+      ws.getRow(ws.rowCount).font = { bold: true };
+      applyExcelStyles(ws);
+
+      // Sheet 2: Connection Detail
+      const ws2 = wb.addWorksheet("Connection Detail");
+      ws2.columns = [
+        { header: "Size", key: "size" },
+        { header: "Fitting", key: "fitting" },
+        { header: "Qty", key: "qty" },
+        { header: "Connection Type", key: "connectionType" },
+        { header: "Connection Count", key: "connectionCount" },
+        { header: "Location", key: "location" },
+      ];
+      for (const d of connectionDetails) ws2.addRow(d);
+      applyExcelStyles(ws2);
+
+      const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "");
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Connections.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Connections export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
+  // 3. Crew Plan Export
+  app.post("/api/export-crew-plan", async (req, res) => {
+    const { projectName, scenarios, customCrew, rateCard } = req.body;
+    if (!projectName) return res.status(400).json({ message: "projectName required" });
+    try {
+      const ExcelJS = await import("exceljs");
+      const wb = new ExcelJS.default.Workbook();
+
+      // Sheet 1: Scenarios
+      if (scenarios && Array.isArray(scenarios)) {
+        const ws = wb.addWorksheet("Scenarios");
+        ws.columns = [
+          { header: "Scenario", key: "scenario", width: 18 },
+          { header: "Role", key: "role", width: 25 },
+          { header: "Count", key: "count", width: 10 },
+          { header: "Rate ($/hr)", key: "rate", width: 14 },
+          { header: "Per Diem ($/day)", key: "perDiem", width: 16 },
+          { header: "Duration (days)", key: "duration", width: 16 },
+          { header: "Daily Burn Rate ($)", key: "dailyBurn", width: 18 },
+          { header: "Total Cost ($)", key: "totalCost", width: 16 },
+        ];
+        for (const scenario of scenarios) {
+          if (scenario.roles && Array.isArray(scenario.roles)) {
+            for (const role of scenario.roles) {
+              ws.addRow({
+                scenario: scenario.name || "",
+                role: role.name || "",
+                count: role.count ?? 0,
+                rate: role.rate ?? 0,
+                perDiem: role.perDiem ?? 0,
+                duration: scenario.duration ?? 0,
+                dailyBurn: scenario.dailyBurn ?? 0,
+                totalCost: scenario.totalCost ?? 0,
+              });
+            }
+            // Blank row between scenarios
+            ws.addRow({});
+          }
+        }
+        applyExcelStyles(ws);
+      }
+
+      // Sheet 2: Custom Crew
+      if (customCrew && typeof customCrew === "object") {
+        const ws2 = wb.addWorksheet("Custom Crew");
+        ws2.columns = [
+          { header: "Role", key: "role", width: 25 },
+          { header: "Count", key: "count", width: 10 },
+          { header: "Rate ($/hr)", key: "rate", width: 14 },
+          { header: "Per Diem ($/day)", key: "perDiem", width: 16 },
+        ];
+        if (customCrew.roles && Array.isArray(customCrew.roles)) {
+          for (const role of customCrew.roles) {
+            ws2.addRow({ role: role.name || "", count: role.count ?? 0, rate: role.rate ?? 0, perDiem: role.perDiem ?? 0 });
+          }
+        }
+        applyExcelStyles(ws2);
+      }
+
+      // Sheet 3: Rate Card
+      if (rateCard && Array.isArray(rateCard)) {
+        const ws3 = wb.addWorksheet("Rate Card");
+        ws3.columns = [
+          { header: "Role", key: "role", width: 25 },
+          { header: "Rate ($/hr)", key: "rate", width: 14 },
+          { header: "Per Diem Eligible", key: "perDiem", width: 18 },
+        ];
+        for (const r of rateCard) {
+          ws3.addRow({ role: r.name || "", rate: r.rate ?? 0, perDiem: r.perDiemEligible ? "Yes" : "No" });
+        }
+        applyExcelStyles(ws3);
+      }
+
+      const safeName = (projectName || "Crew Plan").replace(/[^a-zA-Z0-9 _-]/g, "");
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Crew Plan.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Crew plan export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
+  // 4. Project Plan Export
+  app.post("/api/export-project-plan", async (req, res) => {
+    const { projectName, activities, summary } = req.body;
+    if (!projectName) return res.status(400).json({ message: "projectName required" });
+    try {
+      const ExcelJS = await import("exceljs");
+      const wb = new ExcelJS.default.Workbook();
+
+      // Sheet 1: Schedule
+      const ws = wb.addWorksheet("Schedule");
+      ws.columns = [
+        { header: "Activity #", key: "id", width: 12 },
+        { header: "Activity Name", key: "name", width: 30 },
+        { header: "Phase", key: "phase", width: 18 },
+        { header: "Duration (days)", key: "duration", width: 15 },
+        { header: "Manhours", key: "manhours", width: 12 },
+        { header: "Crew", key: "crew", width: 8 },
+        { header: "Predecessors", key: "predecessors", width: 18 },
+        { header: "Start Date", key: "startDate", width: 14 },
+        { header: "End Date", key: "endDate", width: 14 },
+        { header: "Float (days)", key: "float", width: 12 },
+        { header: "Critical Path", key: "critical", width: 14 },
+      ];
+      const criticalFill = { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFFCE4EC" } };
+      if (activities && Array.isArray(activities)) {
+        for (const a of activities) {
+          const row = ws.addRow({
+            id: a.id || "",
+            name: a.name || "",
+            phase: a.phase || "",
+            duration: a.duration ?? 0,
+            manhours: a.manhours ?? 0,
+            crew: a.crew ?? 0,
+            predecessors: Array.isArray(a.predecessors) ? a.predecessors.join(", ") : (a.predecessors || ""),
+            startDate: a.startDate || "",
+            endDate: a.endDate || "",
+            float: a.float ?? 0,
+            critical: a.critical ? "Yes" : "No",
+          });
+          if (a.critical) {
+            row.eachCell((cell: any) => { cell.fill = criticalFill; });
+          }
+          if (a.milestone) {
+            row.font = { bold: true };
+          }
+        }
+      }
+      applyExcelStyles(ws);
+      // Re-apply critical path highlighting after styles
+      if (activities && Array.isArray(activities)) {
+        for (let i = 0; i < activities.length; i++) {
+          if (activities[i].critical) {
+            ws.getRow(i + 2).eachCell((cell: any) => { cell.fill = criticalFill; });
+          }
+        }
+      }
+
+      // Sheet 2: Summary
+      const ws2 = wb.addWorksheet("Summary");
+      ws2.columns = [
+        { header: "Metric", key: "metric", width: 30 },
+        { header: "Value", key: "value", width: 25 },
+      ];
+      if (summary && typeof summary === "object") {
+        ws2.addRow({ metric: "Project Name", value: projectName });
+        ws2.addRow({ metric: "Total Duration (days)", value: summary.totalDuration ?? "" });
+        ws2.addRow({ metric: "Critical Path Duration (days)", value: summary.criticalPathDuration ?? "" });
+        ws2.addRow({ metric: "Total Manhours", value: summary.totalManhours ?? "" });
+        ws2.addRow({ metric: "Completion Date", value: summary.completionDate ?? "" });
+        ws2.addRow({ metric: "Crew Utilization (%)", value: summary.utilization ?? "" });
+      }
+      applyExcelStyles(ws2);
+
+      const safeName = (projectName || "Project Plan").replace(/[^a-zA-Z0-9 _-]/g, "");
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Project Plan.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Project plan export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
+  // 5. Cost Database Export
+  app.get("/api/cost-database/export", async (_req, res) => {
+    try {
+      const entries = storage.getCostDatabase();
+      const ExcelJS = await import("exceljs");
+      const wb = new ExcelJS.default.Workbook();
+
+      const ws = wb.addWorksheet("Cost Database");
+      ws.columns = [
+        { header: "Description", key: "description", width: 35 },
+        { header: "Size", key: "size", width: 12 },
+        { header: "Category", key: "category", width: 14 },
+        { header: "Unit", key: "unit", width: 8 },
+        { header: "Material Cost ($)", key: "materialUnitCost", width: 16 },
+        { header: "Labor Cost ($)", key: "laborUnitCost", width: 14 },
+        { header: "Labor Hours/Unit", key: "laborHoursPerUnit", width: 16 },
+        { header: "Last Updated", key: "lastUpdated", width: 16 },
+      ];
+      for (const e of entries) {
+        ws.addRow({
+          description: e.description,
+          size: e.size || "",
+          category: e.category || "",
+          unit: e.unit || "EA",
+          materialUnitCost: e.materialUnitCost ?? 0,
+          laborUnitCost: e.laborUnitCost ?? 0,
+          laborHoursPerUnit: e.laborHoursPerUnit ?? 0,
+          lastUpdated: e.lastUpdated || "",
+        });
+      }
+      applyExcelStyles(ws);
+
+      // Sheet 2: Summary by category
+      const ws2 = wb.addWorksheet("Summary");
+      ws2.columns = [
+        { header: "Category", key: "category", width: 18 },
+        { header: "Count", key: "count", width: 10 },
+        { header: "Avg Material Cost ($)", key: "avgMat", width: 22 },
+        { header: "Avg Labor Cost ($)", key: "avgLab", width: 20 },
+      ];
+      const catMap = new Map<string, { count: number; totalMat: number; totalLab: number }>();
+      for (const e of entries) {
+        const cat = e.category || "other";
+        const existing = catMap.get(cat) || { count: 0, totalMat: 0, totalLab: 0 };
+        existing.count++;
+        existing.totalMat += e.materialUnitCost ?? 0;
+        existing.totalLab += e.laborUnitCost ?? 0;
+        catMap.set(cat, existing);
+      }
+      for (const [cat, v] of catMap) {
+        ws2.addRow({ category: cat, count: v.count, avgMat: v.count > 0 ? Math.round((v.totalMat / v.count) * 100) / 100 : 0, avgLab: v.count > 0 ? Math.round((v.totalLab / v.count) * 100) / 100 : 0 });
+      }
+      applyExcelStyles(ws2);
+
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="PG Cost Database.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Cost DB export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
+  // 6. Folder Combined BOM Export
+  app.get("/api/folders/:id/export-combined", async (req, res) => {
+    const folder = storage.getFolder(req.params.id);
+    if (!folder) return res.status(404).json({ message: "Folder not found" });
+    try {
+      const projects = storage.getProjectsByFolder(req.params.id);
+      const allItems = storage.getFolderCombinedItems(req.params.id);
+      const ExcelJS = await import("exceljs");
+      const wb = new ExcelJS.default.Workbook();
+
+      // Build project ID -> name map
+      const projMap = new Map<string, string>();
+      for (const p of projects) projMap.set(p.id, p.name);
+
+      // Sheet 1: Combined BOM
+      const ws = wb.addWorksheet("Combined BOM");
+      ws.columns = [
+        { header: "Source Project", key: "project" },
+        { header: "Line #", key: "lineNumber" },
+        { header: "Category", key: "category" },
+        { header: "Size", key: "size" },
+        { header: "Description", key: "description" },
+        { header: "Quantity", key: "quantity" },
+        { header: "Unit", key: "unit" },
+        { header: "Material", key: "material" },
+        { header: "Schedule", key: "schedule" },
+        { header: "Spec", key: "spec" },
+        { header: "Rating", key: "rating" },
+        { header: "Confidence", key: "confidence" },
+        { header: "Notes", key: "notes" },
+      ];
+      for (const item of allItems) {
+        ws.addRow({
+          project: projMap.get((item as any).projectId || "") || "",
+          lineNumber: item.lineNumber || "",
+          category: item.category || "",
+          size: item.size || "",
+          description: item.description || "",
+          quantity: item.quantity ?? 0,
+          unit: item.unit || "EA",
+          material: item.material || "",
+          schedule: item.schedule || "",
+          spec: item.spec || "",
+          rating: item.rating || "",
+          confidence: item.confidence ? `${Math.round(item.confidence * 100)}%` : "",
+          notes: item.notes || "",
+        });
+      }
+      applyExcelStyles(ws);
+
+      // Sheet 2: By Project
+      const ws2 = wb.addWorksheet("By Project");
+      ws2.columns = [
+        { header: "Project", key: "project" },
+        { header: "Category", key: "category" },
+        { header: "Size", key: "size" },
+        { header: "Description", key: "description" },
+        { header: "Quantity", key: "quantity" },
+        { header: "Unit", key: "unit" },
+      ];
+      for (const p of projects) {
+        const projItems = allItems.filter((i: any) => i.projectId === p.id);
+        for (const item of projItems) {
+          ws2.addRow({
+            project: p.name,
+            category: item.category || "",
+            size: item.size || "",
+            description: item.description || "",
+            quantity: item.quantity ?? 0,
+            unit: item.unit || "EA",
+          });
+        }
+        // Subtotal row
+        if (projItems.length > 0) {
+          const subtotal = ws2.addRow({ project: `${p.name} SUBTOTAL`, category: "", size: "", description: "", quantity: projItems.reduce((s: number, i: any) => s + (i.quantity ?? 0), 0), unit: "" });
+          subtotal.font = { bold: true };
+        }
+      }
+      applyExcelStyles(ws2);
+
+      // Sheet 3: Summary pivot
+      const ws3 = wb.addWorksheet("Summary");
+      ws3.columns = [
+        { header: "Category", key: "category", width: 18 },
+        { header: "Size", key: "size", width: 12 },
+        { header: "Item Count", key: "count", width: 12 },
+        { header: "Total Qty", key: "totalQty", width: 12 },
+      ];
+      const pivot = new Map<string, { count: number; totalQty: number }>();
+      for (const item of allItems) {
+        const key = `${item.category || "other"}|${item.size || "N/A"}`;
+        const existing = pivot.get(key) || { count: 0, totalQty: 0 };
+        existing.count++;
+        existing.totalQty += item.quantity ?? 0;
+        pivot.set(key, existing);
+      }
+      for (const [key, val] of pivot) {
+        const [category, size] = key.split("|");
+        ws3.addRow({ category, size, count: val.count, totalQty: val.totalQty });
+      }
+      ws3.addRow({ category: "TOTAL", size: "", count: allItems.length, totalQty: allItems.reduce((s: number, i: any) => s + (i.quantity ?? 0), 0) });
+      ws3.getRow(ws3.rowCount).font = { bold: true };
+      applyExcelStyles(ws3);
+
+      const safeName = ((folder as any).name || "Combined BOM").replace(/[^a-zA-Z0-9 _-]/g, "");
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Combined BOM.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Folder export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
   return httpServer;
 }
