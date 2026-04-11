@@ -5443,5 +5443,61 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     }
   });
 
+  // ── Project Folders ──
+
+  app.post("/api/folders", (req, res) => {
+    const { name, description, color } = req.body;
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "Folder name is required" });
+    }
+    const folder = storage.createFolder({ name: name.trim(), description, color });
+    res.json(folder);
+  });
+
+  app.get("/api/folders", (_req, res) => {
+    res.json(storage.getFolders());
+  });
+
+  app.get("/api/folders/:id", (req, res) => {
+    const folder = storage.getFolder(req.params.id);
+    if (!folder) return res.status(404).json({ error: "Folder not found" });
+    res.json(folder);
+  });
+
+  app.put("/api/folders/:id", (req, res) => {
+    const { name, description, color } = req.body;
+    const updated = storage.updateFolder(req.params.id, { name, description, color });
+    if (!updated) return res.status(404).json({ error: "Folder not found" });
+    res.json(updated);
+  });
+
+  app.delete("/api/folders/:id", (req, res) => {
+    const deleted = storage.deleteFolder(req.params.id);
+    if (!deleted) return res.status(404).json({ error: "Folder not found" });
+    res.json({ success: true });
+  });
+
+  app.post("/api/folders/:id/projects", (req, res) => {
+    const { projectId } = req.body;
+    if (!projectId) return res.status(400).json({ error: "projectId is required" });
+    const folder = storage.getFolder(req.params.id);
+    if (!folder) return res.status(404).json({ error: "Folder not found" });
+    storage.addProjectToFolder(req.params.id, projectId);
+    res.json({ success: true });
+  });
+
+  app.delete("/api/folders/:id/projects/:projectId", (req, res) => {
+    storage.removeProjectFromFolder(req.params.id);
+    res.json({ success: true });
+  });
+
+  app.get("/api/folders/:id/combined-bom", (req, res) => {
+    const folder = storage.getFolder(req.params.id);
+    if (!folder) return res.status(404).json({ error: "Folder not found" });
+    const projects = storage.getProjectsByFolder(req.params.id);
+    const combinedItems = storage.getFolderCombinedItems(req.params.id);
+    res.json({ folder, projects, combinedItems });
+  });
+
   return httpServer;
 }

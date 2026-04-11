@@ -261,6 +261,18 @@ db.exec(`
   );
 `);
 
+// Project folders table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS project_folders (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    color TEXT DEFAULT '#01696F',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+`);
+
 // Add confidence column to takeoff_items if it doesn't exist
 try {
   db.exec(`ALTER TABLE takeoff_items ADD COLUMN confidence TEXT DEFAULT 'high'`);
@@ -399,6 +411,13 @@ try {
 // Add salt column to users if it doesn't exist
 try {
   db.exec(`ALTER TABLE users ADD COLUMN salt TEXT`);
+} catch (e: any) {
+  // Column already exists — ignore
+}
+
+// Add folderId to takeoff_projects for project folders
+try {
+  db.exec(`ALTER TABLE takeoff_projects ADD COLUMN folderId TEXT REFERENCES project_folders(id) ON DELETE SET NULL`);
 } catch (e: any) {
   // Column already exists — ignore
 }
@@ -716,6 +735,17 @@ const stmts = {
   getVendorQuotes: db.prepare(`SELECT * FROM vendor_quotes ORDER BY createdAt DESC`),
   getVendorQuote: db.prepare(`SELECT * FROM vendor_quotes WHERE id = ?`),
   deleteVendorQuote: db.prepare(`DELETE FROM vendor_quotes WHERE id = ?`),
+
+  // Project folders
+  insertFolder: db.prepare(`INSERT INTO project_folders (id, name, description, color, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`),
+  getFolders: db.prepare(`SELECT pf.*, COUNT(tp.id) as projectCount FROM project_folders pf LEFT JOIN takeoff_projects tp ON tp.folderId = pf.id GROUP BY pf.id ORDER BY pf.createdAt DESC`),
+  getFolder: db.prepare(`SELECT * FROM project_folders WHERE id = ?`),
+  updateFolder: db.prepare(`UPDATE project_folders SET name = ?, description = ?, color = ?, updatedAt = ? WHERE id = ?`),
+  deleteFolder: db.prepare(`DELETE FROM project_folders WHERE id = ?`),
+  addProjectToFolder: db.prepare(`UPDATE takeoff_projects SET folderId = ? WHERE id = ?`),
+  removeProjectFromFolder: db.prepare(`UPDATE takeoff_projects SET folderId = NULL WHERE id = ?`),
+  getProjectsByFolder: db.prepare(`SELECT * FROM takeoff_projects WHERE folderId = ? ORDER BY createdAt DESC`),
+  getFolderCombinedItems: db.prepare(`SELECT ti.* FROM takeoff_items ti INNER JOIN takeoff_projects tp ON ti.projectId = tp.id WHERE tp.folderId = ? ORDER BY tp.name, ti.lineNumber`),
 };
 
 // Transaction helpers
@@ -1732,6 +1762,64 @@ class Storage {
     }
 
     return alerts;
+  }
+
+  // ── Project Folders ──
+
+  createFolder(data: { name: string; description?: string; color?: string }): any {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    stmts.insertFolder.run(id, data.name, data.description || '', data.color || '#01696F', now, now);
+    return { id, name: data.name, description: data.description || '', color: data.color || '#01696F', createdAt: now, updatedAt: now, projectCount: 0 };
+  }
+
+  getFolders(): any[] {
+    return stmts.getFolders.all() as any[];
+  }
+
+  getFolder(id: string): any | undefined {
+    return stmts.getFolder.get(id) as any | undefined;
+  }
+
+  updateFolder(id: string, data: { name?: string; description?: string; color?: string }): any | undefined {
+    const existing = this.getFolder(id);
+    if (!existing) return undefined;
+    const now = new Date().toISOString();
+    stmts.updateFolder.run(
+      data.name ?? existing.name,
+      data.description ?? existing.description,
+      data.color ?? existing.color,
+      now,
+      id
+    );
+    return { ...existing, ...data, updatedAt: now };
+  }
+
+  deleteFolder(id: string): boolean {
+    const result = stmts.deleteFolder.run(id);
+    return result.changes > 0;
+  }
+
+  addProjectToFolder(folderId: string, projectId: string): boolean {
+    const result = stmts.addProjectToFolder.run(folderId, projectId);
+    return result.changes > 0;
+  }
+
+  removeProjectFromFolder(projectId: string): boolean {
+    const result = stmts.removeProjectFromFolder.run(projectId);
+    return result.changes > 0;
+  }
+
+  getProjectsByFolder(folderId: string): any[] {
+    const rows = stmts.getProjectsByFolder.all(folderId) as any[];
+    return rows.map(row => {
+      const items = (stmts.getTakeoffItems.all(row.id) as any[]).map(rowToTakeoffItem);
+      return serializeTakeoffProject(row, items);
+    });
+  }
+
+  getFolderCombinedItems(folderId: string): TakeoffItem[] {
+    return (stmts.getFolderCombinedItems.all(folderId) as any[]).map(rowToTakeoffItem);
   }
 }
 

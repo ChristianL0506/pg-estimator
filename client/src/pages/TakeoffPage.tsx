@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
-import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon , FolderOpen } from "lucide-react";
+import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon, FolderOpen, FolderPlus, Folder, Plus, MoreVertical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,13 @@ import SummaryCards from "@/components/SummaryCards";
 import PivotSummary from "@/components/PivotSummary";
 import ConnectionsSummary from "@/components/ConnectionsSummary";
 import { useToast } from "@/hooks/use-toast";
+import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { exportMechanicalPdf, exportStructuralPdf, exportCivilPdf } from "@/lib/pdfExport";
 import type { TakeoffProject } from "@shared/schema";
@@ -49,6 +56,66 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
   const [, navigate] = useLocation();
   const searchString = useSearch();
   const { toast } = useToast();
+
+  // Folder state
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [showFolders, setShowFolders] = useState(true);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [creatingFolder, setCreatingFolder] = useState(false);
+
+  // Folder queries
+  const { data: folders = [], refetch: refetchFolders } = useQuery<any[]>({
+    queryKey: ["/api/folders"],
+  });
+
+  const { data: folderBom } = useQuery<any>({
+    queryKey: ["/api/folders", selectedFolderId, "combined-bom"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/folders/${selectedFolderId}/combined-bom`);
+      return res.json();
+    },
+    enabled: !!selectedFolderId,
+  });
+
+  const createFolderMutation = useMutation({
+    mutationFn: (name: string) => apiRequest("POST", "/api/folders", { name }).then(r => r.json()),
+    onSuccess: () => {
+      refetchFolders();
+      setNewFolderName("");
+      setCreatingFolder(false);
+      toast({ title: "Folder created" });
+    },
+  });
+
+  const deleteFolderMutation = useMutation({
+    mutationFn: (id: string) => apiRequest("DELETE", `/api/folders/${id}`),
+    onSuccess: (_, id) => {
+      refetchFolders();
+      if (selectedFolderId === id) setSelectedFolderId(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/takeoff/projects"] });
+      toast({ title: "Folder deleted" });
+    },
+  });
+
+  const moveToFolderMutation = useMutation({
+    mutationFn: ({ folderId, projectId }: { folderId: string; projectId: string }) =>
+      apiRequest("POST", `/api/folders/${folderId}/projects`, { projectId }),
+    onSuccess: () => {
+      refetchFolders();
+      queryClient.invalidateQueries({ queryKey: ["/api/takeoff/projects"] });
+      toast({ title: "Project moved to folder" });
+    },
+  });
+
+  const removeFromFolderMutation = useMutation({
+    mutationFn: ({ folderId, projectId }: { folderId: string; projectId: string }) =>
+      apiRequest("DELETE", `/api/folders/${folderId}/projects/${projectId}`),
+    onSuccess: () => {
+      refetchFolders();
+      queryClient.invalidateQueries({ queryKey: ["/api/takeoff/projects"] });
+      toast({ title: "Project removed from folder" });
+    },
+  });
 
   // Read project ID from URL query parameter (e.g., ?project=abc)
   useEffect(() => {
@@ -179,6 +246,83 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
         {/* Left panel — project list */}
         <div className={`fixed inset-y-0 left-0 z-50 w-64 bg-background border-r border-border flex flex-col overflow-hidden transition-transform duration-200
           ${mobileSidebarOpen ? "translate-x-0" : "-translate-x-full"} md:relative md:translate-x-0 md:shrink-0`}>
+          {/* Folders section */}
+          <div className="p-3 border-b border-border">
+            <div className="flex items-center justify-between mb-2">
+              <button
+                className="flex items-center gap-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors"
+                onClick={() => setShowFolders(!showFolders)}
+              >
+                {showFolders ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                Folders
+              </button>
+              <button
+                className="text-muted-foreground hover:text-foreground transition-colors"
+                onClick={() => setCreatingFolder(true)}
+                title="Create folder"
+              >
+                <FolderPlus size={13} />
+              </button>
+            </div>
+            {showFolders && (
+              <div className="space-y-0.5">
+                {creatingFolder && (
+                  <form
+                    className="flex gap-1 mb-1"
+                    onSubmit={e => {
+                      e.preventDefault();
+                      if (newFolderName.trim()) createFolderMutation.mutate(newFolderName.trim());
+                    }}
+                  >
+                    <Input
+                      autoFocus
+                      value={newFolderName}
+                      onChange={e => setNewFolderName(e.target.value)}
+                      placeholder="Folder name..."
+                      className="h-7 text-xs"
+                    />
+                    <Button type="submit" size="sm" className="h-7 px-2 text-xs" disabled={!newFolderName.trim()}>
+                      <Plus size={12} />
+                    </Button>
+                  </form>
+                )}
+                {folders.map((f: any) => (
+                  <div
+                    key={f.id}
+                    className={`group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors text-xs
+                      ${selectedFolderId === f.id ? "bg-primary/10 border border-primary/20" : "hover:bg-accent"}`}
+                    onClick={() => { setSelectedFolderId(f.id); setSelectedId(null); setMobileSidebarOpen(false); }}
+                  >
+                    <Folder size={13} className="text-teal-600 dark:text-teal-400 shrink-0" />
+                    <span className="truncate flex-1 font-medium">{f.name}</span>
+                    <span className="text-[10px] text-muted-foreground">{f.projectCount || 0}</span>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild onClick={e => e.stopPropagation()}>
+                        <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground p-0.5">
+                          <MoreVertical size={12} />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-32">
+                        <DropdownMenuItem
+                          className="text-xs text-destructive"
+                          onClick={e => {
+                            e.stopPropagation();
+                            if (window.confirm(`Delete folder "${f.name}"?`)) deleteFolderMutation.mutate(f.id);
+                          }}
+                        >
+                          <Trash2 size={12} className="mr-1.5" /> Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                ))}
+                {folders.length === 0 && !creatingFolder && (
+                  <p className="text-[10px] text-muted-foreground px-2">No folders yet</p>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="p-3 border-b border-border flex items-center justify-between">
             <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Projects</h2>
             {projects.some(p => p.archived) && (
@@ -242,6 +386,26 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       >
                         <Trash2 size={13} />
                       </button>
+                      {folders.length > 0 && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild onClick={e => e.stopPropagation()}>
+                            <button className="text-muted-foreground hover:text-foreground p-0.5" title="Move to folder">
+                              <Folder size={13} />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-40">
+                            {folders.map((f: any) => (
+                              <DropdownMenuItem
+                                key={f.id}
+                                className="text-xs"
+                                onClick={e => { e.stopPropagation(); moveToFolderMutation.mutate({ folderId: f.id, projectId: p.id }); }}
+                              >
+                                <Folder size={11} className="mr-1.5 text-teal-600 dark:text-teal-400" /> {f.name}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -262,8 +426,74 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
               }}
             />
 
+            {/* Combined BOM view for selected folder */}
+            {selectedFolderId && folderBom && (
+              <div className="space-y-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Folder size={16} className="text-teal-600 dark:text-teal-400" />
+                      <h2 className="text-base font-semibold">{folderBom.folder?.name}</h2>
+                      <Badge variant="outline" className="text-xs">{folderBom.projects?.length || 0} projects</Badge>
+                      <Badge variant="outline" className="text-xs">{folderBom.combinedItems?.length || 0} total items</Badge>
+                    </div>
+                    {folderBom.folder?.description && (
+                      <p className="text-xs text-muted-foreground mt-1">{folderBom.folder.description}</p>
+                    )}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setSelectedFolderId(null)}
+                  >
+                    Close Folder
+                  </Button>
+                </div>
+
+                {/* Folder projects */}
+                {folderBom.projects?.length > 0 && (
+                  <div className="flex gap-2 flex-wrap">
+                    {folderBom.projects.map((fp: any) => (
+                      <div key={fp.id} className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-card border border-border text-xs">
+                        <FileText size={12} className="text-muted-foreground" />
+                        <span className="font-medium">{fp.name}</span>
+                        <span className="text-muted-foreground">{fp.items?.length || 0} items</span>
+                        <button
+                          className="text-muted-foreground hover:text-destructive ml-1"
+                          onClick={() => removeFromFolderMutation.mutate({ folderId: selectedFolderId!, projectId: fp.id })}
+                          title="Remove from folder"
+                        >
+                          <XIcon size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Combined BOM */}
+                {folderBom.combinedItems?.length > 0 && (
+                  <Tabs defaultValue="bom">
+                    <TabsList className="mb-3">
+                      <TabsTrigger value="bom" className="text-xs">Combined BOM</TabsTrigger>
+                      <TabsTrigger value="connections" className="text-xs">Connections</TabsTrigger>
+                      <TabsTrigger value="pivot" className="text-xs">Pivot Summary</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="bom">
+                      <TakeoffBomTable items={folderBom.combinedItems} discipline={discipline} />
+                    </TabsContent>
+                    <TabsContent value="connections">
+                      <ConnectionsSummary items={folderBom.combinedItems} />
+                    </TabsContent>
+                    <TabsContent value="pivot">
+                      <PivotSummary items={folderBom.combinedItems} />
+                    </TabsContent>
+                  </Tabs>
+                )}
+              </div>
+            )}
+
             {/* Selected project view */}
-            {selectedId && selectedProject ? (
+            {selectedId && selectedProject && !selectedFolderId ? (
               <div className="space-y-4">
                 {/* Project header */}
                 <div className="flex items-start justify-between gap-4">
