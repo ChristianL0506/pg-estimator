@@ -1,14 +1,19 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import type { TakeoffItem } from "@shared/schema";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { CheckCircle2, Pencil } from "lucide-react";
+import { apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 
 interface TakeoffBomTableProps {
   items: TakeoffItem[];
   discipline: "mechanical" | "structural" | "civil";
+  onItemUpdated?: () => void;
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -43,12 +48,109 @@ const CONFIDENCE_DOT: Record<string, { color: string; label: string }> = {
   low: { color: "bg-red-500", label: "Low confidence — needs review" },
 };
 
-export default function TakeoffBomTable({ items, discipline }: TakeoffBomTableProps) {
+type EditableField = "size" | "quantity" | "description";
+
+function InlineEditCell({
+  value,
+  field,
+  itemId,
+  onSave,
+  className,
+  children,
+}: {
+  value: string;
+  field: EditableField;
+  itemId: string;
+  onSave: (itemId: string, field: string, value: string) => void;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(value);
+  const [saved, setSaved] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  useEffect(() => {
+    if (saved) {
+      const t = setTimeout(() => setSaved(false), 800);
+      return () => clearTimeout(t);
+    }
+  }, [saved]);
+
+  const commit = () => {
+    setEditing(false);
+    if (editValue !== value) {
+      onSave(itemId, field, editValue);
+      setSaved(true);
+    }
+  };
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="bg-background border border-primary/60 rounded px-1 py-0.5 text-xs w-full outline-none focus:ring-1 focus:ring-primary/40"
+        value={editValue}
+        onChange={(e) => setEditValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") { setEditValue(value); setEditing(false); }
+        }}
+        onBlur={commit}
+      />
+    );
+  }
+
+  return (
+    <span
+      className={`group/edit cursor-pointer inline-flex items-center gap-1 ${saved ? "bg-green-100 dark:bg-green-900/30 rounded px-0.5 transition-colors" : ""} ${className || ""}`}
+      onClick={() => { setEditValue(value); setEditing(true); }}
+      title="Click to edit"
+    >
+      {children}
+      <Pencil size={10} className="text-muted-foreground/0 group-hover/edit:text-muted-foreground/60 transition-opacity shrink-0" />
+    </span>
+  );
+}
+
+export default function TakeoffBomTable({ items, discipline, onItemUpdated }: TakeoffBomTableProps) {
+  const { toast } = useToast();
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [sizeFilter, setSizeFilter] = useState<string>("all");
   const [sheetFilter, setSheetFilter] = useState<string>("all");
   const [confidenceFilter, setConfidenceFilter] = useState<"all" | "low" | "medium">("all");
   const [cloudFilter, setCloudFilter] = useState<"all" | "clouded" | "non-clouded">("all");
+  const [verifyingAll, setVerifyingAll] = useState(false);
+
+  const editable = !!onItemUpdated;
+
+  const saveEdit = async (itemId: string, field: string, value: string) => {
+    if (!onItemUpdated) return;
+    const updates: Record<string, any> = { [field]: field === "quantity" ? (parseFloat(value) || 0) : value };
+    try {
+      await apiRequest("PATCH", `/api/takeoff-items/${itemId}`, updates);
+      onItemUpdated();
+    } catch {
+      toast({ title: "Save failed", variant: "destructive" });
+    }
+  };
+
+  const verifyItem = async (itemId: string) => {
+    if (!onItemUpdated) return;
+    try {
+      await apiRequest("PATCH", `/api/takeoff-items/${itemId}`, { verified: true });
+      onItemUpdated();
+    } catch {
+      toast({ title: "Verify failed", variant: "destructive" });
+    }
+  };
 
   // Derive filter options from data
   const categories = useMemo(() => {
@@ -118,6 +220,24 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
   else if (cloudFilter === "non-clouded") filteredItems = filteredItems.filter(i => !i.revisionClouded);
 
   const activeFilterCount = [categoryFilter !== "all", sizeFilter !== "all", sheetFilter !== "all", confidenceFilter !== "all", cloudFilter !== "all"].filter(Boolean).length;
+
+  const unverifiedVisible = filteredItems.filter(i => (i as any).confidence !== "high").length;
+
+  const verifyAllVisible = async () => {
+    if (!onItemUpdated) return;
+    setVerifyingAll(true);
+    const toVerify = filteredItems.filter(i => (i as any).confidence !== "high");
+    try {
+      for (const item of toVerify) {
+        await apiRequest("PATCH", `/api/takeoff-items/${item.id}`, { verified: true });
+      }
+      onItemUpdated();
+      toast({ title: `Verified ${toVerify.length} items` });
+    } catch {
+      toast({ title: "Bulk verify failed", variant: "destructive" });
+    }
+    setVerifyingAll(false);
+  };
 
   return (
     <div className="space-y-2">
@@ -201,6 +321,20 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
           </button>
         )}
 
+        {/* Verify All Visible button */}
+        {editable && unverifiedVisible > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs text-green-700 border-green-300 hover:bg-green-50 dark:text-green-400 dark:border-green-700 dark:hover:bg-green-900/30"
+            onClick={verifyAllVisible}
+            disabled={verifyingAll}
+          >
+            <CheckCircle2 size={12} className="mr-1" />
+            {verifyingAll ? "Verifying..." : `Verify All (${unverifiedVisible})`}
+          </Button>
+        )}
+
         <span className="text-xs text-muted-foreground ml-auto shrink-0">
           {filteredItems.length} of {items.length} items
         </span>
@@ -214,6 +348,8 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
           const conf = CONFIDENCE_DOT[(item as any).confidence || "high"] || CONFIDENCE_DOT.high;
           const isClouded = item.revisionClouded;
           const sourcePageNum = (item as any).sourcePage as number | undefined;
+          const isVerified = (item as any).confidence === "high";
+          const isManuallyVerified = !!(item as any).manuallyVerified;
           return (
             <div
               key={item.id}
@@ -229,6 +365,12 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
                   {isClouded && <Badge variant="outline" className="text-[8px] px-1 py-0 bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 shrink-0">REV</Badge>}
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {editable && !isVerified && (
+                    <button className="text-muted-foreground hover:text-green-600 transition-colors" title="Mark as verified" onClick={() => verifyItem(item.id)}>
+                      <CheckCircle2 size={14} />
+                    </button>
+                  )}
+                  {isManuallyVerified && <CheckCircle2 size={14} className="text-green-500" />}
                   <span className="font-mono text-xs font-semibold">
                     {item.unit === "LF" || item.unit === "CY" || item.unit === "SF" || item.unit === "SY"
                       ? item.quantity.toFixed(2)
@@ -274,6 +416,7 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
               <TableHead className="text-xs text-right">Qty</TableHead>
               <TableHead className="text-xs">Unit</TableHead>
               <TableHead className="text-xs text-muted-foreground">Notes</TableHead>
+              {editable && <TableHead className="w-8 text-xs"></TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -288,10 +431,17 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
               const isClouded = item.revisionClouded;
               const isDedupCandidate = !!(item as any)._dedupCandidate;
               const sourcePageNum = (item as any).sourcePage as number | undefined;
+              const isVerified = (item as any).confidence === "high";
+              const isManuallyVerified = !!(item as any).manuallyVerified;
+
+              const qtyDisplay = item.unit === "LF" || item.unit === "CY" || item.unit === "SF" || item.unit === "SY"
+                ? item.quantity.toFixed(2)
+                : item.quantity.toLocaleString();
+
               return (
                 <TableRow
                   key={item.id}
-                  className={`hover:bg-muted/30 text-xs ${isClouded ? "bg-amber-50/50 dark:bg-amber-950/20" : ""} ${isDedupCandidate ? "opacity-50" : ""}`}
+                  className={`group hover:bg-muted/30 text-xs ${isClouded ? "bg-amber-50/50 dark:bg-amber-950/20" : ""} ${isDedupCandidate ? "opacity-50" : ""}`}
                   data-testid={`row-item-${item.id}`}
                 >
                   <TableCell className="text-muted-foreground">{item.lineNumber}</TableCell>
@@ -316,9 +466,11 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
                   <TableCell className="px-1">
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <span className={`inline-block w-2 h-2 rounded-full ${conf.color}`} />
+                        <span className={`inline-block w-2.5 h-2.5 rounded-full ${conf.color} ${isManuallyVerified ? "ring-2 ring-green-300 dark:ring-green-700" : ""}`} />
                       </TooltipTrigger>
-                      <TooltipContent side="right" className="text-[10px]">{conf.label}{(item as any).confidenceNotes ? `: ${(item as any).confidenceNotes}` : ""}</TooltipContent>
+                      <TooltipContent side="right" className="text-[10px]">
+                        {conf.label}{isManuallyVerified ? " (manually verified)" : ""}{(item as any).confidenceNotes ? `: ${(item as any).confidenceNotes}` : ""}
+                      </TooltipContent>
                     </Tooltip>
                   </TableCell>
                   <TableCell>
@@ -326,9 +478,21 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
                       {item.category.replace(/_/g, " ")}
                     </Badge>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{item.size}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {editable ? (
+                      <InlineEditCell value={item.size} field="size" itemId={item.id} onSave={saveEdit}>
+                        <span>{item.size}</span>
+                      </InlineEditCell>
+                    ) : item.size}
+                  </TableCell>
                   <TableCell className="max-w-xs">
-                    <span className="line-clamp-2 text-xs">{item.description}</span>
+                    {editable ? (
+                      <InlineEditCell value={item.description} field="description" itemId={item.id} onSave={saveEdit}>
+                        <span className="line-clamp-2 text-xs">{item.description}</span>
+                      </InlineEditCell>
+                    ) : (
+                      <span className="line-clamp-2 text-xs">{item.description}</span>
+                    )}
                   </TableCell>
                   {isStructural && <TableCell className="font-mono text-xs">{item.mark || ""}</TableCell>}
                   {isStructural && <TableCell className="text-xs">{item.grade || ""}</TableCell>}
@@ -342,9 +506,11 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
                   {isCivil && <TableCell className="text-xs">{item.material || ""}</TableCell>}
                   {isCivil && <TableCell className="text-xs">{item.depth || ""}</TableCell>}
                   <TableCell className="text-right font-mono">
-                    {item.unit === "LF" || item.unit === "CY" || item.unit === "SF" || item.unit === "SY"
-                      ? item.quantity.toFixed(2)
-                      : item.quantity.toLocaleString()}
+                    {editable ? (
+                      <InlineEditCell value={String(item.quantity)} field="quantity" itemId={item.id} onSave={saveEdit}>
+                        <span>{qtyDisplay}</span>
+                      </InlineEditCell>
+                    ) : qtyDisplay}
                   </TableCell>
                   <TableCell className="text-muted-foreground">{item.unit}</TableCell>
                   <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
@@ -367,6 +533,30 @@ export default function TakeoffBomTable({ items, discipline }: TakeoffBomTablePr
                       {item.notes || ""}
                     </span>
                   </TableCell>
+                  {editable && (
+                    <TableCell className="px-1">
+                      {!isVerified ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              className="text-muted-foreground/40 group-hover:text-muted-foreground hover:!text-green-600 transition-colors p-0.5"
+                              onClick={() => verifyItem(item.id)}
+                            >
+                              <CheckCircle2 size={14} />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="left" className="text-[10px]">Mark as verified</TooltipContent>
+                        </Tooltip>
+                      ) : isManuallyVerified ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <CheckCircle2 size={14} className="text-green-500" />
+                          </TooltipTrigger>
+                          <TooltipContent side="left" className="text-[10px]">Manually verified</TooltipContent>
+                        </Tooltip>
+                      ) : null}
+                    </TableCell>
+                  )}
                 </TableRow>
               );
             })}

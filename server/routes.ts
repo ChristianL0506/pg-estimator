@@ -5623,6 +5623,36 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     }
   });
 
+  // ── Inline Edit / Verify Takeoff Items ──
+
+  app.patch("/api/takeoff-items/:itemId", (req, res) => {
+    const { itemId } = req.params;
+    const updates: Record<string, any> = {};
+    const body = req.body || {};
+
+    const allowedFields = ["size", "quantity", "description", "category", "unit", "material", "schedule", "spec", "rating", "notes"];
+    for (const field of allowedFields) {
+      if (body[field] !== undefined) {
+        updates[field] = field === "quantity" ? (parseFloat(body[field]) || 0) : String(body[field]);
+      }
+    }
+
+    if (body.verified === true) {
+      updates.confidence = "high";
+      updates.confidenceScore = 95;
+      updates.confidenceNotes = "Manually verified by estimator";
+      updates.manuallyVerified = 1;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No updates provided" });
+    }
+
+    const success = storage.updateTakeoffItem(itemId, updates);
+    if (!success) return res.status(404).json({ error: "Item not found" });
+    res.json({ success: true });
+  });
+
   // ── Project Folders ──
 
   app.post("/api/folders", (req, res) => {

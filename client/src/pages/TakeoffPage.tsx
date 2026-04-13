@@ -503,7 +503,7 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <TabsTrigger value="pivot" className="text-xs">Pivot Summary</TabsTrigger>
                     </TabsList>
                     <TabsContent value="bom">
-                      <TakeoffBomTable items={folderBom.combinedItems} discipline={discipline} />
+                      <TakeoffBomTable items={folderBom.combinedItems} discipline={discipline} onItemUpdated={() => queryClient.invalidateQueries({ queryKey: ["/api/folders", selectedFolderId, "combined-bom"] })} />
                     </TabsContent>
                     <TabsContent value="connections">
                       <ConnectionsSummary items={folderBom.combinedItems} />
@@ -738,7 +738,7 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                     <TabsTrigger value="fab-scope" className="text-xs">Fab Scope</TabsTrigger>
                   </TabsList>
                   <TabsContent value="bom">
-                    <TakeoffBomTable items={selectedProject.items} discipline={discipline} />
+                    <TakeoffBomTable items={selectedProject.items} discipline={discipline} onItemUpdated={() => queryClient.invalidateQueries({ queryKey: ["/api/takeoff/projects", selectedId] })} />
                   </TabsContent>
                   <TabsContent value="connections">
                     <ConnectionsSummary items={selectedProject.items} />

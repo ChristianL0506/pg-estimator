@@ -364,6 +364,13 @@ try {
   // Column already exists — ignore
 }
 
+// Add manuallyVerified column to takeoff_items if it doesn't exist
+try {
+  db.exec(`ALTER TABLE takeoff_items ADD COLUMN manuallyVerified INTEGER DEFAULT 0`);
+} catch (e: any) {
+  // Column already exists — ignore
+}
+
 // Add weldAssumption column to estimate_items if it doesn't exist
 try {
   db.exec(`ALTER TABLE estimate_items ADD COLUMN weldAssumption TEXT`);
@@ -597,6 +604,7 @@ function rowToTakeoffItem(row: any): TakeoffItem {
     sourcePage: row.sourcePage != null ? row.sourcePage : undefined,
     _dedupCandidate: row._dedupCandidate === 1 || row._dedupCandidate === true || undefined,
     dedupNote: row.dedupNote || undefined,
+    manuallyVerified: row.manuallyVerified === 1 || row.manuallyVerified === true || undefined,
   };
 }
 
@@ -863,6 +871,22 @@ class Storage {
 
   async archiveTakeoffProject(id: string, archived: boolean): Promise<boolean> {
     const result = stmts.archiveTakeoffProject.run(archived ? 1 : 0, id);
+    return result.changes > 0;
+  }
+
+  updateTakeoffItem(itemId: string, updates: Record<string, any>): boolean {
+    const allowedFields = ["size", "quantity", "description", "category", "unit", "material", "schedule", "spec", "rating", "notes", "confidence", "confidenceScore", "confidenceNotes", "manuallyVerified"];
+    const fields: string[] = [];
+    const values: any[] = [];
+    for (const field of allowedFields) {
+      if (updates[field] !== undefined) {
+        fields.push(`${field} = ?`);
+        values.push(updates[field]);
+      }
+    }
+    if (fields.length === 0) return false;
+    values.push(itemId);
+    const result = db.prepare(`UPDATE takeoff_items SET ${fields.join(", ")} WHERE id = ?`).run(...values);
     return result.changes > 0;
   }
 
