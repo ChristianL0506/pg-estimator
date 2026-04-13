@@ -614,6 +614,14 @@ RULES — READ CAREFULLY:
 6. SKIP: title block text, engineer stamps, notes, revision blocks, drawing borders.
 7. If a page image has NO BOM table or only empty table headers, return an empty items array.
 
+CRITICAL — AVOID DOUBLE COUNTING:
+- Extract items ONLY from the BOM TABLE (the tabular list of materials in the SHOP and FIELD sections). Do NOT count items from the isometric drawing graphic, callout bubbles, or match line annotations.
+- Callout numbers (circled numbers like ①②③ or plain numbers in circles) on the isometric drawing reference BOM line items. They appear at EACH LOCATION where that item is used. The BOM table QTY column already has the TOTAL count — do NOT add extra from callout locations.
+- Example: BOM says "Item 5 | QTY: 3 | 4" COUPLING" = 3 couplings total. Even if callout "5" appears 3 times on the drawing, the QTY of 3 already covers all of them. Output qty=3, not 9.
+- If a BOM continues on a second sheet ("CONT'D"), only count items on THIS page's portion of the BOM table. The other sheet's BOM will be extracted separately.
+- Each BOM line item should appear EXACTLY ONCE in your output per page. Never duplicate a row.
+- If you see duplicate item numbers (same NO. column value), they are likely from different sections (SHOP vs FIELD). Include both but mark the correct section.
+
 COMMON ERRORS TO AVOID:
 - Pipe lengths: Don't confuse 11' (11 feet) with 11" (11 inches = 0.92 feet). The apostrophe (') means FEET, the double-quote (") means INCHES.
 - CRITICAL: Short pipe runs are often in INCHES. If you see 11" or 0'-11" that is 11 INCHES (0.92 LF), NOT 11 feet. Always include the " symbol for inches.
@@ -694,6 +702,11 @@ BOM EXTRACTION RULES:
 4. DESCRIPTION: Copy the FULL text including all specs.
 5. Include ALL rows from BOTH SHOP and FIELD tables.
 6. SKIP: title block text, engineer stamps, notes, drawing borders.
+
+AVOID DOUBLE COUNTING:
+- Extract ONLY from the BOM TABLE. Do NOT count items from the isometric drawing graphic or callout bubbles.
+- Callout numbers on the drawing reference BOM items. The BOM QTY already has the total — don't add extra.
+- Each BOM line item should appear EXACTLY ONCE per page.
 
 COMMON ERRORS TO AVOID:
 - Pipe lengths: Don't confuse 11' (11 feet) with 11" (11 inches = 0.92 feet). The apostrophe (') means FEET, the double-quote (") means INCHES.
