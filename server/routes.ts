@@ -657,15 +657,20 @@ Count ALL weld symbols visible on the drawing for each page. Include the count i
 "weldCount": {"buttWelds": NUMBER, "socketWelds": NUMBER, "fieldWelds": NUMBER}
 This is used to verify against the BOM-inferred weld count. Count carefully.
 
-CONTINUATION REFERENCES:
-Isometric drawings often show continuation lines to other sheets. Look for text like:
-- "CONT'D ON DWG xxx SHT x" or "CONT TO xxx"
-- "CONT'D FROM DWG xxx SHT x" or "CONT FROM xxx"
-- Match line flags or reference callouts at the edge of the drawing
-- "SEE DWG xxx" or arrows pointing off-sheet with a drawing number
+CONTINUATION REFERENCES — CRITICAL FOR AVOIDING DOUBLE COUNTING:
+Isometric drawings show continuation callouts where a pipe line leaves one sheet and continues on another.
+These callouts look like:
+- "CONT'D FROM DWG# 4"-150A2-10S-PA-9100-600-2" (this sheet receives the continuation)
+- "CONT'D TO DWG# 4"-150A2-10S-PA-9100-600-3" (this sheet sends to another)
+- "CONT'D ON DWG xxx" or "CONT FROM DWG xxx"
+- The callout includes the referenced drawing number, and often coordinates (E, N, EL values)
 
-If you find continuation references, include them in the output as a "continuations" array.
-For items that appear AT a continuation point (the fitting where the line leaves this sheet to continue on another), add "atContinuation": true to that item.
+When you find these continuation callouts:
+1. Include them in the "continuations" array with direction ("from" or "to") and the referenced drawing number
+2. The fitting AT the continuation point (the last/first fitting where the line connects between sheets) EXISTS IN BOTH SHEETS' BOM TABLES — but it is ONE physical fitting, not two.
+3. Mark that specific fitting with "atContinuation": true so the system can deduplicate it.
+4. The fitting at a continuation point is typically the item closest to the continuation callout — usually an elbow, tee, reducer, coupling, or flange at the boundary.
+5. Look at the BOM table: the item that corresponds to where the continuation callout is located should be flagged.
 
 Return ONLY valid JSON (no markdown fences, no extra text):
 {"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}, {"direction": "from", "drawing": "P-1001-500", "sheet": 2}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}`;
@@ -1941,44 +1946,73 @@ function dedupContinuationPages(items: any[]): any[] {
     }
   }
 
-  // For each pair of connected pages, find shared continuation items
+  // Build drawing number to page mapping for cross-referencing
+  const drawingToPage: Record<string, number> = {};
+  for (const item of items) {
+    if (item.drawingNumber && item.sourcePage) {
+      drawingToPage[item.drawingNumber] = item.sourcePage;
+    }
+  }
+
+  // For each page with a "from" continuation, find the receiving page and dedup shared items
   let dedupCount = 0;
   const processedPairs = new Set<string>();
 
   for (const [pageStr, connections] of Object.entries(pageConnections)) {
     const page = parseInt(pageStr);
     for (const conn of connections) {
-      if (conn.direction !== "from") continue; // Only process "from" direction to avoid double-processing
+      // Process "from" connections — this page receives from another drawing
+      if (conn.direction !== "from") continue;
 
-      // Find the "to" page — look for a page that has a "to" connection matching this drawing/sheet
-      const toPageEntry = Object.entries(pageConnections).find(([p, conns]) => {
-        return parseInt(p) !== page && conns.some(c =>
-          c.direction === "to" && c.drawing === conn.drawing && c.sheet === conn.sheet
-        );
-      });
-      // Also try: the "to" page has a "from" referencing back to our page's drawing
-      if (!toPageEntry) continue;
+      // Find the source page by drawing number reference
+      // The conn.drawing is the drawing number of the sheet we're connected FROM
+      let sourcePage: number | null = null;
 
-      const toPage = parseInt(toPageEntry[0]);
-      const pairKey = `${Math.min(page, toPage)}-${Math.max(page, toPage)}`;
+      // Method 1: Match by drawing number in the continuation reference
+      if (conn.drawing) {
+        sourcePage = drawingToPage[conn.drawing] || null;
+        // Also try partial matching (drawing numbers may have slight format differences)
+        if (!sourcePage) {
+          const connDwgClean = conn.drawing.replace(/["'\s]/g, "").toLowerCase();
+          for (const [dwg, pg] of Object.entries(drawingToPage)) {
+            if (dwg.replace(/["'\s]/g, "").toLowerCase() === connDwgClean) {
+              sourcePage = pg;
+              break;
+            }
+          }
+        }
+      }
+
+      // Method 2: Look for a page that has a "to" connection referencing back
+      if (!sourcePage) {
+        const toPageEntry = Object.entries(pageConnections).find(([p, conns]) => {
+          return parseInt(p) !== page && conns.some(c => c.direction === "to");
+        });
+        if (toPageEntry) sourcePage = parseInt(toPageEntry[0]);
+      }
+
+      if (!sourcePage || sourcePage === page) continue;
+
+      const pairKey = `${Math.min(page, sourcePage)}-${Math.max(page, sourcePage)}`;
       if (processedPairs.has(pairKey)) continue;
       processedPairs.add(pairKey);
 
-      // Get continuation items from both pages
-      const fromPageItems = continuationItems.filter(i => i.sourcePage === page);
-      const toPageItems = continuationItems.filter(i => i.sourcePage === toPage);
+      // This page ("from" direction = receiving continuation) has the duplicate.
+      // The source page (the one sending the continuation) keeps the item.
+      // Mark continuation items on THIS page as dedup candidates.
+      const thisPageContItems = continuationItems.filter(i => i.sourcePage === page);
+      const sourcePageContItems = continuationItems.filter(i => i.sourcePage === sourcePage);
 
-      // Match items by category + size + description (the actual fitting at the connection point)
-      for (const toItem of toPageItems) {
-        const matchKey = `${toItem.category}|${toItem.size}|${toItem.description}`;
-        const matchingFromItem = fromPageItems.find(fi =>
-          `${fi.category}|${fi.size}|${fi.description}` === matchKey
+      for (const thisItem of thisPageContItems) {
+        // Match by category + size (description may vary slightly between sheets)
+        const matchKey = `${thisItem.category}|${thisItem.size}`;
+        const matchingSourceItem = sourcePageContItems.find(si =>
+          `${si.category}|${si.size}` === matchKey
         );
 
-        if (matchingFromItem) {
-          // Mark the "to" page item as a continuation duplicate
-          toItem._dedupCandidate = true;
-          toItem.dedupNote = `Continuation duplicate — this fitting is shared with page ${page} and counted there.`;
+        if (matchingSourceItem) {
+          thisItem._dedupCandidate = true;
+          thisItem.dedupNote = `Continuation duplicate — this fitting is shared with page ${sourcePage} (${conn.drawing || "connected sheet"}) and counted there.`;
           dedupCount++;
         }
       }
