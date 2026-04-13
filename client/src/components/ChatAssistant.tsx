@@ -3,6 +3,7 @@ import { MessageCircle, X, Send, Sparkles, HelpCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { apiRequest } from "@/lib/queryClient";
 
 // ============================================================
 // Knowledge Base (Help Mode — no API calls)
@@ -220,11 +221,7 @@ export default function ChatAssistant({ pageContext }: { pageContext?: string })
     // AI mode
     setLoading(true);
     try {
-      const resp = await fetch("/api/chat-assistant", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, context: pageContext }),
-      });
+      const resp = await apiRequest("POST", "/api/chat-assistant", { message: text, context: pageContext });
       const data = await resp.json();
       setMessages(prev => [...prev, {
         id: idRef.current++,
@@ -273,8 +270,8 @@ export default function ChatAssistant({ pageContext }: { pageContext?: string })
       {/* ===== Chat Panel ===== */}
       {open && (
         <div
-          className="fixed bottom-5 right-5 z-50 flex flex-col bg-card border border-border rounded-xl shadow-2xl overflow-hidden
-            w-[calc(100vw-2.5rem)] sm:w-[380px] h-[min(500px,calc(100vh-3rem))]
+          className="fixed bottom-4 left-4 z-50 flex flex-col bg-card border border-border rounded-xl shadow-2xl overflow-hidden
+            w-[calc(100vw-2.5rem)] sm:w-[340px] h-[min(440px,calc(100vh-3rem))]
             animate-in slide-in-from-bottom-4 fade-in duration-200"
         >
           {/* Header */}

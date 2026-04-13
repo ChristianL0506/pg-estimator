@@ -52,6 +52,7 @@ interface TakeoffPageProps {
 export default function TakeoffPage({ discipline }: TakeoffPageProps) {
   const meta = DISCIPLINE_META[discipline];
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [scopeGapsHidden, setScopeGapsHidden] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [, navigate] = useLocation();
@@ -626,12 +627,17 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                 {/* Summary cards */}
                 <SummaryCards items={selectedProject.items} discipline={discipline} />
 
-                {/* Scope Gap Alerts */}
-                {scopeGaps.length > 0 && (
+                {/* Scope Gap Alerts — collapsible */}
+                {scopeGaps.length > 0 && !scopeGapsHidden && (
                   <div className="space-y-2">
-                    <h3 className="text-xs font-semibold text-amber-700 dark:text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
-                      <AlertTriangle size={13} /> Scope Gap Warnings
-                    </h3>
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-semibold text-amber-700 dark:text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <AlertTriangle size={13} /> Scope Gap Warnings ({scopeGaps.length})
+                      </h3>
+                      <button onClick={() => setScopeGapsHidden(true)} className="text-[10px] text-muted-foreground hover:text-foreground">
+                        Hide
+                      </button>
+                    </div>
                     <div className="grid gap-2 sm:grid-cols-2">
                       {scopeGaps.map((gap, i) => (
                         <div key={i} className="flex items-start gap-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 dark:bg-amber-900/20 dark:border-amber-800">
@@ -641,6 +647,11 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       ))}
                     </div>
                   </div>
+                )}
+                {scopeGaps.length > 0 && scopeGapsHidden && (
+                  <button onClick={() => setScopeGapsHidden(false)} className="text-[10px] text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1">
+                    <AlertTriangle size={10} /> Show {scopeGaps.length} scope gap warnings
+                  </button>
                 )}
 
                 {/* Verification Viewer */}
