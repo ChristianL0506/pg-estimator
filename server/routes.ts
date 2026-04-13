@@ -869,8 +869,74 @@ Return ONLY valid JSON (no markdown fences):
 ]}]}`;
 
 // ============================================================
-// AI VISION EXTRACTION
+// AI VISION EXTRACTION — Gemini-first, Claude fallback
 // ============================================================
+
+/**
+ * Try extracting BOM items from page images using Gemini first (free tier),
+ * falling back to Claude if Gemini fails or returns no results.
+ */
+async function extractBatchWithGemini(
+  batch: { pageNum: number; imagePath: string }[],
+  prompt: string
+): Promise<{ pages: { pageNum: number; items: any[] }[] } | null> {
+  const geminiKey = getUserGeminiKey();
+  if (!geminiKey) return null;
+
+  try {
+    // Build Gemini content parts: images + page markers + prompt
+    const parts: any[] = [];
+    for (const page of batch) {
+      const imgData = fs.readFileSync(page.imagePath);
+      const b64 = imgData.toString("base64");
+      parts.push({ inlineData: { mimeType: "image/png", data: b64 } });
+      parts.push({ text: `[PAGE ${page.pageNum}]` });
+    }
+    parts.push({ text: prompt });
+
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: { temperature: 0, maxOutputTokens: 16384 },
+        }),
+      }
+    );
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      console.warn(`  Gemini API error: ${resp.status} ${resp.statusText} ${errText.substring(0, 200)}`);
+      return null;
+    }
+
+    const data = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    // Parse JSON from response
+    let jsonStr = text.trim();
+    if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    if (parsed.pages && Array.isArray(parsed.pages)) {
+      // Validate we got items
+      const totalItems = parsed.pages.reduce((s: number, p: any) => s + (p.items?.length || 0), 0);
+      if (totalItems > 0) {
+        console.log(`  Gemini extracted ${totalItems} items from pages ${batch.map(p => p.pageNum).join(", ")}`);
+        return parsed;
+      }
+    }
+    console.warn(`  Gemini returned no items for pages ${batch.map(p => p.pageNum).join(", ")}`);
+    return null;
+  } catch (err: any) {
+    console.warn(`  Gemini extraction failed: ${err.message?.substring(0, 100)}`);
+    return null;
+  }
+}
 
 async function extractWithVision(
   pageImages: { pageNum: number; imagePath: string }[],
@@ -881,10 +947,37 @@ async function extractWithVision(
   const results = new Map<number, any[]>();
   let authFailures = 0;
   const BATCH_SIZE = 2;
+  const hasGemini = !!getUserGeminiKey();
+  const hasClaude = !!getUserApiKey();
 
   for (let batchStart = 0; batchStart < pageImages.length; batchStart += BATCH_SIZE) {
     const batch = pageImages.slice(batchStart, batchStart + BATCH_SIZE);
-    console.log(`  AI Vision [${discipline}] batch: pages ${batch.map(p => p.pageNum).join(", ")}...`);
+    const pageNums = batch.map(p => p.pageNum).join(", ");
+
+    // === TRY GEMINI FIRST (free tier) ===
+    if (hasGemini) {
+      console.log(`  AI Vision [${discipline}] Gemini batch: pages ${pageNums}...`);
+      const geminiResult = await extractBatchWithGemini(batch, prompt);
+      if (geminiResult && geminiResult.pages) {
+        for (const page of geminiResult.pages) {
+          if (page.pageNum && Array.isArray(page.items)) {
+            results.set(page.pageNum, page.items);
+          }
+        }
+        // Rate limit: Gemini free tier is 15 req/min, add small delay
+        await new Promise(resolve => setTimeout(resolve, 4500));
+        continue; // Skip Claude for this batch
+      }
+      console.log(`  Gemini failed for pages ${pageNums}, falling back to Claude...`);
+    }
+
+    // === FALLBACK TO CLAUDE ===
+    if (!hasClaude) {
+      console.warn(`  No Claude key available and Gemini failed for pages ${pageNums}`);
+      continue;
+    }
+
+    console.log(`  AI Vision [${discipline}] Claude batch: pages ${pageNums}...`);
 
     const content: Anthropic.MessageCreateParams["messages"][0]["content"] = [];
 
