@@ -211,7 +211,7 @@ export default function SettingsPage() {
         <div className="rounded-lg border border-border bg-card p-4 space-y-3">
           <h3 className="font-medium text-sm">Google Gemini API Key</h3>
           <p className="text-xs text-muted-foreground">
-            Optional — used as a fallback if Claude is not configured, and for dual-model verification
+            Powers the chat assistant and used as a fallback for extraction if Claude is not configured, plus dual-model verification
             when enabled on a takeoff.
           </p>
 

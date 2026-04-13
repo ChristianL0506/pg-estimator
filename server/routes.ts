@@ -743,22 +743,22 @@ Return ONLY valid JSON (no markdown fences):
 If all items are correct, return: {"corrections": []}`;
 
 async function verifyExtractedItems(
-  pageItems: Map<number, any[]>,
+  pageItems: Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>,
   bomImages: Map<number, string>,
-): Promise<Map<number, any[]>> {
+): Promise<Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>> {
   const client = getAnthropicClient();
-  const result = new Map<number, any[]>();
+  const result = new Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>();
 
-  // Copy all items first
-  for (const [pageNum, items] of pageItems) {
-    result.set(pageNum, [...items]);
+  // Copy all page data first (preserving drawingNumber, weldCount, continuations)
+  for (const [pageNum, pageData] of pageItems) {
+    result.set(pageNum, { ...pageData, items: [...pageData.items] });
   }
 
   // Only verify pages that have items and BOM images
   const pagesToVerify: { pageNum: number; items: any[]; bomPath: string }[] = [];
-  for (const [pageNum, items] of pageItems) {
-    if (items.length > 0 && bomImages.has(pageNum)) {
-      pagesToVerify.push({ pageNum, items, bomPath: bomImages.get(pageNum)! });
+  for (const [pageNum, pageData] of pageItems) {
+    if (pageData.items.length > 0 && bomImages.has(pageNum)) {
+      pagesToVerify.push({ pageNum, items: pageData.items, bomPath: bomImages.get(pageNum)! });
     }
   }
 
@@ -809,7 +809,8 @@ async function verifyExtractedItems(
               continue;
             }
             const targetPage = correction.pageNum || batch[0].pageNum;
-            const items = result.get(targetPage);
+            const pageData = result.get(targetPage);
+            const items = pageData?.items;
             if (items && correction.itemIndex >= 0 && correction.itemIndex < items.length) {
               const item = items[correction.itemIndex];
               if (correction.field === "qty") {
@@ -968,9 +969,9 @@ async function extractWithVision(
   pageImages: { pageNum: number; imagePath: string }[],
   prompt: string,
   discipline: string
-): Promise<{ results: Map<number, any[]>; authFailures: number }> {
+): Promise<{ results: Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>; authFailures: number }> {
   let client = getAnthropicClient();
-  const results = new Map<number, any[]>();
+  const results = new Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>();
   let authFailures = 0;
   const BATCH_SIZE = 2;
   const hasGemini = !!getUserGeminiKey();
@@ -989,7 +990,7 @@ async function extractWithVision(
         if (geminiResult && geminiResult.pages) {
           for (const page of geminiResult.pages) {
             if (page.pageNum && Array.isArray(page.items)) {
-              results.set(page.pageNum, page.items);
+              results.set(page.pageNum, { items: page.items, drawingNumber: page.drawingNumber || null, weldCount: page.weldCount || null, continuations: page.continuations || [] });
             }
           }
           await new Promise(resolve => setTimeout(resolve, 4500));
@@ -1042,7 +1043,7 @@ async function extractWithVision(
           if (parsed.pages && Array.isArray(parsed.pages)) {
             for (const page of parsed.pages) {
               if (page.pageNum && Array.isArray(page.items)) {
-                results.set(page.pageNum, page.items);
+                results.set(page.pageNum, { items: page.items, drawingNumber: page.drawingNumber || null, weldCount: page.weldCount || null, continuations: page.continuations || [] });
                 if (page.items.length === 0) {
                   console.warn(`  Warning: Page ${page.pageNum} returned 0 items`);
                 }
@@ -1063,7 +1064,7 @@ async function extractWithVision(
         // Parse failed — treat as retryable error
         if (attempt === 1) {
           console.error(`  Parse failed after all retries for batch at page ${batch[0].pageNum}`);
-          for (const page of batch) { results.set(page.pageNum, []); }
+          for (const page of batch) { results.set(page.pageNum, { items: [] }); }
         } else {
           console.log(`  Parse failed, will retry...`);
         }
@@ -1083,7 +1084,7 @@ async function extractWithVision(
         if (attempt === 1) {
           // Final attempt failed
           if (isAuthError(apiErr)) authFailures++;
-          for (const page of batch) { results.set(page.pageNum, []); }
+          for (const page of batch) { results.set(page.pageNum, { items: [] }); }
         }
       }
     }
@@ -1097,9 +1098,9 @@ async function extractWithCloudDetection(
   pageImages: { pageNum: number; bomImagePath: string; fullImagePath: string }[],
   prompt: string,
   onPageComplete?: (completedCount: number, totalCount: number) => void
-): Promise<{ results: Map<number, any[]>; authFailures: number }> {
+): Promise<{ results: Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>; authFailures: number }> {
   let client = getAnthropicClient();
-  const results = new Map<number, any[]>();
+  const results = new Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>();
   let authFailures = 0;
 
   async function processOnePage(page: { pageNum: number; bomImagePath: string; fullImagePath: string }): Promise<void> {
@@ -1144,19 +1145,25 @@ async function extractWithCloudDetection(
             // Collect all items from the response, but key them to the KNOWN page number
             // to prevent AI-hallucinated page numbers from losing data
             const allItems: any[] = [];
+            let drawingNumber: string | null = null;
+            let weldCount: any = null;
+            let continuations: any[] = [];
             for (const p of parsed.pages) {
               if (Array.isArray(p.items)) {
                 allItems.push(...p.items);
               }
+              if (p.drawingNumber && !drawingNumber) drawingNumber = p.drawingNumber;
+              if (p.weldCount && !weldCount) weldCount = p.weldCount;
+              if (Array.isArray(p.continuations) && p.continuations.length > 0) continuations.push(...p.continuations);
             }
-            results.set(page.pageNum, allItems);
+            results.set(page.pageNum, { items: allItems, drawingNumber, weldCount, continuations });
             parseSuccess = true;
           }
         } catch (parseErr) {
           console.error(`  Failed to parse cloud detection response (attempt ${attempt + 1}) page ${page.pageNum}`);
         }
         if (parseSuccess) { break; }
-        if (attempt === 1) { results.set(page.pageNum, []); }
+        if (attempt === 1) { results.set(page.pageNum, { items: [] }); }
       } catch (apiErr: any) {
         console.error(`  Cloud detection API error (attempt ${attempt + 1}):`, apiErr.message || apiErr);
 
@@ -1170,7 +1177,7 @@ async function extractWithCloudDetection(
 
         if (attempt === 1) {
           if (isAuthError(apiErr)) authFailures++;
-          results.set(page.pageNum, []);
+          results.set(page.pageNum, { items: [] });
         }
       }
     }
@@ -2222,7 +2229,11 @@ async function extractMechanicalChunk(
     }
 
     for (const page of adjustedPageImages) {
-      const entries = visionResults.get(page.pageNum) || [];
+      const cloudPageData = visionResults.get(page.pageNum) || { items: [] };
+      const entries = cloudPageData.items;
+      const pageDrawingNumber = cloudPageData.drawingNumber || null;
+      const pageWeldCount = cloudPageData.weldCount || null;
+      const pageContinuations = cloudPageData.continuations || [];
       for (const entry of entries) {
         if (!entry.description || entry.description.length < 3) continue;
         const rawQty = String(entry.qty || "1").trim();
@@ -2241,9 +2252,9 @@ async function extractMechanicalChunk(
           material: extractMaterial(entry.description) || undefined,
           schedule: extractSchedule(entry.description) || undefined,
           rating: extractRating(entry.description) || undefined,
-          notes: `Sheet ${page.globalPageNum}${(page as any).drawingNumber ? " | " + (page as any).drawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
+          notes: `Sheet ${page.globalPageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
-          drawingNumber: (page as any).drawingNumber || null,
+          drawingNumber: pageDrawingNumber,
           revisionClouded: entry.clouded === true,
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
@@ -2258,11 +2269,11 @@ async function extractMechanicalChunk(
         // Store continuation references and weld counts on first item of each page
         const isFirstItemForPage = items.filter(i => i.sourcePage === page.globalPageNum).length === 0;
         if (isFirstItemForPage) {
-          if ((page as any).continuations && Array.isArray((page as any).continuations)) {
-            rawItem._continuations = (page as any).continuations;
+          if (pageContinuations.length > 0) {
+            rawItem._continuations = pageContinuations;
           }
-          if ((page as any).weldCount) {
-            rawItem._visualWeldCount = (page as any).weldCount;
+          if (pageWeldCount) {
+            rawItem._visualWeldCount = pageWeldCount;
           }
         }
         items.push(rawItem);
@@ -2304,7 +2315,11 @@ async function extractMechanicalChunk(
     }
 
     for (const page of adjustedPageImages) {
-      const entries = verifiedResults.get(page.pageNum) || [];
+      const pageData = verifiedResults.get(page.pageNum) || { items: [] };
+      const entries = pageData.items;
+      const pageDrawingNumber = pageData.drawingNumber || null;
+      const pageWeldCount = pageData.weldCount || null;
+      const pageContinuations = pageData.continuations || [];
       for (const entry of entries) {
         if (!entry.description || entry.description.length < 3) continue;
         const rawQty = String(entry.qty || "1").trim();
@@ -2323,9 +2338,9 @@ async function extractMechanicalChunk(
           material: extractMaterial(entry.description) || undefined,
           schedule: extractSchedule(entry.description) || undefined,
           rating: extractRating(entry.description) || undefined,
-          notes: `Sheet ${page.globalPageNum}${(page as any).drawingNumber ? " | " + (page as any).drawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
+          notes: `Sheet ${page.globalPageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
-          drawingNumber: (page as any).drawingNumber || null,
+          drawingNumber: pageDrawingNumber,
           revisionClouded: entry.clouded === true,
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
@@ -2340,11 +2355,11 @@ async function extractMechanicalChunk(
         // Store continuation references and weld counts on first item of each page
         const isFirstItemForPage = items.filter(i => i.sourcePage === page.globalPageNum).length === 0;
         if (isFirstItemForPage) {
-          if ((page as any).continuations && Array.isArray((page as any).continuations)) {
-            rawItem._continuations = (page as any).continuations;
+          if (pageContinuations.length > 0) {
+            rawItem._continuations = pageContinuations;
           }
-          if ((page as any).weldCount) {
-            rawItem._visualWeldCount = (page as any).weldCount;
+          if (pageWeldCount) {
+            rawItem._visualWeldCount = pageWeldCount;
           }
         }
         items.push(rawItem);
@@ -2397,7 +2412,9 @@ async function extractStructuralChunk(
   const { results: visionResults } = await extractWithVision(pageImages, STRUCTURAL_PROMPT, "structural");
 
   for (const page of adjustedPageImages) {
-    const entries = visionResults.get(page.pageNum) || [];
+    const pageData = visionResults.get(page.pageNum) || { items: [] };
+    const entries = pageData.items;
+    const pageDrawingNumber = pageData.drawingNumber || null;
     for (const entry of entries) {
       if (!entry.description || entry.description.length < 2) continue;
       const mappedCategory = mapStructuralCategory(entry.category || "other");
@@ -2412,8 +2429,9 @@ async function extractStructuralChunk(
         unit: String(entry.unit || "EA").toUpperCase(),
         grade: entry.grade || undefined,
         weight: parseFloat(String(entry.weight || "0")) > 0 ? Math.round(parseFloat(String(entry.weight))) : undefined,
-        notes: `Sheet ${page.globalPageNum}`,
+        notes: `Sheet ${page.globalPageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""}`,
         sourcePage: page.globalPageNum,
+        drawingNumber: pageDrawingNumber,
       });
     }
   }
@@ -2459,7 +2477,9 @@ async function extractCivilChunk(
   const { results: visionResults } = await extractWithVision(pageImages, CIVIL_PROMPT, "civil");
 
   for (const page of adjustedPageImages) {
-    const entries = visionResults.get(page.pageNum) || [];
+    const pageData = visionResults.get(page.pageNum) || { items: [] };
+    const entries = pageData.items;
+    const pageDrawingNumber = pageData.drawingNumber || null;
     for (const entry of entries) {
       if (!entry.description || entry.description.length < 2) continue;
       const mappedCategory = mapCivilCategory(entry.category || "other");
@@ -2473,8 +2493,9 @@ async function extractCivilChunk(
         unit: String(entry.unit || "EA").toUpperCase(),
         material: entry.material || undefined,
         depth: entry.depth || undefined,
-        notes: `Sheet ${page.globalPageNum}`,
+        notes: `Sheet ${page.globalPageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""}`,
         sourcePage: page.globalPageNum,
+        drawingNumber: pageDrawingNumber,
       });
     }
   }
@@ -5575,16 +5596,15 @@ Picou Group Contractors`;
       return res.status(400).json({ error: "Message required" });
     }
 
-    const anthropicKey = getUserApiKey();
-    if (!anthropicKey) {
+    const geminiKey = getUserGeminiKey();
+    if (!geminiKey) {
       return res.json({
-        response: "AI mode requires a Claude API key. Go to Settings to configure one.",
+        response: "AI chat requires a Gemini API key. Go to Settings to configure one.",
         mode: "error",
       });
     }
 
     try {
-      const client = getAnthropicClient();
       const systemPrompt = `You are PG Assistant, the built-in helper for the Picou Group Estimator — an AI-powered takeoff and estimating tool for industrial piping contractors.
 
 You help estimators with:
@@ -5608,14 +5628,21 @@ The user is currently on: ${context || "unknown page"}
 
 Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use specific numbers when relevant.`;
 
-      const resp = await client.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 500,
-        system: systemPrompt,
-        messages: [{ role: "user", content: message }],
-      });
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: systemPrompt + "\n\nUser question: " + message }] }],
+            generationConfig: { temperature: 0.7, maxOutputTokens: 500 },
+          }),
+        }
+      );
 
-      const text = resp.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
+      if (!resp.ok) throw new Error(`Gemini API error: ${resp.status}`);
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't process that.";
       res.json({ response: text, mode: "ai" });
     } catch (err: any) {
       console.error("Chat assistant error:", err.message);

@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import SheetDetailPanel from "./SheetDetailPanel";
 
 interface ConnectionsSummaryProps {
   items: any[];
@@ -26,6 +27,18 @@ type ConnectionRow = {
 };
 
 export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
+  const [byPageOpen, setByPageOpen] = useState(false);
+  const [expandedPages, setExpandedPages] = useState<Set<number>>(new Set());
+  const [sheetPanelPage, setSheetPanelPage] = useState<number | null>(null);
+
+  const togglePageExpanded = (page: number) => {
+    setExpandedPages(prev => {
+      const next = new Set(prev);
+      if (next.has(page)) next.delete(page);
+      else next.add(page);
+      return next;
+    });
+  };
   // Extract visual weld counts from AI-detected weld symbols on drawings
   const visualWeldData = useMemo(() => {
     const pageCounts: { page: number; visual: { buttWelds: number; socketWelds: number; fieldWelds: number }; inferred: { buttWelds: number; socketWelds: number } }[] = [];
@@ -191,6 +204,44 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
     return { rows, totals, details: detailsList };
   }, [items]);
 
+  // Group connections by page
+  const byPage = useMemo(() => {
+    const RULES: Record<string, { bw: number; sw: number; label: string }> = {
+      elbow: { bw: 2, sw: 0, label: "2 BW" }, tee: { bw: 3, sw: 0, label: "3 BW" }, reducer: { bw: 2, sw: 0, label: "2 BW" },
+      cap: { bw: 1, sw: 0, label: "1 BW" }, coupling: { bw: 0, sw: 2, label: "2 SW" }, valve: { bw: 2, sw: 0, label: "2 BW" },
+      flange: { bw: 1, sw: 0, label: "1 BW + BU" },
+    };
+    const pageMap: Record<number, { drawingNumber: string | null; fittings: { category: string; size: string; description: string; qty: number; bw: number; sw: number; bu: number; ruleLabel: string }[]; totalBW: number; totalSW: number; totalBU: number }> = {};
+
+    for (const item of items) {
+      const page = item.sourcePage || 0;
+      if (!pageMap[page]) pageMap[page] = { drawingNumber: item.drawingNumber || null, fittings: [], totalBW: 0, totalSW: 0, totalBU: 0 };
+      if (!pageMap[page].drawingNumber && item.drawingNumber) pageMap[page].drawingNumber = item.drawingNumber;
+
+      const cat = (item.category || "").toLowerCase();
+      const qty = item.quantity || 0;
+      const rule = RULES[cat as keyof typeof RULES];
+
+      if (rule || cat === "bolt" || cat === "gasket") {
+        const bw = rule ? qty * rule.bw : 0;
+        const sw = rule ? qty * rule.sw : 0;
+        const bu = cat === "flange" ? Math.ceil(qty / 2) : (cat === "bolt" || cat === "gasket" ? qty : 0);
+        pageMap[page].fittings.push({
+          category: cat, size: item.size || "N/A", description: item.description || cat, qty, bw, sw, bu,
+          ruleLabel: rule ? `${qty}x ${rule.label}` : `${qty}x BU`,
+        });
+        pageMap[page].totalBW += bw;
+        pageMap[page].totalSW += sw;
+        pageMap[page].totalBU += bu;
+      }
+    }
+
+    return Object.entries(pageMap)
+      .filter(([, data]) => data.fittings.length > 0)
+      .map(([page, data]) => ({ page: parseInt(page), ...data }))
+      .sort((a, b) => a.page - b.page);
+  }, [items]);
+
   if (rows.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground text-sm">
@@ -344,6 +395,99 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
           </table>
         </div>
       </div>
+
+      {/* Connections by Page — collapsible accordion */}
+      {byPage.length > 0 && (
+        <div>
+          <button
+            className="flex items-center gap-2 text-sm font-semibold mb-2 hover:text-primary transition-colors w-full text-left"
+            onClick={() => setByPageOpen(!byPageOpen)}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-4 h-4 transition-transform ${byPageOpen ? "rotate-90" : ""}`}>
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+            Connections by Page ({byPage.length} pages)
+          </button>
+
+          {byPageOpen && (
+            <div className="border rounded-lg overflow-hidden">
+              {byPage.map((pageData) => {
+                const isExpanded = expandedPages.has(pageData.page);
+                const totalConns = pageData.totalBW + pageData.totalSW + pageData.totalBU;
+                return (
+                  <div key={pageData.page} className="border-b border-border last:border-b-0">
+                    <button
+                      className="w-full flex items-center justify-between p-2.5 text-xs hover:bg-muted/30 transition-colors"
+                      onClick={() => togglePageExpanded(pageData.page)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`}>
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                        <span
+                          className="font-semibold text-primary underline decoration-dotted cursor-pointer hover:text-primary/80"
+                          onClick={(e) => { e.stopPropagation(); setSheetPanelPage(pageData.page); }}
+                        >
+                          Page {pageData.page}
+                        </span>
+                        {pageData.drawingNumber && (
+                          <span className="text-muted-foreground">| {pageData.drawingNumber}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3">
+                        {pageData.totalBW > 0 && <span className="text-orange-500 font-medium">{pageData.totalBW} BW</span>}
+                        {pageData.totalSW > 0 && <span className="text-blue-500 font-medium">{pageData.totalSW} SW</span>}
+                        {pageData.totalBU > 0 && <span className="text-green-500 font-medium">{pageData.totalBU} BU</span>}
+                        <span className="text-muted-foreground">= {totalConns}</span>
+                      </div>
+                    </button>
+
+                    {isExpanded && (
+                      <div className="px-4 pb-3 bg-muted/10">
+                        <table className="w-full text-[11px]">
+                          <thead>
+                            <tr className="text-left text-muted-foreground">
+                              <th className="py-1 pr-2">Fitting</th>
+                              <th className="py-1 pr-2">Size</th>
+                              <th className="py-1 pr-2 text-right">Qty</th>
+                              <th className="py-1 pr-2">Rule</th>
+                              <th className="py-1 text-right">Welds</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pageData.fittings.map((f, i) => (
+                              <tr key={i} className="border-t border-border/30">
+                                <td className="py-1 pr-2 capitalize">{f.category}</td>
+                                <td className="py-1 pr-2 font-mono">{f.size}"</td>
+                                <td className="py-1 pr-2 text-right">{f.qty}</td>
+                                <td className="py-1 pr-2 text-muted-foreground">{f.ruleLabel}</td>
+                                <td className="py-1 text-right font-mono">
+                                  {f.bw > 0 && <span className="text-orange-500">{f.bw} BW </span>}
+                                  {f.sw > 0 && <span className="text-blue-500">{f.sw} SW </span>}
+                                  {f.bu > 0 && <span className="text-green-500">{f.bu} BU</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Sheet Detail Side Panel */}
+      {sheetPanelPage !== null && (
+        <SheetDetailPanel
+          pageNum={sheetPanelPage}
+          items={items}
+          onClose={() => setSheetPanelPage(null)}
+        />
+      )}
     </div>
   );
 }

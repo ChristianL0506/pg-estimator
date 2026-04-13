@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { CheckCircle2, Pencil } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import SheetDetailPanel from "./SheetDetailPanel";
 
 interface TakeoffBomTableProps {
   items: TakeoffItem[];
@@ -128,6 +129,7 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
   const [confidenceFilter, setConfidenceFilter] = useState<"all" | "low" | "medium">("all");
   const [cloudFilter, setCloudFilter] = useState<"all" | "clouded" | "non-clouded">("all");
   const [verifyingAll, setVerifyingAll] = useState(false);
+  const [sheetPanelPage, setSheetPanelPage] = useState<number | null>(null);
 
   const editable = !!onItemUpdated;
 
@@ -381,7 +383,7 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
               <p className="text-xs leading-snug">{item.description}</p>
               <div className="flex items-center gap-2 text-[10px] text-muted-foreground flex-wrap">
                 <span>#{item.lineNumber}</span>
-                {sourcePageNum != null && <span>Pg {sourcePageNum}</span>}
+                {sourcePageNum != null && <span className="underline decoration-dotted cursor-pointer hover:text-primary transition-colors" onClick={() => setSheetPanelPage(sourcePageNum)}>Pg {sourcePageNum}</span>}
                 {isMechanical && item.schedule && <span>Sch: {item.schedule}</span>}
                 {isMechanical && item.rating && <span>Rating: {item.rating}</span>}
                 {isStructural && item.mark && <span>Mark: {item.mark}</span>}
@@ -526,7 +528,11 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
                         </Tooltip>
                       )}
                       {sourcePageNum != null && (
-                        <Badge variant="outline" className="text-[8px] px-1 py-0 bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-900/40 dark:text-slate-400 dark:border-slate-700 shrink-0">
+                        <Badge
+                          variant="outline"
+                          className="text-[8px] px-1 py-0 bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-900/40 dark:text-slate-400 dark:border-slate-700 shrink-0 cursor-pointer underline decoration-dotted hover:text-primary hover:border-primary/50 transition-colors"
+                          onClick={() => setSheetPanelPage(sourcePageNum)}
+                        >
                           Pg {sourcePageNum}
                         </Badge>
                       )}
@@ -564,6 +570,15 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
         </Table>
         </TooltipProvider>
       </div>
+
+      {/* Sheet Detail Side Panel */}
+      {sheetPanelPage !== null && (
+        <SheetDetailPanel
+          pageNum={sheetPanelPage}
+          items={items}
+          onClose={() => setSheetPanelPage(null)}
+        />
+      )}
     </div>
   );
 }
