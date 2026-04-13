@@ -633,6 +633,13 @@ VALIDATION — before returning, verify each item:
 (c) DESCRIPTION starts with a material type keyword (PIPE, ELBOW, TEE, FLANGE, VALVE, GASKET, BOLT, STUD, REDUCER, CAP, etc.)
 Double-check your work before returning. Review each item and fix any obvious errors.
 
+ISO DRAWING NUMBER:
+Every piping isometric has a drawing number in the title block (usually bottom-right corner).
+This is a formatted identifier like "1"-150E-080-WW-4805-600" or "4"-150A2-10S-P-1000-500" or "6-300B-CS-P-2001".
+It typically includes: pipe size, pressure class, material code, line number, and sequence number.
+Extract this drawing number for each page and include it as "drawingNumber" in the page output.
+Look in the bottom-right title block area of the drawing. If you cannot find it, set "drawingNumber" to null.
+
 WELD SYMBOL COUNTING:
 On piping isometrics, welds are shown as symbols on the drawing:
 - Filled/solid black dots (●) = BUTT WELDS (BW)
@@ -653,7 +660,7 @@ If you find continuation references, include them in the output as a "continuati
 For items that appear AT a continuation point (the fitting where the line leaves this sheet to continue on another), add "atContinuation": true to that item.
 
 Return ONLY valid JSON (no markdown fences, no extra text):
-{"pages": [{"pageNum": PAGE_NUMBER, "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}, {"direction": "from", "drawing": "P-1001-500", "sheet": 2}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}`;
+{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}, {"direction": "from", "drawing": "P-1001-500", "sheet": 2}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}`;
 
 const MECHANICAL_CLOUD_PROMPT = `You are an expert at reading piping isometric drawings and identifying REVISION CLOUDS.
 
@@ -2234,8 +2241,9 @@ async function extractMechanicalChunk(
           material: extractMaterial(entry.description) || undefined,
           schedule: extractSchedule(entry.description) || undefined,
           rating: extractRating(entry.description) || undefined,
-          notes: `Sheet ${page.globalPageNum} (${entry.section || "SHOP"})${extraNotes}`,
+          notes: `Sheet ${page.globalPageNum}${(page as any).drawingNumber ? " | " + (page as any).drawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
+          drawingNumber: (page as any).drawingNumber || null,
           revisionClouded: entry.clouded === true,
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
@@ -2315,8 +2323,9 @@ async function extractMechanicalChunk(
           material: extractMaterial(entry.description) || undefined,
           schedule: extractSchedule(entry.description) || undefined,
           rating: extractRating(entry.description) || undefined,
-          notes: `Sheet ${page.globalPageNum} (${entry.section || "SHOP"})${extraNotes}`,
+          notes: `Sheet ${page.globalPageNum}${(page as any).drawingNumber ? " | " + (page as any).drawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
+          drawingNumber: (page as any).drawingNumber || null,
           revisionClouded: entry.clouded === true,
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,

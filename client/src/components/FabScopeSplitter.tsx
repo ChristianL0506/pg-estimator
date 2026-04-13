@@ -208,12 +208,16 @@ export default function FabScopeSplitter({ items }: FabScopeSplitterProps) {
           .filter((i: any) => isFitting((i.category || "").toLowerCase()))
           .reduce((s: number, i: any) => s + (i.quantity ?? 0), 0);
 
-        // Try to extract drawing label from notes
+        // Use ISO drawing number from title block if available, fall back to page number
         let label = `Page ${page || "?"}`;
         for (const it of data.items) {
+          if (it.drawingNumber) {
+            label = it.drawingNumber;
+            break;
+          }
           const notes = it.notes || "";
-          const match = notes.match(/Sheet\s+(\d+)/i) || notes.match(/Dwg\s+([A-Z0-9-]+)/i);
-          if (match) { label = match[0]; break; }
+          const match = notes.match(/\|\s*([^(]+?)\s*\(/) || notes.match(/Sheet\s+(\d+)/i);
+          if (match) { label = match[1]?.trim() || match[0]; break; }
         }
 
         return { page, label, itemCount: data.items.length, pipeFootage, fittingCount };
