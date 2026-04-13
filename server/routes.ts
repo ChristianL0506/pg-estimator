@@ -6227,5 +6227,59 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     }
   });
 
+
+  // Scope Split Export
+  app.post("/api/export-scope-split", async (req, res) => {
+    const { subShop, yourField, yourFull, summary } = req.body;
+    try {
+      const ExcelJS = await import("exceljs");
+      const wb = new ExcelJS.default.Workbook();
+      const headerFill = { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FF01696F" } };
+      const headerFont = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+
+      function addScopeSheet(name: string, items: any[]) {
+        const ws = wb.addWorksheet(name);
+        ws.columns = [
+          { header: "Category", key: "category", width: 14 },
+          { header: "Size", key: "size", width: 10 },
+          { header: "Description", key: "description", width: 35 },
+          { header: "Quantity", key: "quantity", width: 10 },
+          { header: "Unit", key: "unit", width: 8 },
+          { header: "Welds", key: "welds", width: 8 },
+          { header: "Location", key: "location", width: 10 },
+          { header: "Source Page", key: "sourcePage", width: 12 },
+        ];
+        for (const item of (items || [])) ws.addRow(item);
+        ws.getRow(1).eachCell((cell: any) => { cell.fill = headerFill; cell.font = headerFont; cell.alignment = { horizontal: "center" as const }; });
+        for (let r = 2; r <= ws.rowCount; r++) {
+          if (r % 2 === 0) ws.getRow(r).eachCell((cell: any) => { cell.fill = { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF2F2F2" } }; });
+        }
+      }
+
+      addScopeSheet("Sub Shop Fab", subShop);
+      addScopeSheet("Your Field Welds", yourField);
+      addScopeSheet("Your Full Scope", yourFull);
+
+      // Summary sheet
+      const ws4 = wb.addWorksheet("Summary");
+      ws4.columns = [{ header: "Metric", key: "metric", width: 25 }, { header: "Value", key: "value", width: 18 }];
+      if (summary) {
+        ws4.addRow({ metric: "Total Project Welds", value: summary.totalWelds ?? 0 });
+        ws4.addRow({ metric: "Sub\'s Welds", value: summary.subWelds ?? 0 });
+        ws4.addRow({ metric: "Your Welds", value: summary.yourWelds ?? 0 });
+        ws4.addRow({ metric: "Your Est. Manhours", value: summary.yourMH ?? 0 });
+      }
+      ws4.getRow(1).eachCell((cell: any) => { cell.fill = headerFill; cell.font = headerFont; cell.alignment = { horizontal: "center" as const }; });
+
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="Scope Split.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Scope split export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
   return httpServer;
 }

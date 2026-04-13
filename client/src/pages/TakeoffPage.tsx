@@ -14,6 +14,7 @@ import TakeoffBomTable from "@/components/TakeoffBomTable";
 import SummaryCards from "@/components/SummaryCards";
 import PivotSummary from "@/components/PivotSummary";
 import ConnectionsSummary from "@/components/ConnectionsSummary";
+import FabScopeSplitter from "@/components/FabScopeSplitter";
 import { useToast } from "@/hooks/use-toast";
 import { Input } from "@/components/ui/input";
 import {
@@ -733,6 +734,7 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                     <TabsTrigger value="bom" className="text-xs" data-testid="tab-bom">BOM Table</TabsTrigger>
                     <TabsTrigger value="connections" className="text-xs" data-testid="tab-connections">Connections</TabsTrigger>
                     <TabsTrigger value="pivot" className="text-xs" data-testid="tab-pivot">Pivot Summary</TabsTrigger>
+                    <TabsTrigger value="fab-scope" className="text-xs">Fab Scope</TabsTrigger>
                   </TabsList>
                   <TabsContent value="bom">
                     <TakeoffBomTable items={selectedProject.items} discipline={discipline} />
@@ -742,6 +744,9 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                   </TabsContent>
                   <TabsContent value="pivot">
                     <PivotSummary items={selectedProject.items} />
+                  </TabsContent>
+                  <TabsContent value="fab-scope">
+                    <FabScopeSplitter items={selectedProject.items} />
                   </TabsContent>
                 </Tabs>
               </div>
