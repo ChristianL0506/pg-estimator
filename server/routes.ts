@@ -1862,74 +1862,14 @@ function validatePipingBom(items: any[]): any[] {
 // ============================================================
 
 function dedupContinuationPages(items: any[]): any[] {
-  // CONTINUATION PAGE DEDUP — Only flag items as duplicates when two adjacent PDF
-  // pages contain EXACTLY the same BOM table. This handles the case where a multi-page
-  // ISO has its BOM repeated on a continuation sheet.
+  // DEDUP DISABLED — The heuristic-based dedup was causing false positives,
+  // marking legitimate items from different ISO drawings as duplicates.
+  // Different pipe lines on consecutive pages often have similar fittings
+  // (same sizes, same types) which triggers false matches.
   //
-  // IMPORTANT: Different ISO drawings on consecutive pages will legitimately have
-  // similar fittings (e.g., two 4" lines both have elbows). These are NOT duplicates.
-  // We use very strict criteria to avoid false positives:
-  //   1. Pages must be adjacent (consecutive PDF page numbers)
-  //   2. Item counts must be identical (same number of BOM entries)
-  //   3. 95%+ of items must match on category+size+description+quantity
-  //   4. Material/spec/schedule must also match
-
-  // Group items by source page (PDF page number)
-  const pageGroups: Record<number, any[]> = {};
-  for (const item of items) {
-    const page = item.sourcePage || 0;
-    if (!pageGroups[page]) pageGroups[page] = [];
-    pageGroups[page].push(item);
-  }
-
-  const pageNums = Object.keys(pageGroups).map(Number).sort((a, b) => a - b);
-
-  for (let i = 0; i < pageNums.length - 1; i++) {
-    const curPage = pageNums[i];
-    const nextPage = pageNums[i + 1];
-    // Must be truly adjacent PDF pages (not just sequential sheet numbers)
-    if (nextPage - curPage !== 1) continue;
-
-    const curItems = pageGroups[curPage];
-    const nextItems = pageGroups[nextPage];
-
-    // Item counts must be identical — different drawings have different item counts
-    if (curItems.length !== nextItems.length) continue;
-    // Skip tiny pages (≤2 items) — too easy to accidentally match
-    if (curItems.length <= 2) continue;
-
-    // Build full keys including material/spec for strict matching
-    const makeKey = (item: any) => `${item.category}|${item.size}|${item.description}|${item.quantity}|${item.material || ""}|${item.schedule || ""}|${item.spec || ""}`;
-    const curKeys = new Set(curItems.map(makeKey));
-    const nextKeys = nextItems.map(makeKey);
-
-    // Count matches
-    let matchCount = 0;
-    for (const key of nextKeys) {
-      if (curKeys.has(key)) matchCount++;
-    }
-
-    const overlapPct = nextItems.length > 0 ? matchCount / nextItems.length : 0;
-
-    // Must be 95%+ overlap with identical item counts — this is very strict
-    // and should only trigger on true continuation pages (same BOM repeated)
-    if (overlapPct < 0.95) continue;
-
-    // Mark as dedup candidates (don't hard-delete)
-    for (const nextItem of nextItems) {
-      const key = makeKey(nextItem);
-      if (curKeys.has(key)) {
-        nextItem._dedupCandidate = true;
-        nextItem.dedupNote = `Likely continuation page duplicate from page ${curPage} — review and delete if confirmed`;
-      }
-    }
-  }
-
-  const dedupCount = items.filter((i: any) => i._dedupCandidate).length;
-  if (dedupCount > 0) {
-    console.log(`  Continuation page dedup: marked ${dedupCount} items as dedup candidates (strict 95% match)`);
-  }
-  // Return ALL items (including dedup candidates - UI will dim them)
+  // The estimator can manually identify and remove true duplicates.
+  // False dedup (removing real items) is far worse than keeping a few
+  // actual duplicates.
   return items;
 }
 
