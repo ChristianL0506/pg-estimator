@@ -26,6 +26,56 @@ type ConnectionRow = {
 };
 
 export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
+  // Extract visual weld counts from AI-detected weld symbols on drawings
+  const visualWeldData = useMemo(() => {
+    const pageCounts: { page: number; visual: { buttWelds: number; socketWelds: number; fieldWelds: number }; inferred: { buttWelds: number; socketWelds: number } }[] = [];
+    let totalVisualBW = 0, totalVisualSW = 0, totalVisualFW = 0;
+
+    // Get visual counts from items that have _visualWeldCount
+    const pagesWithVisual = new Map<number, { buttWelds: number; socketWelds: number; fieldWelds: number }>();
+    for (const item of items) {
+      if (item._visualWeldCount) {
+        pagesWithVisual.set(item.sourcePage, item._visualWeldCount);
+      }
+    }
+
+    if (pagesWithVisual.size === 0) return null;
+
+    // Calculate BOM-inferred weld counts per page
+    const RULES: Record<string, { bw: number; sw: number }> = {
+      elbow: { bw: 2, sw: 0 }, tee: { bw: 3, sw: 0 }, reducer: { bw: 2, sw: 0 },
+      cap: { bw: 1, sw: 0 }, coupling: { bw: 0, sw: 2 }, valve: { bw: 2, sw: 0 },
+      flange: { bw: 1, sw: 0 },
+    };
+
+    for (const [page, visual] of pagesWithVisual) {
+      const pageItems = items.filter(i => i.sourcePage === page);
+      let inferredBW = 0, inferredSW = 0;
+      for (const item of pageItems) {
+        const cat = (item.category || "").toLowerCase();
+        const qty = item.quantity || 0;
+        const rule = RULES[cat];
+        if (rule) { inferredBW += qty * rule.bw; inferredSW += qty * rule.sw; }
+      }
+      totalVisualBW += visual.buttWelds || 0;
+      totalVisualSW += visual.socketWelds || 0;
+      totalVisualFW += visual.fieldWelds || 0;
+      pageCounts.push({ page, visual, inferred: { buttWelds: inferredBW, socketWelds: inferredSW } });
+    }
+
+    const totalInferredBW = pageCounts.reduce((s, p) => s + p.inferred.buttWelds, 0);
+    const totalInferredSW = pageCounts.reduce((s, p) => s + p.inferred.socketWelds, 0);
+    const bwDiff = totalVisualBW - totalInferredBW;
+    const swDiff = totalVisualSW - totalInferredSW;
+
+    return {
+      pageCounts,
+      totals: { visualBW: totalVisualBW, visualSW: totalVisualSW, visualFW: totalVisualFW, inferredBW: totalInferredBW, inferredSW: totalInferredSW },
+      bwDiff, swDiff,
+      isVerified: Math.abs(bwDiff) <= 2 && Math.abs(swDiff) <= 2,
+    };
+  }, [items]);
+
   const { rows, totals, details } = useMemo(() => {
     const sizeMap: Record<string, { buttWelds: number; socketWelds: number; boltUps: number; threadedConns: number }> = {};
     const detailsList: { size: string; fitting: string; qty: number; connectionType: string; connectionCount: number; section: string }[] = [];
@@ -170,6 +220,47 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
           </table>
         </div>
       </div>
+
+      {/* Weld Verification (visual dots vs BOM-inferred) */}
+      {visualWeldData && (
+        <div>
+          <h3 className="text-sm font-semibold mb-2">Weld Verification (Drawing Symbols vs. BOM)</h3>
+          <div className={`border rounded-lg p-3 ${visualWeldData.isVerified ? 'border-green-500/30 bg-green-500/5' : 'border-yellow-500/30 bg-yellow-500/5'}`}>
+            <div className="grid grid-cols-4 gap-3 text-xs mb-3">
+              <div className="text-center">
+                <div className="text-muted-foreground">Drawing Symbols</div>
+                <div className="font-bold text-lg">{visualWeldData.totals.visualBW} BW</div>
+                <div className="font-bold">{visualWeldData.totals.visualSW} SW</div>
+                {visualWeldData.totals.visualFW > 0 && <div className="font-bold">{visualWeldData.totals.visualFW} FW</div>}
+              </div>
+              <div className="text-center">
+                <div className="text-muted-foreground">BOM Inferred</div>
+                <div className="font-bold text-lg">{visualWeldData.totals.inferredBW} BW</div>
+                <div className="font-bold">{visualWeldData.totals.inferredSW} SW</div>
+              </div>
+              <div className="text-center">
+                <div className="text-muted-foreground">Difference</div>
+                <div className={`font-bold text-lg ${visualWeldData.bwDiff === 0 ? 'text-green-400' : Math.abs(visualWeldData.bwDiff) <= 2 ? 'text-yellow-400' : 'text-red-400'}`}>
+                  {visualWeldData.bwDiff > 0 ? '+' : ''}{visualWeldData.bwDiff} BW
+                </div>
+                <div className={`font-bold ${visualWeldData.swDiff === 0 ? 'text-green-400' : 'text-yellow-400'}`}>
+                  {visualWeldData.swDiff > 0 ? '+' : ''}{visualWeldData.swDiff} SW
+                </div>
+              </div>
+              <div className="text-center">
+                <div className="text-muted-foreground">Status</div>
+                <div className={`font-bold text-sm ${visualWeldData.isVerified ? 'text-green-400' : 'text-yellow-400'}`}>
+                  {visualWeldData.isVerified ? '\u2713 Verified' : '\u26a0 Review'}
+                </div>
+              </div>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Weld symbols (● butt, ○ socket) counted from the isometric drawings are compared against welds inferred from the BOM fittings.
+              {!visualWeldData.isVerified && " Differences may indicate missed fittings, continuation welds, or field welds not in the BOM."}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Detail Breakdown */}
       <div>

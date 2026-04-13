@@ -633,6 +633,15 @@ VALIDATION — before returning, verify each item:
 (c) DESCRIPTION starts with a material type keyword (PIPE, ELBOW, TEE, FLANGE, VALVE, GASKET, BOLT, STUD, REDUCER, CAP, etc.)
 Double-check your work before returning. Review each item and fix any obvious errors.
 
+WELD SYMBOL COUNTING:
+On piping isometrics, welds are shown as symbols on the drawing:
+- Filled/solid black dots (●) = BUTT WELDS (BW)
+- Open/hollow circles (○) = SOCKET WELDS (SW)
+- Small triangles or arrows at connections = FIELD WELDS (FW)
+Count ALL weld symbols visible on the drawing for each page. Include the count in your output as:
+"weldCount": {"buttWelds": NUMBER, "socketWelds": NUMBER, "fieldWelds": NUMBER}
+This is used to verify against the BOM-inferred weld count. Count carefully.
+
 CONTINUATION REFERENCES:
 Isometric drawings often show continuation lines to other sheets. Look for text like:
 - "CONT'D ON DWG xxx SHT x" or "CONT TO xxx"
@@ -644,7 +653,7 @@ If you find continuation references, include them in the output as a "continuati
 For items that appear AT a continuation point (the fitting where the line leaves this sheet to continue on another), add "atContinuation": true to that item.
 
 Return ONLY valid JSON (no markdown fences, no extra text):
-{"pages": [{"pageNum": PAGE_NUMBER, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}, {"direction": "from", "drawing": "P-1001-500", "sheet": 2}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}`;
+{"pages": [{"pageNum": PAGE_NUMBER, "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}, {"direction": "from", "drawing": "P-1001-500", "sheet": 2}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}`;
 
 const MECHANICAL_CLOUD_PROMPT = `You are an expert at reading piping isometric drawings and identifying REVISION CLOUDS.
 
@@ -2228,10 +2237,15 @@ async function extractMechanicalChunk(
           rawItem._validationNotes.push(...qtyNotes);
         }
         rawItem = autoCorrectItem(rawItem);
-        // Store continuation references on first item of each page for cross-referencing
-        if ((page as any).continuations && Array.isArray((page as any).continuations)) {
-          const pageItemCount = items.filter(i => i.sourcePage === page.globalPageNum).length;
-          if (pageItemCount === 0) rawItem._continuations = (page as any).continuations;
+        // Store continuation references and weld counts on first item of each page
+        const isFirstItemForPage = items.filter(i => i.sourcePage === page.globalPageNum).length === 0;
+        if (isFirstItemForPage) {
+          if ((page as any).continuations && Array.isArray((page as any).continuations)) {
+            rawItem._continuations = (page as any).continuations;
+          }
+          if ((page as any).weldCount) {
+            rawItem._visualWeldCount = (page as any).weldCount;
+          }
         }
         items.push(rawItem);
       }
@@ -2304,10 +2318,15 @@ async function extractMechanicalChunk(
           rawItem._validationNotes.push(...qtyNotes);
         }
         rawItem = autoCorrectItem(rawItem);
-        // Store continuation references on first item of each page for cross-referencing
-        if ((page as any).continuations && Array.isArray((page as any).continuations)) {
-          const pageItemCount = items.filter(i => i.sourcePage === page.globalPageNum).length;
-          if (pageItemCount === 0) rawItem._continuations = (page as any).continuations;
+        // Store continuation references and weld counts on first item of each page
+        const isFirstItemForPage = items.filter(i => i.sourcePage === page.globalPageNum).length === 0;
+        if (isFirstItemForPage) {
+          if ((page as any).continuations && Array.isArray((page as any).continuations)) {
+            rawItem._continuations = (page as any).continuations;
+          }
+          if ((page as any).weldCount) {
+            rawItem._visualWeldCount = (page as any).weldCount;
+          }
         }
         items.push(rawItem);
       }
@@ -3807,14 +3826,16 @@ function inferWeldsFromFittings(items: any[]): any[] {
         weldAssumption: "2 socket welds per coupling (auto-inferred)",
       }));
     } else if (cat === "flange" || desc.includes("flange")) {
+      // Weld-neck (WN) flanges get butt welds, slip-on (SO) flanges get fillet welds
+      const isWeldNeck = desc.includes("weld neck") || desc.includes("wn ") || desc.includes(",wn,") || /\bwn\b/i.test(desc);
       welds.push(computeEstimateItem({
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
-        description: `SO weld for ${size} FLANGE (auto-inferred)`,
+        description: `${isWeldNeck ? "BW" : "SO weld"} for ${size} FLANGE (auto-inferred)`,
         size, quantity: qty * 1, unit: "EA",
         materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
         materialExtension: 0, laborExtension: 0, totalCost: 0,
-        notes: "Auto-inferred: 1 slip-on weld per flange", fromDatabase: false,
-        weldAssumption: "1 slip-on weld per flange (auto-inferred)",
+        notes: `Auto-inferred: 1 ${isWeldNeck ? "butt weld" : "slip-on weld"} per flange`, fromDatabase: false,
+        weldAssumption: `1 ${isWeldNeck ? "butt weld (WN)" : "slip-on weld (SO)"} per flange (auto-inferred)`,
       }));
       welds.push(computeEstimateItem({
         id: randomUUID(), lineNumber: 0, category: "bolt" as any,
@@ -3824,6 +3845,32 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 1 bolt-up per flange", fromDatabase: false,
         weldAssumption: "1 bolt-up per flange (auto-inferred)",
+      }));
+    } else if (cat === "valve" || desc.includes("valve")) {
+      // Butt-weld end valves get 2 welds, flanged valves get bolt-ups only
+      const isButtWeldEnd = desc.includes("bwe") || desc.includes("butt weld") || desc.includes("bw end") || desc.includes(",be,") || desc.includes(", be");
+      const isFlangedValve = desc.includes("flanged") || desc.includes("flg");
+      if (isButtWeldEnd || (!isFlangedValve && !desc.includes("threaded") && !desc.includes("screw"))) {
+        welds.push(computeEstimateItem({
+          id: randomUUID(), lineNumber: 0, category: "weld" as any,
+          description: `BW for ${size} VALVE (auto-inferred)`,
+          size, quantity: qty * 2, unit: "EA",
+          materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
+          materialExtension: 0, laborExtension: 0, totalCost: 0,
+          notes: "Auto-inferred: 2 butt welds per valve", fromDatabase: false,
+          weldAssumption: "2 butt welds per valve (auto-inferred)",
+        }));
+      }
+    } else if (desc.includes("sockolet") || desc.includes("weldolet") || desc.includes("threadolet")) {
+      // Branch connections: 1 weld to header pipe
+      welds.push(computeEstimateItem({
+        id: randomUUID(), lineNumber: 0, category: "weld" as any,
+        description: `BW for ${size} ${desc.includes("sockolet") ? "SOCKOLET" : desc.includes("weldolet") ? "WELDOLET" : "OLET"} (auto-inferred)`,
+        size, quantity: qty * 1, unit: "EA",
+        materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
+        materialExtension: 0, laborExtension: 0, totalCost: 0,
+        notes: "Auto-inferred: 1 weld per branch connection to header", fromDatabase: false,
+        weldAssumption: "1 weld per branch connection (auto-inferred)",
       }));
     }
   }
