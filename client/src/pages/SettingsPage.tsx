@@ -151,7 +151,7 @@ export default function SettingsPage() {
         {/* ===== ANTHROPIC SECTION ===== */}
         <div className="rounded-lg border border-border bg-card p-4 space-y-3">
           <h3 className="font-medium text-sm">Anthropic API Key (Claude)</h3>
-          <p className="text-xs text-muted-foreground">Fallback engine. If Gemini key is set, Claude is only used when Gemini fails. Without Gemini, Claude handles all extraction.</p>
+          <p className="text-xs text-muted-foreground">Primary extraction engine. Powers all AI-powered PDF extraction and the chat assistant.</p>
 
           {/* Status indicator */}
           <div className={`rounded-md border p-3 ${
@@ -211,8 +211,8 @@ export default function SettingsPage() {
         <div className="rounded-lg border border-border bg-card p-4 space-y-3">
           <h3 className="font-medium text-sm">Google Gemini API Key</h3>
           <p className="text-xs text-muted-foreground">
-            Primary extraction engine (free tier). When configured, Gemini handles all BOM extraction at no cost.
-            Claude is used as a fallback only if Gemini fails on a page.
+            Optional — used as a fallback if Claude is not configured, and for dual-model verification
+            when enabled on a takeoff.
           </p>
 
           {/* Status indicator */}

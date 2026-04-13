@@ -954,26 +954,23 @@ async function extractWithVision(
     const batch = pageImages.slice(batchStart, batchStart + BATCH_SIZE);
     const pageNums = batch.map(p => p.pageNum).join(", ");
 
-    // === TRY GEMINI FIRST (free tier) ===
-    if (hasGemini) {
-      console.log(`  AI Vision [${discipline}] Gemini batch: pages ${pageNums}...`);
-      const geminiResult = await extractBatchWithGemini(batch, prompt);
-      if (geminiResult && geminiResult.pages) {
-        for (const page of geminiResult.pages) {
-          if (page.pageNum && Array.isArray(page.items)) {
-            results.set(page.pageNum, page.items);
-          }
-        }
-        // Rate limit: Gemini free tier is 15 req/min, add small delay
-        await new Promise(resolve => setTimeout(resolve, 4500));
-        continue; // Skip Claude for this batch
-      }
-      console.log(`  Gemini failed for pages ${pageNums}, falling back to Claude...`);
-    }
-
-    // === FALLBACK TO CLAUDE ===
+    // === CLAUDE PRIMARY ===
     if (!hasClaude) {
-      console.warn(`  No Claude key available and Gemini failed for pages ${pageNums}`);
+      // No Claude key — try Gemini as fallback
+      if (hasGemini) {
+        console.log(`  AI Vision [${discipline}] Gemini batch: pages ${pageNums}...`);
+        const geminiResult = await extractBatchWithGemini(batch, prompt);
+        if (geminiResult && geminiResult.pages) {
+          for (const page of geminiResult.pages) {
+            if (page.pageNum && Array.isArray(page.items)) {
+              results.set(page.pageNum, page.items);
+            }
+          }
+          await new Promise(resolve => setTimeout(resolve, 4500));
+          continue;
+        }
+      }
+      console.warn(`  No API keys available for pages ${pageNums}`);
       continue;
     }
 
