@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { Calendar, ClipboardList, AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Play, Diamond, FileSpreadsheet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -263,11 +263,12 @@ export default function ProjectPlanner({
   const [efficiency, setEfficiency] = useState(75);
   const [generated, setGenerated] = useState(false);
 
-  // Sync from props
-  const prevMH = useMemo(() => totalManhours, [totalManhours]);
-  if (prevMH !== mhInput && !generated) {
-    // only sync if user hasn't generated yet
-  }
+  // Sync manhours from props when user hasn't generated yet
+  useEffect(() => {
+    if (totalManhours > 0 && !generated) {
+      setMhInput(totalManhours);
+    }
+  }, [totalManhours, generated]);
 
   const handleGenerate = useCallback(() => {
     setMhInput(totalManhours > 0 ? totalManhours : mhInput);

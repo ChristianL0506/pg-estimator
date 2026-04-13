@@ -154,7 +154,8 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
     queryKey: ["/api/takeoff/projects", selectedId, "pages"],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/takeoff/projects/${selectedId}/pages`);
-      return res.json();
+      const data = await res.json();
+      return data.pages || [];
     },
     enabled: !!selectedId,
   });

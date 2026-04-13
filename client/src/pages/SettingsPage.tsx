@@ -28,7 +28,7 @@ export default function SettingsPage() {
     const headers = { Authorization: `Bearer ${token}` };
     fetch(`${API_BASE}/api/settings/api-key`, { headers }).then(r => r.json()).then(setStatus).catch(() => {});
     fetch(`${API_BASE}/api/settings/gemini-key`, { headers }).then(r => r.json()).then(setGeminiStatus).catch(() => {});
-  }, []);
+  }, [token]);
 
   // --- Anthropic handlers ---
   const handleTest = async () => {

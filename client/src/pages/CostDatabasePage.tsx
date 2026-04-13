@@ -319,7 +319,7 @@ export default function CostDatabasePage() {
             className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
             onClick={async () => {
               try {
-                const res = await fetch("/api/cost-database/export");
+                const res = await apiRequest("GET", "/api/cost-database/export");
                 const blob = await res.blob();
                 const a = document.createElement("a");
                 a.href = URL.createObjectURL(blob);

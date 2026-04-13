@@ -159,7 +159,7 @@ function ScopeDetail({ scope }: { scope: ScopeBreakdown }) {
           {scope.items.map((item, i) => {
             const w = inferWelds(item);
             const tw = totalWelds(w);
-            const loc = item.installLocation || (item.notes || "").toLowerCase().includes("field") ? "field" : "shop";
+            const loc = item.installLocation || ((item.notes || "").toLowerCase().includes("field") ? "field" : "shop");
             return (
               <tr key={item.id || i} className="border-b border-border/40 hover:bg-muted/30">
                 <td className="py-1 pr-2 capitalize">{item.category}</td>

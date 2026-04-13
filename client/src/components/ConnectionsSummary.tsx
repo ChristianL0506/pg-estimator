@@ -130,7 +130,7 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       const size = item.size || "N/A";
       const qty = item.quantity || 0;
       const desc = (item.description || "").toLowerCase();
-      const section = (item.installLocation || (item.notes || "").toLowerCase().includes("field") ? "field" : "shop");
+      const section = item.installLocation || ((item.notes || "").toLowerCase().includes("field") ? "field" : "shop");
 
       ensureSize(size);
 

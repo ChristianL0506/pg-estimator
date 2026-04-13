@@ -5648,7 +5648,7 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
   });
 
   app.delete("/api/folders/:id/projects/:projectId", (req, res) => {
-    storage.removeProjectFromFolder(req.params.id);
+    storage.removeProjectFromFolder(req.params.projectId);
     res.json({ success: true });
   });
 
