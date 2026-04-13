@@ -399,6 +399,20 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_auth_sessions_created ON auth_sessions(createdAt);
+
+  CREATE TABLE IF NOT EXISTS correction_patterns (
+    id TEXT PRIMARY KEY,
+    pattern_type TEXT NOT NULL,
+    original_value TEXT NOT NULL,
+    corrected_value TEXT NOT NULL,
+    field TEXT NOT NULL,
+    context TEXT,
+    occurrences INTEGER DEFAULT 1,
+    lastSeen TEXT NOT NULL,
+    autoApply INTEGER DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_correction_patterns_type ON correction_patterns(pattern_type, field);
 `);
 
 // Add new columns to estimate_versions for new rate fields
@@ -713,6 +727,18 @@ const stmts = {
   insertCorrection: db.prepare(`INSERT INTO corrections (id, takeoffProjectId, itemId, fieldName, originalValue, correctedValue, correctedBy, correctedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
   getCorrectionsByProject: db.prepare(`SELECT * FROM corrections WHERE takeoffProjectId = ? ORDER BY correctedAt DESC`),
 
+  // Single takeoff item lookup
+  getTakeoffItemById: db.prepare(`SELECT * FROM takeoff_items WHERE id = ?`),
+
+  // Correction patterns (historical learning)
+  insertCorrectionPattern: db.prepare(`INSERT INTO correction_patterns (id, pattern_type, original_value, corrected_value, field, context, occurrences, lastSeen, autoApply) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  getCorrectionPatterns: db.prepare(`SELECT * FROM correction_patterns WHERE autoApply = 1 ORDER BY occurrences DESC`),
+  getAllCorrectionPatterns: db.prepare(`SELECT * FROM correction_patterns ORDER BY occurrences DESC`),
+  findCorrectionPattern: db.prepare(`SELECT * FROM correction_patterns WHERE pattern_type = ? AND original_value = ? AND field = ?`),
+  incrementCorrectionPattern: db.prepare(`UPDATE correction_patterns SET occurrences = occurrences + 1, lastSeen = ? WHERE id = ?`),
+  setPatternAutoApply: db.prepare(`UPDATE correction_patterns SET autoApply = ? WHERE id = ?`),
+  deleteCorrectionPattern: db.prepare(`DELETE FROM correction_patterns WHERE id = ?`),
+
   // Completed Projects (Project History)
   insertCompletedProject: db.prepare(`INSERT INTO completed_projects (id, name, client, location, scopeDescription, startDate, endDate, welderHours, fitterHours, helperHours, foremanHours, operatorHours, totalManhours, materialCost, laborCost, totalCost, peakCrewSize, durationDays, tags, notes, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getCompletedProjects: db.prepare(`SELECT * FROM completed_projects ORDER BY createdAt DESC`),
@@ -888,6 +914,48 @@ class Storage {
     values.push(itemId);
     const result = db.prepare(`UPDATE takeoff_items SET ${fields.join(", ")} WHERE id = ?`).run(...values);
     return result.changes > 0;
+  }
+
+  getTakeoffItemById(itemId: string): any | null {
+    const row = stmts.getTakeoffItemById.get(itemId) as any;
+    return row || null;
+  }
+
+  // ---- Correction Patterns (Historical Learning) ----
+
+  recordCorrection(originalValue: string, correctedValue: string, field: string, context?: string): void {
+    if (!originalValue || !correctedValue || originalValue === correctedValue) return;
+    const patternType = field === "size" ? "size_misread" : field === "quantity" ? "qty_misread" : "desc_correction";
+    const existing = stmts.findCorrectionPattern.get(patternType, originalValue, field) as any;
+    if (existing) {
+      stmts.incrementCorrectionPattern.run(new Date().toISOString(), existing.id);
+      // Auto-apply after 3+ occurrences of same correction
+      if (existing.occurrences >= 2 && !existing.autoApply) {
+        stmts.setPatternAutoApply.run(1, existing.id);
+        console.log(`  Pattern auto-apply enabled: ${field} "${originalValue}" -> "${correctedValue}" (${existing.occurrences + 1} occurrences)`);
+      }
+    } else {
+      stmts.insertCorrectionPattern.run(
+        randomUUID(), patternType, originalValue, correctedValue, field,
+        context || null, 1, new Date().toISOString(), 0
+      );
+    }
+  }
+
+  getAutoApplyPatterns(): { pattern_type: string; original_value: string; corrected_value: string; field: string; occurrences: number }[] {
+    return stmts.getCorrectionPatterns.all() as any[];
+  }
+
+  getAllCorrectionPatterns(): any[] {
+    return stmts.getAllCorrectionPatterns.all() as any[];
+  }
+
+  setCorrectionPatternAutoApply(id: string, autoApply: boolean): void {
+    stmts.setPatternAutoApply.run(autoApply ? 1 : 0, id);
+  }
+
+  deleteCorrectionPattern(id: string): void {
+    stmts.deleteCorrectionPattern.run(id);
   }
 
   async deleteTakeoffProject(id: string): Promise<boolean> {

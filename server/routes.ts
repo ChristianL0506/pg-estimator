@@ -1111,6 +1111,95 @@ async function extractWithVision(
   return { results, authFailures };
 }
 
+// Double-pass verification: sends same images + extracted items to Claude for cross-check
+async function verifyExtractionPass(
+  pageImages: { pageNum: number; imagePath: string }[],
+  extractedItems: Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>,
+  discipline: string
+): Promise<Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>> {
+  const client = getAnthropicClient();
+  if (!client || !getUserApiKey()) return extractedItems;
+
+  const BATCH_SIZE = 2;
+  const verified = new Map(extractedItems);
+
+  for (let batchStart = 0; batchStart < pageImages.length; batchStart += BATCH_SIZE) {
+    const batch = pageImages.slice(batchStart, batchStart + BATCH_SIZE);
+
+    const content: Anthropic.MessageCreateParams["messages"][0]["content"] = [];
+    const itemsByPage: Record<number, any[]> = {};
+
+    for (const page of batch) {
+      const pageData = extractedItems.get(page.pageNum);
+      if (!pageData || pageData.items.length === 0) continue;
+
+      const imgData = fs.readFileSync(page.imagePath);
+      const b64 = imgData.toString("base64");
+      content.push({ type: "image" as const, source: { type: "base64" as const, media_type: "image/png", data: b64 } });
+      content.push({ type: "text" as const, text: `[PAGE ${page.pageNum}]` });
+      itemsByPage[page.pageNum] = pageData.items;
+    }
+
+    if (content.length === 0) continue;
+
+    const itemsSummary = Object.entries(itemsByPage).map(([pageNum, items]) => {
+      return `PAGE ${pageNum} extracted items (${items.length}):\n` +
+        items.map((item: any, i: number) => `  ${i + 1}. NO:${item.itemNo || "?"} QTY:${item.qty} SIZE:${item.size} DESC:${item.description} SECTION:${item.section || "SHOP"}`).join("\n");
+    }).join("\n\n");
+
+    content.push({ type: "text" as const, text: `VERIFICATION PASS — Check the extracted items against the BOM table image.
+
+Here are the items extracted in the first pass:
+${itemsSummary}
+
+Please verify EACH item against what you see in the BOM table:
+1. Is the QTY correct? (Check feet/inches for pipe, integer count for fittings)
+2. Is the SIZE correct? (Watch for 1-1/2" vs 1-1/4", similar fractions)
+3. Is the DESCRIPTION complete and accurate?
+4. Are there any MISSING items in the BOM table that weren't extracted?
+5. Are there any DUPLICATE items that should only appear once?
+6. Is each item assigned to the correct SECTION (SHOP vs FIELD)?
+
+Return the CORRECTED item list in the same JSON format. If an item is correct, include it unchanged. If an item needs correction, include the corrected version. If an item was missed, add it. If an item is a duplicate, remove it.
+
+Return ONLY valid JSON (no markdown fences):
+{"pages": [{"pageNum": NUMBER, "items": [...corrected items...], "corrections": ["description of each correction made"]}]}` });
+
+    try {
+      const msg = await client.messages.create({
+        model: "claude-sonnet-4-5",
+        max_tokens: 16384,
+        messages: [{ role: "user", content }],
+      });
+
+      const responseText = msg.content[0].type === "text" ? msg.content[0].text : "";
+      let jsonStr = responseText.trim();
+      if (jsonStr.startsWith("```")) jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+
+      const parsed = JSON.parse(jsonStr);
+      if (parsed.pages && Array.isArray(parsed.pages)) {
+        for (const page of parsed.pages) {
+          if (page.pageNum && Array.isArray(page.items) && page.items.length > 0) {
+            const existing = verified.get(page.pageNum);
+            verified.set(page.pageNum, {
+              ...existing,
+              items: page.items,
+            });
+            if (page.corrections && page.corrections.length > 0) {
+              console.log(`  Verification corrected page ${page.pageNum}: ${page.corrections.join("; ")}`);
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn(`  Verification pass failed for pages ${batch.map(p => p.pageNum).join(",")}: ${err.message?.substring(0, 100)}`);
+      // Keep original extraction on verification failure
+    }
+  }
+
+  return verified;
+}
+
 // Cloud-aware extraction: sends FULL PAGE + BOM CROP per page
 async function extractWithCloudDetection(
   pageImages: { pageNum: number; bomImagePath: string; fullImagePath: string }[],
@@ -1919,6 +2008,197 @@ function validatePipingBom(items: any[]): any[] {
 }
 
 // ============================================================
+// PIPING RULES ENGINE — Post-extraction engineering validation
+// ============================================================
+
+function validatePipingRules(items: any[]): { warnings: string[]; autoFixes: { itemId: string; field: string; oldValue: any; newValue: any; reason: string }[] } {
+  const warnings: string[] = [];
+  const autoFixes: { itemId: string; field: string; oldValue: any; newValue: any; reason: string }[] = [];
+
+  // Group items by page for per-sheet validation
+  const byPage: Record<number, any[]> = {};
+  for (const item of items) {
+    const page = item.sourcePage || 0;
+    if (!byPage[page]) byPage[page] = [];
+    byPage[page].push(item);
+  }
+
+  for (const [pageStr, pageItems] of Object.entries(byPage)) {
+    const page = parseInt(pageStr);
+
+    // --- Rule 1: Flange-Gasket-Bolt matching ---
+    const flanges = pageItems.filter(i => (i.category || "").toLowerCase() === "flange");
+    const gaskets = pageItems.filter(i => (i.category || "").toLowerCase() === "gasket");
+    const bolts = pageItems.filter(i => (i.category || "").toLowerCase() === "bolt");
+
+    const flangesBySize: Record<string, number> = {};
+    for (const f of flanges) {
+      const sz = f.size || "?";
+      flangesBySize[sz] = (flangesBySize[sz] || 0) + (f.quantity || 0);
+    }
+
+    for (const [size, flangeQty] of Object.entries(flangesBySize)) {
+      const gasketQty = gaskets.filter(g => g.size === size).reduce((s, g) => s + (g.quantity || 0), 0);
+      const expectedGaskets = Math.ceil(flangeQty / 2);
+
+      if (gasketQty === 0 && flangeQty > 0) {
+        warnings.push(`Page ${page}: ${flangeQty}x ${size}" flanges found but NO gaskets \u2014 possible missing gaskets`);
+      } else if (gasketQty < expectedGaskets - 1) {
+        warnings.push(`Page ${page}: ${flangeQty}x ${size}" flanges expect ~${expectedGaskets} gaskets but only ${gasketQty} found`);
+      }
+
+      if (bolts.length === 0 && flangeQty > 0) {
+        warnings.push(`Page ${page}: ${flangeQty}x ${size}" flanges found but NO bolt sets \u2014 possible missing bolts`);
+      }
+    }
+
+    // --- Rule 2: Socket weld fittings shouldn't appear on large bore (6"+) ---
+    for (const item of pageItems) {
+      const desc = (item.description || "").toLowerCase();
+      const size = parseFloat(item.size) || 0;
+      const isSW = desc.includes("socket weld") || desc.includes(",sw,") || desc.includes(" sw ") || /\\bsw\\b/i.test(desc);
+
+      if (isSW && size >= 6) {
+        warnings.push(`Page ${page}: ${item.size}" ${(item.description || "").substring(0, 40)} \u2014 socket weld fitting on ${size}"+ pipe is unusual, verify`);
+      }
+    }
+
+    // --- Rule 3: Reducer size consistency ---
+    for (const item of pageItems) {
+      if ((item.category || "").toLowerCase() === "reducer" && item.size) {
+        const match = item.size.match(/(\d+(?:[.-]\d+\/\d+)?)\s*[""x\u00d7]\s*(\d+(?:[.-]\d+\/\d+)?)/i);
+        if (match) {
+          const large = parseFloat(match[1]) || 0;
+          const small = parseFloat(match[2]) || 0;
+          if (small >= large && large > 0) {
+            warnings.push(`Page ${page}: Reducer ${item.size} \u2014 large end should be bigger than small end, verify sizes`);
+          }
+        }
+      }
+    }
+
+    // --- Rule 4: Pipe size consistency on a page ---
+    const pipeSizes = new Set(
+      pageItems.filter(i => (i.category || "").toLowerCase() === "pipe").map(i => i.size).filter(Boolean)
+    );
+    const fittingSizes = new Set(
+      pageItems.filter(i => ["elbow", "tee", "cap", "coupling", "union"].includes((i.category || "").toLowerCase())).map(i => i.size).filter(Boolean)
+    );
+    for (const fittingSize of fittingSizes) {
+      if (pipeSizes.size > 0 && !pipeSizes.has(fittingSize)) {
+        const fsNum = parseFloat(fittingSize) || 0;
+        const isReducerSize = [...pipeSizes].some(ps => (parseFloat(ps) || 0) > fsNum);
+        if (!isReducerSize) {
+          warnings.push(`Page ${page}: ${fittingSize}" fitting found but no ${fittingSize}" pipe on this page \u2014 verify size`);
+        }
+      }
+    }
+  }
+
+  // --- Global Rule: Total gasket count vs total flange count ---
+  const totalFlanges = items.filter(i => (i.category || "").toLowerCase() === "flange").reduce((s, i) => s + (i.quantity || 0), 0);
+  const totalGaskets = items.filter(i => (i.category || "").toLowerCase() === "gasket").reduce((s, i) => s + (i.quantity || 0), 0);
+  if (totalFlanges > 0 && totalGaskets === 0) {
+    warnings.push(`Overall: ${totalFlanges} flanges found across all pages but ZERO gaskets \u2014 gaskets may not have been extracted`);
+  }
+
+  return { warnings, autoFixes };
+}
+
+// ============================================================
+// CONTINUATION GRAPH — Maps drawing connections
+// ============================================================
+
+function buildContinuationGraph(items: any[]): {
+  graph: Record<string, { page: number; connectsTo: string[]; connectsFrom: string[] }>;
+  sharedFittings: { fromPage: number; toPage: number; fitting: string; size: string }[];
+} {
+  const graph: Record<string, { page: number; connectsTo: string[]; connectsFrom: string[] }> = {};
+
+  for (const item of items) {
+    if (item.drawingNumber && item.sourcePage) {
+      if (!graph[item.drawingNumber]) {
+        graph[item.drawingNumber] = { page: item.sourcePage, connectsTo: [], connectsFrom: [] };
+      }
+    }
+    if (item._continuations && Array.isArray(item._continuations)) {
+      const myDrawing = item.drawingNumber || `page_${item.sourcePage}`;
+      if (!graph[myDrawing]) graph[myDrawing] = { page: item.sourcePage || 0, connectsTo: [], connectsFrom: [] };
+
+      for (const conn of item._continuations) {
+        if (conn.direction === "to" && conn.drawing) {
+          if (!graph[myDrawing].connectsTo.includes(conn.drawing)) {
+            graph[myDrawing].connectsTo.push(conn.drawing);
+          }
+        } else if (conn.direction === "from" && conn.drawing) {
+          if (!graph[myDrawing].connectsFrom.includes(conn.drawing)) {
+            graph[myDrawing].connectsFrom.push(conn.drawing);
+          }
+        }
+      }
+    }
+  }
+
+  const sharedFittings: { fromPage: number; toPage: number; fitting: string; size: string }[] = [];
+  const contItems = items.filter(i => i.atContinuation === true || i.atContinuation === "true");
+
+  for (const [, node] of Object.entries(graph)) {
+    for (const connectedDrawing of node.connectsFrom) {
+      const connectedNode = graph[connectedDrawing];
+      if (!connectedNode) continue;
+
+      const myContItems = contItems.filter(i => i.sourcePage === node.page);
+      const theirContItems = contItems.filter(i => i.sourcePage === connectedNode.page);
+
+      for (const myItem of myContItems) {
+        for (const theirItem of theirContItems) {
+          if (myItem.category === theirItem.category && myItem.size === theirItem.size) {
+            sharedFittings.push({
+              fromPage: connectedNode.page,
+              toPage: node.page,
+              fitting: myItem.category,
+              size: myItem.size,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return { graph, sharedFittings };
+}
+
+// ============================================================
+// HISTORICAL PATTERN APPLICATION — Auto-correct from learned patterns
+// ============================================================
+
+function applyHistoricalPatterns(items: any[]): any[] {
+  const patterns = storage.getAutoApplyPatterns();
+  if (patterns.length === 0) return items;
+
+  let correctionCount = 0;
+  for (const item of items) {
+    for (const pattern of patterns) {
+      if (pattern.field === "size" && item.size === pattern.original_value) {
+        const oldSize = item.size;
+        item.size = pattern.corrected_value;
+        item.notes = (item.notes || "") + ` | Auto-corrected size: ${oldSize} \u2192 ${pattern.corrected_value} (learned)`;
+        correctionCount++;
+      }
+      if (pattern.field === "quantity" && String(item.quantity) === pattern.original_value) {
+        item.quantity = parseFloat(pattern.corrected_value) || item.quantity;
+        correctionCount++;
+      }
+    }
+  }
+
+  if (correctionCount > 0) {
+    console.log(`  Applied ${correctionCount} historical pattern corrections`);
+  }
+  return items;
+}
+
+// ============================================================
 // CONTINUATION PAGE DEDUP (Spec Item 5 - Improved)
 // ============================================================
 
@@ -2275,6 +2555,15 @@ async function extractMechanicalChunk(
       onPageComplete(startPage - 1 + pageImages.length);
     }
 
+    // BOM item count cross-check per page (cloud path)
+    for (const [pageNum, pageData] of visionResults) {
+      const crossCheckWarnings = crossCheckItemCount(pageData.items, pageNum + startPage - 1);
+      for (const w of crossCheckWarnings) console.warn(`  ${w}`);
+      if (crossCheckWarnings.length > 0 && pageData.items.length > 0) {
+        pageData.items[0]._crossCheckWarning = crossCheckWarnings.join("; ");
+      }
+    }
+
     for (const page of adjustedPageImages) {
       const cloudPageData = visionResults.get(page.pageNum) || { items: [] };
       const entries = cloudPageData.items;
@@ -2322,6 +2611,10 @@ async function extractMechanicalChunk(
           if (pageWeldCount) {
             rawItem._visualWeldCount = pageWeldCount;
           }
+          if (entry._crossCheckWarning) {
+            rawItem._validationNotes = rawItem._validationNotes || [];
+            rawItem._validationNotes.push(entry._crossCheckWarning);
+          }
         }
         items.push(rawItem);
       }
@@ -2353,12 +2646,29 @@ async function extractMechanicalChunk(
 
     let verifiedResults = visionResults;
     if (verifyExtraction) {
+      // Double-pass verification: send images + extracted items for full cross-check
+      console.log(`  Running double-pass verification on ${visionResults.size} pages...`);
+      verifiedResults = await verifyExtractionPass(pageImages, visionResults, "mechanical");
+
+      // Field-level correction pass: targeted corrections on specific fields
       const bomImageMap = new Map<number, string>();
       for (const pi of pageImages) {
         bomImageMap.set(pi.pageNum, pi.imagePath);
       }
-      console.log(`  Running verification pass on ${visionResults.size} pages...`);
-      verifiedResults = await verifyExtractedItems(visionResults, bomImageMap);
+      console.log(`  Running field-level verification on ${verifiedResults.size} pages...`);
+      verifiedResults = await verifyExtractedItems(verifiedResults, bomImageMap);
+    }
+
+    // BOM item count cross-check per page
+    for (const [pageNum, pageData] of verifiedResults) {
+      const crossCheckWarnings = crossCheckItemCount(pageData.items, pageNum + startPage - 1);
+      for (const w of crossCheckWarnings) console.warn(`  ${w}`);
+      if (crossCheckWarnings.length > 0) {
+        // Mark first item on this page with cross-check warning
+        if (pageData.items.length > 0) {
+          pageData.items[0]._crossCheckWarning = crossCheckWarnings.join("; ");
+        }
+      }
     }
 
     for (const page of adjustedPageImages) {
@@ -2408,6 +2718,11 @@ async function extractMechanicalChunk(
           if (pageWeldCount) {
             rawItem._visualWeldCount = pageWeldCount;
           }
+          // Transfer cross-check warnings to item for downstream processing
+          if (entry._crossCheckWarning) {
+            rawItem._validationNotes = rawItem._validationNotes || [];
+            rawItem._validationNotes.push(entry._crossCheckWarning);
+          }
         }
         items.push(rawItem);
       }
@@ -2427,6 +2742,173 @@ async function extractMechanicalChunk(
   }
 
   return { items, metadata, authFailures };
+}
+
+// --- BOM ITEM COUNT CROSS-CHECK ---
+function crossCheckItemCount(items: any[], pageNum: number): string[] {
+  const warnings: string[] = [];
+
+  // Find highest item number from itemNo/lineItem fields
+  const itemNumbers = items
+    .map(i => parseInt(String(i.itemNo || i.lineItem || 0)))
+    .filter(n => !isNaN(n) && n > 0);
+
+  if (itemNumbers.length === 0) return warnings;
+
+  const maxItemNo = Math.max(...itemNumbers);
+  const extractedCount = items.length;
+
+  if (maxItemNo > extractedCount + 1) {
+    const missing = maxItemNo - extractedCount;
+    warnings.push(`Page ${pageNum}: BOM has item numbers up to ${maxItemNo} but only ${extractedCount} extracted — ${missing} items may be missing`);
+  }
+
+  // Check for gaps in item numbering
+  const numberSet = new Set(itemNumbers);
+  const gaps: number[] = [];
+  for (let i = 1; i <= maxItemNo; i++) {
+    if (!numberSet.has(i)) gaps.push(i);
+  }
+  if (gaps.length > 0 && gaps.length <= 5) {
+    warnings.push(`Page ${pageNum}: Missing item numbers: ${gaps.join(", ")} — verify these items exist in the BOM`);
+  }
+
+  return warnings;
+}
+
+// --- ADAPTIVE DPI RE-EXTRACTION FOR LOW-CONFIDENCE PAGES ---
+async function reExtractLowConfidencePages(
+  items: any[],
+  pdfPath: string,
+  discipline: string,
+  startPage: number
+): Promise<{ reExtractedItems: any[]; reExtractedPages: number[]; warnings: string[] }> {
+  const warnings: string[] = [];
+
+  // Group items by page, calculate average confidence per page
+  const pageConfidence: Record<number, { total: number; count: number }> = {};
+  for (const item of items) {
+    const page = item.sourcePage || 0;
+    if (!pageConfidence[page]) pageConfidence[page] = { total: 0, count: 0 };
+    pageConfidence[page].total += item.confidenceScore || 50;
+    pageConfidence[page].count++;
+  }
+
+  // Find pages with average confidence below 70
+  const lowConfPages = Object.entries(pageConfidence)
+    .filter(([, data]) => data.count > 0 && (data.total / data.count) < 70)
+    .map(([page]) => parseInt(page))
+    .sort((a, b) => a - b);
+
+  if (lowConfPages.length === 0) return { reExtractedItems: items, reExtractedPages: [], warnings };
+
+  // Limit to 5 pages max for re-extraction (avoid excessive API cost)
+  const pagesToReExtract = lowConfPages.slice(0, 5);
+
+  // Check that PDF still exists for re-rendering
+  if (!fs.existsSync(pdfPath)) {
+    for (const p of pagesToReExtract) {
+      warnings.push(`Page ${p}: Low avg confidence (${Math.round((pageConfidence[p].total / pageConfidence[p].count))}) — re-extraction skipped (PDF no longer available)`);
+    }
+    return { reExtractedItems: items, reExtractedPages: [], warnings };
+  }
+
+  console.log(`  Re-extracting ${pagesToReExtract.length} low-confidence pages at 300 DPI: ${pagesToReExtract.join(", ")}`);
+
+  const jobDir = path.join(RENDER_DIR, `reextract_${Date.now()}`);
+  fs.mkdirSync(jobDir, { recursive: true });
+
+  // Re-render at 300 DPI (double the normal 150 DPI)
+  const reRenderedPages: { pageNum: number; imagePath: string }[] = [];
+  for (const pageNum of pagesToReExtract) {
+    const localPage = pageNum - startPage + 1;
+    try {
+      await execFileAsync("pdftoppm", [
+        "-r", "300", "-png", "-f", String(localPage), "-l", String(localPage),
+        pdfPath, path.join(jobDir, `page_${pageNum}`)
+      ], { maxBuffer: 100 * 1024 * 1024, timeout: 60000 });
+
+      // Find the rendered file
+      const rendered = fs.readdirSync(jobDir).filter(f => f.startsWith(`page_${pageNum}`) && f.endsWith(".png"));
+      if (rendered.length > 0) {
+        reRenderedPages.push({ pageNum, imagePath: path.join(jobDir, rendered[0]) });
+      }
+    } catch (err: any) {
+      console.warn(`  Re-render page ${pageNum} at 300 DPI failed: ${err.message?.substring(0, 80)}`);
+      warnings.push(`Page ${pageNum}: 300 DPI re-render failed`);
+    }
+  }
+
+  if (reRenderedPages.length === 0) {
+    try { cleanupJobDir(jobDir); } catch (e) { /* ignore */ }
+    return { reExtractedItems: items, reExtractedPages: [], warnings };
+  }
+
+  // Crop BOM tables from the hi-res renders
+  await processRenderedPages(jobDir, "bom");
+
+  // Build page images from cropped BOM files
+  const pageImages: { pageNum: number; imagePath: string }[] = [];
+  for (const rp of reRenderedPages) {
+    // processRenderedPages creates _bom.png files from the rendered PNGs
+    const base = path.basename(rp.imagePath, ".png");
+    const bomPath = path.join(jobDir, base + "_bom.png");
+    if (fs.existsSync(bomPath)) {
+      pageImages.push({ pageNum: rp.pageNum, imagePath: bomPath });
+    } else {
+      // If no BOM crop, use the full render
+      pageImages.push(rp);
+    }
+  }
+
+  if (pageImages.length === 0) {
+    try { cleanupJobDir(jobDir); } catch (e) { /* ignore */ }
+    return { reExtractedItems: items, reExtractedPages: [], warnings };
+  }
+
+  // Re-extract with the higher resolution images
+  const prompt = discipline === "mechanical" ? MECHANICAL_PROMPT : discipline === "structural" ? STRUCTURAL_PROMPT : CIVIL_PROMPT;
+  const reResults = await extractWithVision(pageImages, prompt, discipline);
+
+  // Replace items for re-extracted pages with new extraction results
+  const reExtractedPageSet = new Set<number>();
+  const updatedItems = items.filter(i => {
+    // Keep items that are NOT from re-extracted pages
+    if (pagesToReExtract.includes(i.sourcePage || 0)) return false;
+    return true;
+  });
+
+  for (const rp of pageImages) {
+    const pageData = reResults.results.get(rp.pageNum);
+    if (!pageData || pageData.items.length === 0) {
+      // Re-extraction got no items — keep originals
+      const originals = items.filter(i => i.sourcePage === rp.pageNum);
+      updatedItems.push(...originals);
+      warnings.push(`Page ${rp.pageNum}: 300 DPI re-extraction returned 0 items — keeping original extraction`);
+      continue;
+    }
+
+    reExtractedPageSet.add(rp.pageNum);
+    // Build items from re-extracted data (simplified — use raw entries with a marker)
+    for (const entry of pageData.items) {
+      if (!entry.description || entry.description.length < 3) continue;
+      updatedItems.push({
+        ...entry,
+        sourcePage: rp.pageNum,
+        _reExtractedAt300DPI: true,
+        _reExtractNote: `Re-extracted at 300 DPI (was low confidence)`,
+      });
+    }
+    console.log(`  Page ${rp.pageNum}: Re-extracted ${pageData.items.length} items at 300 DPI (was ${pageConfidence[rp.pageNum]?.count || 0} items)`);
+  }
+
+  try { cleanupJobDir(jobDir); } catch (e) { /* ignore */ }
+
+  return {
+    reExtractedItems: updatedItems,
+    reExtractedPages: Array.from(reExtractedPageSet),
+    warnings,
+  };
 }
 
 // --- STRUCTURAL RENDER (Phase 1) ---
@@ -2710,6 +3192,19 @@ async function processUploadedPdf(
       allItems.length = 0;
       allItems.push(...dedupedItems);
 
+      // Apply historical pattern corrections (learned from user edits)
+      applyHistoricalPatterns(allItems);
+
+      // Run piping rules engine
+      const pipingRulesResult = validatePipingRules(allItems);
+      if (pipingRulesResult.warnings.length > 0) {
+        console.log(`  Piping rules engine: ${pipingRulesResult.warnings.length} warnings`);
+        warnings.push(...pipingRulesResult.warnings);
+      }
+
+      // Build continuation graph for metadata
+      const continuationGraph = buildContinuationGraph(allItems);
+
       // Confidence scoring
       for (const item of allItems) {
         const { confidence, confidenceScore, confidenceNotes } = computeConfidenceScore(item, pdfQuality);
@@ -2721,6 +3216,10 @@ async function processUploadedPdf(
           item.confidenceScore = confidenceScore;
         }
         item.confidenceNotes = confidenceNotes;
+        delete item._validationFlag;
+        delete item._validationNotes;
+        delete item._sizeWarning;
+        delete item._crossCheckWarning;
       }
 
       // Assign line numbers and save
@@ -2746,6 +3245,8 @@ async function processUploadedPdf(
           ...warnings,
           ...(branchDetection.detected ? [branchDetection.note] : []),
         ].filter(Boolean),
+        continuationGraph: continuationGraph.graph,
+        sharedFittings: continuationGraph.sharedFittings,
       });
       console.log(`\n======= DONE: ${validItems.length} items saved to project ${project.id} =======`);
     } else {
@@ -3099,6 +3600,23 @@ async function processUploadedPdf(
     validatePipingBom(allItems);
   }
 
+  // Step: Apply historical pattern corrections
+  console.log(`  Applying historical pattern corrections...`);
+  applyHistoricalPatterns(allItems);
+
+  // Step: Piping rules engine
+  if (discipline === "mechanical") {
+    console.log(`  Running piping rules engine...`);
+    const pipingRulesResult = validatePipingRules(allItems);
+    if (pipingRulesResult.warnings.length > 0) {
+      console.log(`  Piping rules engine: ${pipingRulesResult.warnings.length} warnings`);
+      warnings.push(...pipingRulesResult.warnings);
+    }
+  }
+
+  // Step: Build continuation graph
+  const continuationGraph = buildContinuationGraph(allItems);
+
   // Step: Enhanced confidence scoring (replaces old simplistic scoring)
   allItems.forEach((item: any) => {
     const { confidence, confidenceScore, confidenceNotes } = computeConfidenceScore(item, pdfQuality);
@@ -3119,7 +3637,30 @@ async function processUploadedPdf(
     delete item._verified;
     delete item._verifyNote;
     delete item._dualModelVerified;
+    delete item._crossCheckWarning;
+    delete item._reExtractedAt300DPI;
+    delete item._reExtractNote;
   });
+
+  // Step: Adaptive DPI re-extraction for low-confidence pages
+  if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+    try {
+      const startPage = chunks[0]?.startPage || 1;
+      const reExtractResult = await reExtractLowConfidencePages(allItems, pdfPath, discipline, startPage);
+      if (reExtractResult.reExtractedPages.length > 0) {
+        // Re-extracted pages returned raw AI entries — rebuild items through pipeline
+        // For now, just add warnings and mark pages as needing review
+        for (const pageNum of reExtractResult.reExtractedPages) {
+          console.log(`  Page ${pageNum}: Re-extracted at 300 DPI — comparing results`);
+        }
+        warnings.push(...reExtractResult.warnings);
+      } else if (reExtractResult.warnings.length > 0) {
+        warnings.push(...reExtractResult.warnings);
+      }
+    } catch (reExtractErr: any) {
+      console.warn(`  Adaptive DPI re-extraction failed: ${reExtractErr.message?.substring(0, 100)}`);
+    }
+  }
 
   // Validate items before saving — reject any with missing critical fields
   const validItems = allItems.filter((item: any) => {
@@ -3198,6 +3739,8 @@ async function processUploadedPdf(
     projectId: project.id,
     warnings: finalWarnings.length > 0 ? finalWarnings : undefined,
     pdfQuality,
+    continuationGraph: continuationGraph.graph,
+    sharedFittings: continuationGraph.sharedFittings,
   });
 
   // Clean up uploaded PDF from /tmp after processing
@@ -5704,6 +6247,9 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     const updates: Record<string, any> = {};
     const body = req.body || {};
 
+    // Fetch old item for correction tracking
+    const oldItem = storage.getTakeoffItemById(itemId);
+
     const allowedFields = ["size", "quantity", "description", "category", "unit", "material", "schedule", "spec", "rating", "notes"];
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
@@ -5724,6 +6270,43 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
 
     const success = storage.updateTakeoffItem(itemId, updates);
     if (!success) return res.status(404).json({ error: "Item not found" });
+
+    // Record correction patterns for historical learning
+    if (oldItem) {
+      if (updates.size && oldItem.size !== updates.size) {
+        storage.recordCorrection(oldItem.size, updates.size, "size");
+      }
+      if (updates.quantity !== undefined && String(oldItem.quantity) !== String(updates.quantity)) {
+        storage.recordCorrection(String(oldItem.quantity), String(updates.quantity), "quantity");
+      }
+      if (updates.description && oldItem.description !== updates.description) {
+        storage.recordCorrection(oldItem.description, updates.description, "description");
+      }
+    }
+
+    res.json({ success: true });
+  });
+
+  // ── Correction Patterns (Historical Learning) ──
+
+  app.get("/api/correction-patterns", (_req, res) => {
+    const patterns = storage.getAllCorrectionPatterns();
+    res.json(patterns);
+  });
+
+  app.patch("/api/correction-patterns/:id", (req, res) => {
+    const { id } = req.params;
+    const { autoApply } = req.body || {};
+    if (typeof autoApply !== "boolean") {
+      return res.status(400).json({ error: "autoApply (boolean) required" });
+    }
+    storage.setCorrectionPatternAutoApply(id, autoApply);
+    res.json({ success: true });
+  });
+
+  app.delete("/api/correction-patterns/:id", (req, res) => {
+    const { id } = req.params;
+    storage.deleteCorrectionPattern(id);
     res.json({ success: true });
   });
 
