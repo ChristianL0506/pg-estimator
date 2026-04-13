@@ -1760,9 +1760,19 @@ function classifyPdfQuality(pageImages: { pageNum: number; imagePath: string; te
 
   // Vector PDFs render to large images (>500KB) and have rich OCR text
   if (avgFileSize > 500 * 1024 || avgTextLength > 500) return "vector";
+
+  // When tesseract is not installed, avgTextLength will always be 0.
+  // Fall back to file size only: rendered engineering drawings at 150 DPI
+  // are typically 100KB+ per page for clean scans.
+  if (avgTextLength === 0 && avgFileSize > 50 * 1024) return "clean_scan";
+
   // Clean scans have moderate OCR text
   if (avgTextLength >= 100) return "clean_scan";
-  // Poor scans have very little extractable text
+
+  // Only classify as poor_scan if we actually have tesseract data AND it's sparse
+  // Without tesseract, assume clean_scan to avoid false "poor quality" warnings
+  if (avgTextLength === 0 && !isTesseractAvailable()) return "clean_scan";
+
   return "poor_scan";
 }
 

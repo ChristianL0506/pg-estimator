@@ -367,7 +367,7 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                         <p className="text-xs font-medium truncate">{p.name}</p>
                         {p.archived && <Archive size={10} className="text-muted-foreground shrink-0" />}
                       </div>
-                      <p className="text-[10px] text-muted-foreground">{p.items.length} items</p>
+                      <p className="text-[10px] text-muted-foreground">{(p as any).itemCount ?? p.items.length} items</p>
                       <p className="text-[10px] text-muted-foreground">{new Date(p.createdAt).toLocaleDateString()}</p>
                     </div>
                     <div className="flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 shrink-0">
