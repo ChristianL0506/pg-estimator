@@ -41,6 +41,34 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
 
     if (pagesWithVisual.size === 0) return null;
 
+    // Build continuation map: which pages are "to" pages (receiving continuations)
+    // Welds at continuation points appear on both sheets — subtract from "to" sheet
+    const continuationToPages = new Set<number>();
+    const continuationWeldsPerPage: Record<number, { bw: number; sw: number }> = {};
+    for (const item of items) {
+      if (item._continuations && Array.isArray(item._continuations)) {
+        for (const conn of item._continuations) {
+          if (conn.direction === "to") {
+            // This page has a "to" continuation — welds at that point are shared
+            // Count continuation-point items on this page to estimate shared welds
+            const page = item.sourcePage || 0;
+            continuationToPages.add(page);
+          }
+        }
+      }
+      // Count welds from items marked at continuation points on "to" pages
+      if (item.atContinuation && item.sourcePage && continuationToPages.has(item.sourcePage)) {
+        if (!continuationWeldsPerPage[item.sourcePage]) continuationWeldsPerPage[item.sourcePage] = { bw: 0, sw: 0 };
+        const cat = (item.category || "").toLowerCase();
+        const qty = item.quantity || 0;
+        // Estimate welds for this continuation item
+        if (cat === "elbow") { continuationWeldsPerPage[item.sourcePage].bw += qty; } // 1 of the 2 welds is shared
+        else if (cat === "tee") { continuationWeldsPerPage[item.sourcePage].bw += qty; }
+        else if (cat === "reducer") { continuationWeldsPerPage[item.sourcePage].bw += qty; }
+        else if (cat === "flange") { continuationWeldsPerPage[item.sourcePage].bw += qty; }
+      }
+    }
+
     // Calculate BOM-inferred weld counts per page
     const RULES: Record<string, { bw: number; sw: number }> = {
       elbow: { bw: 2, sw: 0 }, tee: { bw: 3, sw: 0 }, reducer: { bw: 2, sw: 0 },
@@ -48,6 +76,7 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       flange: { bw: 1, sw: 0 },
     };
 
+    let totalContinuationWelds = 0;
     for (const [page, visual] of pagesWithVisual) {
       const pageItems = items.filter(i => i.sourcePage === page);
       let inferredBW = 0, inferredSW = 0;
@@ -57,10 +86,22 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
         const rule = RULES[cat];
         if (rule) { inferredBW += qty * rule.bw; inferredSW += qty * rule.sw; }
       }
-      totalVisualBW += visual.buttWelds || 0;
-      totalVisualSW += visual.socketWelds || 0;
+
+      // Adjust visual count: subtract continuation-point welds on "to" pages
+      // These weld dots appear on both sheets but should only be counted once
+      let adjustedVisualBW = visual.buttWelds || 0;
+      let adjustedVisualSW = visual.socketWelds || 0;
+      const contWelds = continuationWeldsPerPage[page];
+      if (contWelds) {
+        adjustedVisualBW = Math.max(0, adjustedVisualBW - contWelds.bw);
+        adjustedVisualSW = Math.max(0, adjustedVisualSW - contWelds.sw);
+        totalContinuationWelds += contWelds.bw + contWelds.sw;
+      }
+
+      totalVisualBW += adjustedVisualBW;
+      totalVisualSW += adjustedVisualSW;
       totalVisualFW += visual.fieldWelds || 0;
-      pageCounts.push({ page, visual, inferred: { buttWelds: inferredBW, socketWelds: inferredSW } });
+      pageCounts.push({ page, visual: { buttWelds: adjustedVisualBW, socketWelds: adjustedVisualSW, fieldWelds: visual.fieldWelds || 0 }, inferred: { buttWelds: inferredBW, socketWelds: inferredSW } });
     }
 
     const totalInferredBW = pageCounts.reduce((s, p) => s + p.inferred.buttWelds, 0);
