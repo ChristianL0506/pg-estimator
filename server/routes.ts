@@ -633,8 +633,18 @@ VALIDATION — before returning, verify each item:
 (c) DESCRIPTION starts with a material type keyword (PIPE, ELBOW, TEE, FLANGE, VALVE, GASKET, BOLT, STUD, REDUCER, CAP, etc.)
 Double-check your work before returning. Review each item and fix any obvious errors.
 
+CONTINUATION REFERENCES:
+Isometric drawings often show continuation lines to other sheets. Look for text like:
+- "CONT'D ON DWG xxx SHT x" or "CONT TO xxx"
+- "CONT'D FROM DWG xxx SHT x" or "CONT FROM xxx"
+- Match line flags or reference callouts at the edge of the drawing
+- "SEE DWG xxx" or arrows pointing off-sheet with a drawing number
+
+If you find continuation references, include them in the output as a "continuations" array.
+For items that appear AT a continuation point (the fitting where the line leaves this sheet to continue on another), add "atContinuation": true to that item.
+
 Return ONLY valid JSON (no markdown fences, no extra text):
-{"pages": [{"pageNum": PAGE_NUMBER, "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP"}]}]}`;
+{"pages": [{"pageNum": PAGE_NUMBER, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}, {"direction": "from", "drawing": "P-1001-500", "sheet": 2}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}`;
 
 const MECHANICAL_CLOUD_PROMPT = `You are an expert at reading piping isometric drawings and identifying REVISION CLOUDS.
 
@@ -1862,14 +1872,76 @@ function validatePipingBom(items: any[]): any[] {
 // ============================================================
 
 function dedupContinuationPages(items: any[]): any[] {
-  // DEDUP DISABLED — The heuristic-based dedup was causing false positives,
-  // marking legitimate items from different ISO drawings as duplicates.
-  // Different pipe lines on consecutive pages often have similar fittings
-  // (same sizes, same types) which triggers false matches.
+  // CONTINUATION-BASED DEDUP — Only removes items that are explicitly marked
+  // as being at a continuation point AND appear on both the "from" and "to" sheets.
+  // This uses the AI-extracted continuation references, NOT heuristic matching.
   //
-  // The estimator can manually identify and remove true duplicates.
-  // False dedup (removing real items) is far worse than keeping a few
-  // actual duplicates.
+  // Rule: When two connected sheets both have the same fitting at their shared
+  // continuation point, keep the item on the "from" sheet and remove it from
+  // the "to" sheet.
+
+  // Find items marked as atContinuation
+  const continuationItems = items.filter(i => i.atContinuation === true || i.atContinuation === "true");
+  if (continuationItems.length === 0) return items;
+
+  // Build a map of continuation connections: page -> [{direction, drawing, sheet}]
+  // This info was stored on items during extraction as _continuations on the first item of each page
+  const pageConnections: Record<number, { direction: string; drawing: string; sheet: number }[]> = {};
+  for (const item of items) {
+    if (item._continuations && Array.isArray(item._continuations)) {
+      const page = item.sourcePage || 0;
+      if (!pageConnections[page]) pageConnections[page] = [];
+      pageConnections[page].push(...item._continuations);
+    }
+  }
+
+  // For each pair of connected pages, find shared continuation items
+  let dedupCount = 0;
+  const processedPairs = new Set<string>();
+
+  for (const [pageStr, connections] of Object.entries(pageConnections)) {
+    const page = parseInt(pageStr);
+    for (const conn of connections) {
+      if (conn.direction !== "from") continue; // Only process "from" direction to avoid double-processing
+
+      // Find the "to" page — look for a page that has a "to" connection matching this drawing/sheet
+      const toPageEntry = Object.entries(pageConnections).find(([p, conns]) => {
+        return parseInt(p) !== page && conns.some(c =>
+          c.direction === "to" && c.drawing === conn.drawing && c.sheet === conn.sheet
+        );
+      });
+      // Also try: the "to" page has a "from" referencing back to our page's drawing
+      if (!toPageEntry) continue;
+
+      const toPage = parseInt(toPageEntry[0]);
+      const pairKey = `${Math.min(page, toPage)}-${Math.max(page, toPage)}`;
+      if (processedPairs.has(pairKey)) continue;
+      processedPairs.add(pairKey);
+
+      // Get continuation items from both pages
+      const fromPageItems = continuationItems.filter(i => i.sourcePage === page);
+      const toPageItems = continuationItems.filter(i => i.sourcePage === toPage);
+
+      // Match items by category + size + description (the actual fitting at the connection point)
+      for (const toItem of toPageItems) {
+        const matchKey = `${toItem.category}|${toItem.size}|${toItem.description}`;
+        const matchingFromItem = fromPageItems.find(fi =>
+          `${fi.category}|${fi.size}|${fi.description}` === matchKey
+        );
+
+        if (matchingFromItem) {
+          // Mark the "to" page item as a continuation duplicate
+          toItem._dedupCandidate = true;
+          toItem.dedupNote = `Continuation duplicate — this fitting is shared with page ${page} and counted there.`;
+          dedupCount++;
+        }
+      }
+    }
+  }
+
+  if (dedupCount > 0) {
+    console.log(`  Continuation dedup: marked ${dedupCount} shared connection items (text-referenced, not heuristic)`);
+  }
   return items;
 }
 
@@ -2149,12 +2221,18 @@ async function extractMechanicalChunk(
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
         smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
+        atContinuation: entry.atContinuation === true || entry.atContinuation === "true" || false,
         };
         if (qtyNotes.length > 0) {
           rawItem._validationNotes = rawItem._validationNotes || [];
           rawItem._validationNotes.push(...qtyNotes);
         }
         rawItem = autoCorrectItem(rawItem);
+        // Store continuation references on first item of each page for cross-referencing
+        if ((page as any).continuations && Array.isArray((page as any).continuations)) {
+          const pageItemCount = items.filter(i => i.sourcePage === page.globalPageNum).length;
+          if (pageItemCount === 0) rawItem._continuations = (page as any).continuations;
+        }
         items.push(rawItem);
       }
     }
@@ -2219,12 +2297,18 @@ async function extractMechanicalChunk(
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
         smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
+        atContinuation: entry.atContinuation === true || entry.atContinuation === "true" || false,
         };
         if (qtyNotes.length > 0) {
           rawItem._validationNotes = rawItem._validationNotes || [];
           rawItem._validationNotes.push(...qtyNotes);
         }
         rawItem = autoCorrectItem(rawItem);
+        // Store continuation references on first item of each page for cross-referencing
+        if ((page as any).continuations && Array.isArray((page as any).continuations)) {
+          const pageItemCount = items.filter(i => i.sourcePage === page.globalPageNum).length;
+          if (pageItemCount === 0) rawItem._continuations = (page as any).continuations;
+        }
         items.push(rawItem);
       }
     }
