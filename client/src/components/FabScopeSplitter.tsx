@@ -46,7 +46,8 @@ function inferWelds(item: any): WeldCounts {
   const desc = (item.description || "").toLowerCase();
   const qty = item.quantity ?? 0;
   const isThreaded = desc.includes("threaded") || desc.includes("npt") || desc.includes("screw");
-  const isSW = desc.includes("socket") || desc.includes(" sw ") || desc.includes("sw-");
+  const isSW = desc.includes("socket") || desc.includes(" sw ") || desc.includes("sw-") || desc.includes(",sw,");
+  const isFlanged = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
 
   if (isThreaded) return { buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: qty * 2 };
 
@@ -62,14 +63,28 @@ function inferWelds(item: any): WeldCounts {
     case "cap":
       r.buttWelds = 1 * qty; break;
     case "coupling": case "union":
+      // Threaded already handled above (returns 0 welds). SW couplings: 2 SW.
       r.socketWelds = 2 * qty; break;
     case "valve":
-      if (isSW) r.socketWelds = 2 * qty; else r.buttWelds = 2 * qty; break;
+      // Flanged/threaded valves: 0 welds. SW valves: 2 SW. Default (BW): 2 BW.
+      if (isFlanged) { /* 0 welds */ }
+      else if (isSW) r.socketWelds = 2 * qty;
+      else r.buttWelds = 2 * qty;
+      break;
     case "flange":
       r.buttWelds = 1 * qty; r.boltUps = Math.ceil(qty / 2); break;
-    case "sockolet": case "weldolet": case "olet":
+    case "sockolet":
+      // Sockolet: 2 SW (header bore + branch)
+      r.socketWelds = 2 * qty; break;
+    case "weldolet": case "olet":
+      // Weldolet: 1 BW to header
       r.buttWelds = 1 * qty; break;
-    default: break;
+    default:
+      // Check description for olet types
+      if (desc.includes("sockolet")) r.socketWelds = 2 * qty;
+      else if (desc.includes("weldolet")) r.buttWelds = 1 * qty;
+      else if (desc.includes("threadolet")) r.buttWelds = 1 * qty;
+      break;
   }
   return r;
 }
@@ -189,11 +204,16 @@ export default function FabScopeSplitter({ items }: FabScopeSplitterProps) {
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [searchFilter, setSearchFilter] = useState("");
   const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set());
+  const [showRevisionsOnly, setShowRevisionsOnly] = useState(false);
+
+  const cloudedCount = items.filter(i => i.revisionClouded).length;
+  const hasCloudedItems = cloudedCount > 0;
+  const activeItems = showRevisionsOnly ? items.filter(i => i.revisionClouded) : items;
 
   // Build drawing list from unique source pages
   const drawings = useMemo((): DrawingInfo[] => {
     const pageMap = new Map<number, { items: any[] }>();
-    for (const item of items) {
+    for (const item of activeItems) {
       const page = item.sourcePage ?? 0;
       if (!pageMap.has(page)) pageMap.set(page, { items: [] });
       pageMap.get(page)!.items.push(item);
@@ -223,7 +243,7 @@ export default function FabScopeSplitter({ items }: FabScopeSplitterProps) {
         return { page, label, itemCount: data.items.length, pipeFootage, fittingCount };
       })
       .sort((a, b) => a.page - b.page);
-  }, [items]);
+  }, [activeItems]);
 
   // Filter drawings by search
   const filteredDrawings = useMemo(() => {
@@ -240,7 +260,7 @@ export default function FabScopeSplitter({ items }: FabScopeSplitterProps) {
     const yourFieldItems: any[] = [];
     const yourFullItems: any[] = [];
 
-    for (const item of items) {
+    for (const item of activeItems) {
       const page = item.sourcePage ?? 0;
       const loc = item.installLocation || ((item.notes || "").toLowerCase().includes("field") ? "field" : "shop");
       const isSubbedPage = subPages.has(page);
@@ -258,10 +278,10 @@ export default function FabScopeSplitter({ items }: FabScopeSplitterProps) {
     const yourFullScope = buildScope(yourFullItems);
 
     let totalProjectWelds = { ...ZERO_WELDS };
-    for (const item of items) totalProjectWelds = addWelds(totalProjectWelds, inferWelds(item));
+    for (const item of activeItems) totalProjectWelds = addWelds(totalProjectWelds, inferWelds(item));
 
     return { subShopScope, yourFieldScope, yourFullScope, totalProjectWelds };
-  }, [items, selectedPages]);
+  }, [activeItems, selectedPages]);
 
   // MH estimate
   const estimateMH = useMemo(() => {
@@ -347,6 +367,21 @@ export default function FabScopeSplitter({ items }: FabScopeSplitterProps) {
 
   return (
     <div className="space-y-4">
+      {/* Revision filter toggle */}
+      {hasCloudedItems && (
+        <div className="flex items-center gap-2">
+          <button
+            className={`h-7 text-xs px-2.5 rounded border font-medium transition-colors ${showRevisionsOnly ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700" : "bg-background text-muted-foreground border-border hover:bg-amber-50 dark:hover:bg-amber-950/20"}`}
+            onClick={() => setShowRevisionsOnly(!showRevisionsOnly)}
+          >
+            Revisions Only ({cloudedCount})
+          </button>
+          {showRevisionsOnly && (
+            <span className="text-xs text-amber-600 dark:text-amber-400">Showing only revision-clouded items</span>
+          )}
+        </div>
+      )}
+
       {/* Step 1: Drawing selection */}
       <Card className="border-card-border">
         <CardContent className="p-4 space-y-3">

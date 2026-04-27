@@ -408,7 +408,19 @@ function correctPipeLengthIfInches(qty: number, rawQty: string, description: str
 
   // Parse the pipe size for context
   const pipeSize = parseFloat(options?.size || "0") || 0;
-  const isSmallBore = pipeSize > 0 && pipeSize <= 2;
+  const isSmallBore = pipeSize > 0 && pipeSize <= 4; // Expanded: <=4" is small-bore for inch correction
+
+  // AGGRESSIVE FIX for 8 and 11: These are almost ALWAYS inches on piping ISOs.
+  // 8 feet and 11 feet of pipe on a single ISO line without a foot mark is extremely rare.
+  // 8" and 11" spool pieces are extremely common.
+  if (Number.isInteger(qty) && (qty === 8 || qty === 11)) {
+    const correctedFeet = Math.round((qty / 12) * 100) / 100;
+    return {
+      correctedQty: correctedFeet,
+      wasCorrection: true,
+      note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF. Values 8 and 11 without unit markers are almost always inches on piping ISOs.`
+    };
+  }
 
   // Values 1-11 without unit marker: auto-correct to inches
   // Rationale: 1-11 feet of pipe on a single ISO BOM line without a foot mark is
@@ -422,14 +434,14 @@ function correctPipeLengthIfInches(qty: number, rawQty: string, description: str
     };
   }
 
-  // Values 12-18: auto-correct for small bore (<=2") pipe, flag for larger
+  // Values 12-18: auto-correct for small/medium bore (<=4") pipe, flag for larger
   if (Number.isInteger(qty) && qty >= 12 && qty <= 18) {
     if (isSmallBore) {
       const correctedFeet = Math.round((qty / 12) * 100) / 100;
       return {
         correctedQty: correctedFeet,
         wasCorrection: true,
-        note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF for ${pipeSize}" small-bore pipe.`
+        note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF for ${pipeSize}" pipe (<=4" auto-corrects).`
       };
     }
     return {
@@ -627,6 +639,7 @@ COMMON ERRORS TO AVOID:
 - CRITICAL: Short pipe runs are often in INCHES. If you see 11" or 0'-11" that is 11 INCHES (0.92 LF), NOT 11 feet. Always include the " symbol for inches.
 - Pipe lengths: 3'-4" means 3 feet 4 inches, NOT 34. 10'-2" means 10 feet 2 inches. 0'-8" means 8 inches = 0.67 feet.
 - If a pipe run has no ' or " symbol and the number is small (under 18), it is almost certainly INCHES. Write it as e.g. 11" not 11.
+- EXTRA CRITICAL — VALUES 8 AND 11: When you see a pipe qty of 8 or 11 with NO unit symbol, it is INCHES (8" = 0.67 LF, 11" = 0.92 LF), NOT feet. These are the two most commonly misread values. An 8-foot or 11-foot pipe run on a single ISO without a foot-mark is extremely rare. Always output as 8" or 11" with the inch symbol.
 - Size column: 1-1/2" is a valid pipe size (one and a half inches). Don't misread as 1" or 11/2".
 - NPS sizes: The ONLY valid NPS sizes are: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". If you read something else, you probably misread it.
 - Bolt sizes like 5/8"x4" or 3/4"x4 1/4" are bolt diameter x length, NOT pipe sizes.
@@ -681,7 +694,8 @@ For each page, you will see TWO images:
 1. The FULL PAGE isometric drawing (showing the piping, fittings, and any revision clouds)
 2. The CROPPED BOM TABLE from the same page
 
-REVISION CLOUDS are wavy/scalloped bubbles or irregular curved outlines drawn around parts of the drawing to indicate changes from the previous revision. They look like bumpy cloud shapes surrounding modified areas.
+REVISION CLOUD IDENTIFICATION:
+Revision clouds are wavy/scalloped bubbles or irregular curved outlines drawn around parts of the drawing to indicate changes from the previous revision. They look like bumpy cloud shapes surrounding modified areas.
 
 Your job:
 1. First, extract the BOM exactly as described below.
@@ -692,6 +706,11 @@ Your job:
    - Its BOM table row itself is enclosed in a revision cloud
    - The dimension, routing, or connection point it represents was changed (shown by a cloud)
 5. If NO revision clouds exist on the page, mark all items as clouded=false.
+6. CONFIDENCE: For each item, provide a cloudConfidence score (0-100):
+   - 90-100: Item is clearly inside/outside a cloud, no ambiguity
+   - 70-89: Item is near a cloud boundary, likely correct
+   - 50-69: Ambiguous — item is partially overlapping or near a cloud
+   - Below 50: Uncertain — flag for manual review
 
 BOM EXTRACTION RULES:
 1. Read every cell EXACTLY as printed. Do NOT guess, round, estimate, or infer values.
@@ -718,6 +737,7 @@ COMMON ERRORS TO AVOID:
 - CRITICAL: Short pipe runs are often in INCHES. If you see 11" or 0'-11" that is 11 INCHES (0.92 LF), NOT 11 feet. Always include the " symbol for inches.
 - Pipe lengths: 3'-4" means 3 feet 4 inches, NOT 34. 10'-2" means 10 feet 2 inches. 0'-8" means 8 inches = 0.67 feet.
 - If a pipe run has no ' or " symbol and the number is small (under 18), it is almost certainly INCHES. Write it as e.g. 11" not 11.
+- EXTRA CRITICAL — VALUES 8 AND 11: When you see a pipe qty of 8 or 11 with NO unit symbol, it is INCHES (8" = 0.67 LF, 11" = 0.92 LF), NOT feet. These are the two most commonly misread values. An 8-foot or 11-foot pipe run on a single ISO without a foot-mark is extremely rare. Always output as 8" or 11" with the inch symbol.
 - Size column: 1-1/2" is a valid pipe size (one and a half inches). Don't misread as 1" or 11/2".
 - NPS sizes: The ONLY valid NPS sizes are: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". If you read something else, you probably misread it.
 - Bolt sizes like 5/8"x4" or 3/4"x4 1/4" are bolt diameter x length, NOT pipe sizes.
@@ -726,6 +746,28 @@ COMMON ERRORS TO AVOID:
 - SHOP items are fabricated in a shop. FIELD items are installed in the field. Read both tables.
 - If a row has empty QTY, SIZE, or DESCRIPTION cells, skip it — it's a header or separator.
 
+WELD SYMBOL COUNTING:
+On piping isometrics, welds are shown as symbols on the drawing:
+- Filled/solid black dots (●) = BUTT WELDS (BW)
+- Open/hollow circles (○) = SOCKET WELDS (SW)
+- Small triangles or arrows at connections = FIELD WELDS (FW)
+Count ALL weld symbols visible on the drawing for each page. Include the count in your output as:
+"weldCount": {"buttWelds": NUMBER, "socketWelds": NUMBER, "fieldWelds": NUMBER}
+This is used to verify against the BOM-inferred weld count. Count carefully.
+
+CONTINUATION REFERENCES — CRITICAL FOR AVOIDING DOUBLE COUNTING:
+Isometric drawings show continuation callouts where a pipe line leaves one sheet and continues on another.
+These callouts look like:
+- "CONT'D FROM DWG# 4"-150A2-10S-PA-9100-600-2" (this sheet receives the continuation)
+- "CONT'D TO DWG# 4"-150A2-10S-PA-9100-600-3" (this sheet sends to another)
+- "CONT'D ON DWG xxx" or "CONT FROM DWG xxx"
+- The callout includes the referenced drawing number, and often coordinates (E, N, EL values)
+
+When you find these continuation callouts:
+1. Include them in the "continuations" array with direction ("from" or "to") and the referenced drawing number
+2. The fitting AT the continuation point EXISTS IN BOTH SHEETS' BOM TABLES — but it is ONE physical fitting, not two.
+3. Mark that specific fitting with "atContinuation": true so the system can deduplicate it.
+
 VALIDATION — before returning, verify each item:
 (a) QTY is either a feet-inches length for pipe OR an integer count for non-pipe.
 (b) SIZE is a valid NPS or bolt size from the lists above.
@@ -733,7 +775,7 @@ VALIDATION — before returning, verify each item:
 Double-check your work before returning. Review each item and fix any obvious errors.
 
 Return ONLY valid JSON (no markdown fences, no extra text):
-{"pages": [{"pageNum": PAGE_NUMBER, "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE, SCH 10S, ASME B36.19, SS ASTM A312", "section": "SHOP", "clouded": false}]}]}`;
+{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "16'-8\\"", "size": "1\\"", "description": "PIPE, SMLS, BE, SCH 10S, ASME B36.19, SS ASTM A312", "section": "SHOP", "clouded": false, "cloudConfidence": 95, "atContinuation": false}]}]}`;
 
 // ============================================================
 // MECHANICAL VERIFICATION PROMPT (Multi-Pass)
@@ -2592,6 +2634,7 @@ async function extractMechanicalChunk(
           sourcePage: page.globalPageNum,
           drawingNumber: pageDrawingNumber,
           revisionClouded: entry.clouded === true,
+          cloudConfidence: entry.cloudConfidence ?? (entry.clouded === true ? 80 : 100),
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
         smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
@@ -2699,6 +2742,7 @@ async function extractMechanicalChunk(
           sourcePage: page.globalPageNum,
           drawingNumber: pageDrawingNumber,
           revisionClouded: entry.clouded === true,
+          cloudConfidence: entry.cloudConfidence ?? (entry.clouded === true ? 80 : 100),
         installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
         smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
@@ -4446,15 +4490,19 @@ function inferWeldsFromFittings(items: any[]): any[] {
         weldAssumption: "1 butt weld per cap (auto-inferred)",
       }));
     } else if (cat === "coupling" || desc.includes("coupling")) {
-      welds.push(computeEstimateItem({
-        id: randomUUID(), lineNumber: 0, category: "weld" as any,
-        description: `SW for ${size} COUPLING (auto-inferred)`,
-        size, quantity: qty * 2, unit: "EA",
-        materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
-        materialExtension: 0, laborExtension: 0, totalCost: 0,
-        notes: "Auto-inferred: 2 socket welds per coupling", fromDatabase: false,
-        weldAssumption: "2 socket welds per coupling (auto-inferred)",
-      }));
+      // Threaded couplings: 0 welds. Socket weld couplings: 2 SW.
+      const isThreadedConn = desc.includes("threaded") || desc.includes("npt") || desc.includes("screw");
+      if (!isThreadedConn) {
+        welds.push(computeEstimateItem({
+          id: randomUUID(), lineNumber: 0, category: "weld" as any,
+          description: `SW for ${size} COUPLING (auto-inferred)`,
+          size, quantity: qty * 2, unit: "EA",
+          materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
+          materialExtension: 0, laborExtension: 0, totalCost: 0,
+          notes: "Auto-inferred: 2 socket welds per coupling", fromDatabase: false,
+          weldAssumption: "2 socket welds per coupling (auto-inferred)",
+        }));
+      }
     } else if (cat === "flange" || desc.includes("flange")) {
       // Weld-neck (WN) flanges get butt welds, slip-on (SO) flanges get fillet welds
       const isWeldNeck = desc.includes("weld neck") || desc.includes("wn ") || desc.includes(",wn,") || /\bwn\b/i.test(desc);
@@ -4477,10 +4525,27 @@ function inferWeldsFromFittings(items: any[]): any[] {
         weldAssumption: "1 bolt-up per flange (auto-inferred)",
       }));
     } else if (cat === "valve" || desc.includes("valve")) {
-      // Butt-weld end valves get 2 welds, flanged valves get bolt-ups only
+      // Flanged valves: 0 welds (bolt-up only). Threaded valves: 0 welds.
+      // Butt-weld end valves: 2 BW. Socket-weld valves: 2 SW.
       const isButtWeldEnd = desc.includes("bwe") || desc.includes("butt weld") || desc.includes("bw end") || desc.includes(",be,") || desc.includes(", be");
-      const isFlangedValve = desc.includes("flanged") || desc.includes("flg");
-      if (isButtWeldEnd || (!isFlangedValve && !desc.includes("threaded") && !desc.includes("screw"))) {
+      const isFlangedValve = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
+      const isThreadedValve = desc.includes("threaded") || desc.includes("screw") || desc.includes("npt");
+      const isSocketWeldValve = desc.includes("socket") || desc.includes(" sw ") || desc.includes(",sw,") || /\bsw\b/i.test(desc);
+
+      if (isFlangedValve || isThreadedValve) {
+        // Flanged and threaded valves: 0 welds — no weld entry
+      } else if (isSocketWeldValve) {
+        welds.push(computeEstimateItem({
+          id: randomUUID(), lineNumber: 0, category: "weld" as any,
+          description: `SW for ${size} VALVE (auto-inferred)`,
+          size, quantity: qty * 2, unit: "EA",
+          materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
+          materialExtension: 0, laborExtension: 0, totalCost: 0,
+          notes: "Auto-inferred: 2 socket welds per SW valve", fromDatabase: false,
+          weldAssumption: "2 socket welds per socket-weld valve (auto-inferred)",
+        }));
+      } else {
+        // Default: assume butt-weld ends
         welds.push(computeEstimateItem({
           id: randomUUID(), lineNumber: 0, category: "weld" as any,
           description: `BW for ${size} VALVE (auto-inferred)`,
@@ -4491,16 +4556,38 @@ function inferWeldsFromFittings(items: any[]): any[] {
           weldAssumption: "2 butt welds per valve (auto-inferred)",
         }));
       }
-    } else if (desc.includes("sockolet") || desc.includes("weldolet") || desc.includes("threadolet")) {
-      // Branch connections: 1 weld to header pipe
+    } else if (desc.includes("sockolet")) {
+      // Sockolet: 2 socket welds (1 to header bore + 1 to branch pipe)
       welds.push(computeEstimateItem({
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
-        description: `BW for ${size} ${desc.includes("sockolet") ? "SOCKOLET" : desc.includes("weldolet") ? "WELDOLET" : "OLET"} (auto-inferred)`,
+        description: `SW for ${size} SOCKOLET (auto-inferred)`,
+        size, quantity: qty * 2, unit: "EA",
+        materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
+        materialExtension: 0, laborExtension: 0, totalCost: 0,
+        notes: "Auto-inferred: 2 socket welds per sockolet (header bore + branch)", fromDatabase: false,
+        weldAssumption: "2 socket welds per sockolet (auto-inferred)",
+      }));
+    } else if (desc.includes("weldolet")) {
+      // Weldolet: 1 butt weld to header
+      welds.push(computeEstimateItem({
+        id: randomUUID(), lineNumber: 0, category: "weld" as any,
+        description: `BW for ${size} WELDOLET (auto-inferred)`,
         size, quantity: qty * 1, unit: "EA",
         materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
         materialExtension: 0, laborExtension: 0, totalCost: 0,
-        notes: "Auto-inferred: 1 weld per branch connection to header", fromDatabase: false,
-        weldAssumption: "1 weld per branch connection (auto-inferred)",
+        notes: "Auto-inferred: 1 butt weld per weldolet to header", fromDatabase: false,
+        weldAssumption: "1 butt weld per weldolet (auto-inferred)",
+      }));
+    } else if (desc.includes("threadolet")) {
+      // Threadolet: 1 weld to header (threaded on branch side)
+      welds.push(computeEstimateItem({
+        id: randomUUID(), lineNumber: 0, category: "weld" as any,
+        description: `Weld for ${size} THREADOLET (auto-inferred)`,
+        size, quantity: qty * 1, unit: "EA",
+        materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
+        materialExtension: 0, laborExtension: 0, totalCost: 0,
+        notes: "Auto-inferred: 1 weld per threadolet to header", fromDatabase: false,
+        weldAssumption: "1 weld per threadolet (auto-inferred)",
       }));
     }
   }

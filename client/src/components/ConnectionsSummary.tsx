@@ -6,14 +6,12 @@ interface ConnectionsSummaryProps {
 }
 
 // Weld inference rules (mirrors server/routes.ts inferWeldsFromFittings)
+// Note: valves, couplings, and olets use description-based logic below, not this table
 const WELD_RULES: Record<string, { welds: number; type: string; label: string }> = {
   elbow: { welds: 2, type: "butt_weld", label: "Butt Welds" },
   tee: { welds: 3, type: "butt_weld", label: "Butt Welds" },
   reducer: { welds: 2, type: "butt_weld", label: "Butt Welds" },
   cap: { welds: 1, type: "butt_weld", label: "Butt Weld" },
-  coupling: { welds: 2, type: "socket_weld", label: "Socket Welds" },
-  union: { welds: 2, type: "socket_weld", label: "Socket Welds" },
-  valve: { welds: 2, type: "butt_weld", label: "Butt Welds" },
   flange: { welds: 1, type: "butt_weld", label: "Butt Weld" },
 };
 
@@ -30,6 +28,11 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
   const [byPageOpen, setByPageOpen] = useState(false);
   const [expandedPages, setExpandedPages] = useState<Set<number>>(new Set());
   const [sheetPanelPage, setSheetPanelPage] = useState<number | null>(null);
+  const [showRevisionsOnly, setShowRevisionsOnly] = useState(false);
+
+  const cloudedCount = items.filter(i => i.revisionClouded).length;
+  const hasCloudedItems = cloudedCount > 0;
+  const filteredItems = showRevisionsOnly ? items.filter(i => i.revisionClouded) : items;
 
   const togglePageExpanded = (page: number) => {
     setExpandedPages(prev => {
@@ -85,8 +88,8 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
     // Calculate BOM-inferred weld counts per page
     const RULES: Record<string, { bw: number; sw: number }> = {
       elbow: { bw: 2, sw: 0 }, tee: { bw: 3, sw: 0 }, reducer: { bw: 2, sw: 0 },
-      cap: { bw: 1, sw: 0 }, coupling: { bw: 0, sw: 2 }, valve: { bw: 2, sw: 0 },
-      flange: { bw: 1, sw: 0 },
+      cap: { bw: 1, sw: 0 }, flange: { bw: 1, sw: 0 },
+      sockolet: { bw: 0, sw: 2 }, weldolet: { bw: 1, sw: 0 },
     };
 
     let totalContinuationWelds = 0;
@@ -138,7 +141,7 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       if (!sizeMap[size]) sizeMap[size] = { buttWelds: 0, socketWelds: 0, boltUps: 0, threadedConns: 0 };
     };
 
-    for (const item of items) {
+    for (const item of filteredItems) {
       const cat = (item.category || "").toLowerCase();
       const size = item.size || "N/A";
       const qty = item.quantity || 0;
@@ -163,8 +166,43 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
         sizeMap[size].boltUps += Math.ceil(qty / 2); // 2 flanges = 1 bolt-up joint
         detailsList.push({ size, fitting: item.description || "Flange", qty, connectionType: "Butt Weld + Bolt-Up", connectionCount: qty, section });
       } else if (isThreaded) {
+        // Threaded couplings/unions/valves: 0 welds, just threaded connections
         sizeMap[size].threadedConns += qty;
         detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Threaded", connectionCount: qty, section });
+      } else if (cat === "coupling" || cat === "union") {
+        // Socket weld couplings/unions: 2 SW each (threaded already handled above)
+        const weldCount = qty * 2;
+        if (isSocketWeld) {
+          sizeMap[size].socketWelds += weldCount;
+          detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Socket Welds", connectionCount: weldCount, section });
+        } else {
+          sizeMap[size].socketWelds += weldCount;
+          detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Socket Welds", connectionCount: weldCount, section });
+        }
+      } else if (cat === "valve") {
+        // Flanged/threaded valves: 0 welds. SW valves: 2 SW. BW valves: 2 BW.
+        const isFlangedValve = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
+        if (isFlangedValve) {
+          // 0 welds for flanged valves
+        } else if (isSocketWeld) {
+          sizeMap[size].socketWelds += qty * 2;
+          detailsList.push({ size, fitting: item.description || "Valve (SW)", qty, connectionType: "Socket Welds", connectionCount: qty * 2, section });
+        } else {
+          sizeMap[size].buttWelds += qty * 2;
+          detailsList.push({ size, fitting: item.description || "Valve (BW)", qty, connectionType: "Butt Welds", connectionCount: qty * 2, section });
+        }
+      } else if (cat === "sockolet" || desc.includes("sockolet")) {
+        // Sockolet: 2 SW (header bore + branch)
+        sizeMap[size].socketWelds += qty * 2;
+        detailsList.push({ size, fitting: item.description || "Sockolet", qty, connectionType: "Socket Welds", connectionCount: qty * 2, section });
+      } else if (cat === "weldolet" || desc.includes("weldolet")) {
+        // Weldolet: 1 BW to header
+        sizeMap[size].buttWelds += qty * 1;
+        detailsList.push({ size, fitting: item.description || "Weldolet", qty, connectionType: "Butt Weld", connectionCount: qty, section });
+      } else if (desc.includes("threadolet")) {
+        // Threadolet: 1 weld to header
+        sizeMap[size].buttWelds += qty * 1;
+        detailsList.push({ size, fitting: item.description || "Threadolet", qty, connectionType: "Butt Weld", connectionCount: qty, section });
       } else if (WELD_RULES[cat]) {
         const rule = WELD_RULES[cat];
         const weldCount = qty * rule.welds;
@@ -202,33 +240,52 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
     }), { buttWelds: 0, socketWelds: 0, boltUps: 0, threadedConns: 0, totalConnections: 0 });
 
     return { rows, totals, details: detailsList };
-  }, [items]);
+  }, [filteredItems]);
 
   // Group connections by page
   const byPage = useMemo(() => {
     const RULES: Record<string, { bw: number; sw: number; label: string }> = {
       elbow: { bw: 2, sw: 0, label: "2 BW" }, tee: { bw: 3, sw: 0, label: "3 BW" }, reducer: { bw: 2, sw: 0, label: "2 BW" },
-      cap: { bw: 1, sw: 0, label: "1 BW" }, coupling: { bw: 0, sw: 2, label: "2 SW" }, valve: { bw: 2, sw: 0, label: "2 BW" },
-      flange: { bw: 1, sw: 0, label: "1 BW + BU" },
+      cap: { bw: 1, sw: 0, label: "1 BW" }, flange: { bw: 1, sw: 0, label: "1 BW + BU" },
+      sockolet: { bw: 0, sw: 2, label: "2 SW" }, weldolet: { bw: 1, sw: 0, label: "1 BW" },
     };
     const pageMap: Record<number, { drawingNumber: string | null; fittings: { category: string; size: string; description: string; qty: number; bw: number; sw: number; bu: number; ruleLabel: string }[]; totalBW: number; totalSW: number; totalBU: number }> = {};
 
-    for (const item of items) {
+    for (const item of filteredItems) {
       const page = item.sourcePage || 0;
       if (!pageMap[page]) pageMap[page] = { drawingNumber: item.drawingNumber || null, fittings: [], totalBW: 0, totalSW: 0, totalBU: 0 };
       if (!pageMap[page].drawingNumber && item.drawingNumber) pageMap[page].drawingNumber = item.drawingNumber;
 
       const cat = (item.category || "").toLowerCase();
+      const desc = (item.description || "").toLowerCase();
       const qty = item.quantity || 0;
-      const rule = RULES[cat as keyof typeof RULES];
+      const isThreaded = desc.includes("threaded") || desc.includes("npt") || desc.includes("screw");
+      const isSW = desc.includes("socket") || desc.includes(" sw ") || desc.includes(",sw,") || /\bsw\b/i.test(desc);
+      const isFlanged = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
 
-      if (rule || cat === "bolt" || cat === "gasket") {
-        const bw = rule ? qty * rule.bw : 0;
-        const sw = rule ? qty * rule.sw : 0;
-        const bu = cat === "flange" ? Math.ceil(qty / 2) : (cat === "bolt" || cat === "gasket" ? qty : 0);
+      let bw = 0, sw = 0, bu = 0, ruleLabel = "";
+
+      if (cat === "bolt" || cat === "gasket") {
+        bu = qty; ruleLabel = `${qty}x BU`;
+      } else if (cat === "flange") {
+        bw = qty; bu = Math.ceil(qty / 2); ruleLabel = `${qty}x 1 BW + BU`;
+      } else if (cat === "valve") {
+        if (isFlanged || isThreaded) { ruleLabel = `${qty}x 0 welds`; }
+        else if (isSW) { sw = qty * 2; ruleLabel = `${qty}x 2 SW`; }
+        else { bw = qty * 2; ruleLabel = `${qty}x 2 BW`; }
+      } else if (cat === "coupling" || cat === "union") {
+        if (isThreaded) { ruleLabel = `${qty}x threaded`; }
+        else { sw = qty * 2; ruleLabel = `${qty}x 2 SW`; }
+      } else {
+        const rule = RULES[cat as keyof typeof RULES];
+        if (rule) {
+          bw = qty * rule.bw; sw = qty * rule.sw; ruleLabel = `${qty}x ${rule.label}`;
+        }
+      }
+
+      if (bw > 0 || sw > 0 || bu > 0 || ruleLabel) {
         pageMap[page].fittings.push({
-          category: cat, size: item.size || "N/A", description: item.description || cat, qty, bw, sw, bu,
-          ruleLabel: rule ? `${qty}x ${rule.label}` : `${qty}x BU`,
+          category: cat, size: item.size || "N/A", description: item.description || cat, qty, bw, sw, bu, ruleLabel,
         });
         pageMap[page].totalBW += bw;
         pageMap[page].totalSW += sw;
@@ -240,7 +297,7 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       .filter(([, data]) => data.fittings.length > 0)
       .map(([page, data]) => ({ page: parseInt(page), ...data }))
       .sort((a, b) => a.page - b.page);
-  }, [items]);
+  }, [filteredItems]);
 
   if (rows.length === 0) {
     return (
@@ -252,6 +309,21 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
 
   return (
     <div className="space-y-6">
+      {/* Revision filter toggle */}
+      {hasCloudedItems && (
+        <div className="flex items-center gap-2">
+          <button
+            className={`h-7 text-xs px-2.5 rounded border font-medium transition-colors ${showRevisionsOnly ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700" : "bg-background text-muted-foreground border-border hover:bg-amber-50 dark:hover:bg-amber-950/20"}`}
+            onClick={() => setShowRevisionsOnly(!showRevisionsOnly)}
+          >
+            Revisions Only ({cloudedCount})
+          </button>
+          {showRevisionsOnly && (
+            <span className="text-xs text-amber-600 dark:text-amber-400">Showing only revision-clouded items</span>
+          )}
+        </div>
+      )}
+
       {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="bg-card border rounded-lg p-3 text-center">

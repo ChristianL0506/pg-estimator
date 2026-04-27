@@ -302,16 +302,24 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
 
         {/* Cloud filter */}
         {hasCloudedItems && (
-          <select
-            className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
-            value={cloudFilter}
-            onChange={e => setCloudFilter(e.target.value as any)}
-            aria-label="Filter by revision status"
-          >
-            <option value="all">All Revisions</option>
-            <option value="clouded">Clouded ({cloudedCount})</option>
-            <option value="non-clouded">Non-Clouded ({items.length - cloudedCount})</option>
-          </select>
+          <>
+            <button
+              className={`h-7 text-xs px-2.5 rounded border font-medium transition-colors ${cloudFilter === "clouded" ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700" : "bg-background text-muted-foreground border-border hover:bg-amber-50 dark:hover:bg-amber-950/20"}`}
+              onClick={() => setCloudFilter(cloudFilter === "clouded" ? "all" : "clouded")}
+            >
+              Revisions Only ({cloudedCount})
+            </button>
+            <select
+              className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
+              value={cloudFilter}
+              onChange={e => setCloudFilter(e.target.value as any)}
+              aria-label="Filter by revision status"
+            >
+              <option value="all">All Revisions</option>
+              <option value="clouded">Clouded ({cloudedCount})</option>
+              <option value="non-clouded">Non-Clouded ({items.length - cloudedCount})</option>
+            </select>
+          </>
         )}
 
         {activeFilterCount > 0 && (
