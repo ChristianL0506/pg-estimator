@@ -6596,9 +6596,10 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         const descLower = (item.description || "").toLowerCase();
         const size = item.size || "N/A";
         const qty = item.quantity ?? 0;
-        const isThreaded = descLower.includes("threaded") || descLower.includes("npt");
-        const isSocketWeld = descLower.includes("sw ") || descLower.includes("socket") || descLower.includes("sw-");
-        const location = descLower.includes("shop") ? "shop" : "field";
+        const isThreaded = descLower.includes("threaded") || descLower.includes("screw") || descLower.includes("npt") || descLower.includes("fnpt") || descLower.includes("mnpt");
+        const isSocketWeld = descLower.includes("socket weld") || descLower.includes("socket") || descLower.includes("sw ") || descLower.includes("sw-") || descLower.includes(",sw,") || descLower.includes(", sw,") || descLower.includes(" sw,") || /\bsw\b/i.test(descLower);
+        const isFlanged = descLower.includes("flanged") || descLower.includes("flg") || descLower.includes("rf ") || descLower.includes("raised face");
+        const location = item.installLocation || "shop";
 
         if (!sizeMap.has(size)) sizeMap.set(size, { buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: 0 });
         const sm = sizeMap.get(size)!;
@@ -6630,16 +6631,21 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
           connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
           sm.socketWelds += 2 * qty;
         } else if (catLower === "valve") {
+          // Only socket-weld valves generate welds. Flanged/threaded/butterfly: 0 welds.
           if (isThreaded) {
             connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "threaded", connectionCount: 2 * qty, location });
             sm.threaded += 2 * qty;
-          } else {
-            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "butt weld", connectionCount: 2 * qty, location });
-            sm.buttWelds += 2 * qty;
+          } else if (isSocketWeld) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
+            sm.socketWelds += 2 * qty;
           }
+          // Flanged, butterfly, BW valves: 0 welds (connections come from surrounding flanges)
         } else if (catLower === "flange") {
-          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "butt weld + bolt-up", connectionCount: qty, location });
-          sm.buttWelds += qty;
+          // SW flanges get socket welds, WN/SO flanges get butt welds
+          const flangeWeldType = isSocketWeld ? "socket weld" : "butt weld";
+          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: `${flangeWeldType} + bolt-up`, connectionCount: qty, location });
+          if (isSocketWeld) sm.socketWelds += qty;
+          else sm.buttWelds += qty;
           sm.boltUps += Math.ceil(qty / 2);
         }
       }
