@@ -17,8 +17,12 @@ const WELD_RULES: Record<string, { welds: number; type: string; label: string }>
 
 type ConnectionRow = {
   size: string;
-  buttWelds: number;
-  socketWelds: number;
+  shopButtWelds: number;
+  shopSocketWelds: number;
+  fieldButtWelds: number;
+  fieldSocketWelds: number;
+  totalShopWelds: number;
+  totalFieldWelds: number;
   boltUps: number;
   threadedConns: number;
   totalConnections: number;
@@ -65,27 +69,22 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       if (item._continuations && Array.isArray(item._continuations)) {
         for (const conn of item._continuations) {
           if (conn.direction === "to") {
-            // This page has a "to" continuation — welds at that point are shared
-            // Count continuation-point items on this page to estimate shared welds
             const page = item.sourcePage || 0;
             continuationToPages.add(page);
           }
         }
       }
-      // Count welds from items marked at continuation points on "to" pages
       if (item.atContinuation && item.sourcePage && continuationToPages.has(item.sourcePage)) {
         if (!continuationWeldsPerPage[item.sourcePage]) continuationWeldsPerPage[item.sourcePage] = { bw: 0, sw: 0 };
         const cat = (item.category || "").toLowerCase();
         const qty = item.quantity || 0;
-        // Estimate welds for this continuation item
-        if (cat === "elbow") { continuationWeldsPerPage[item.sourcePage].bw += qty; } // 1 of the 2 welds is shared
+        if (cat === "elbow") { continuationWeldsPerPage[item.sourcePage].bw += qty; }
         else if (cat === "tee") { continuationWeldsPerPage[item.sourcePage].bw += qty; }
         else if (cat === "reducer") { continuationWeldsPerPage[item.sourcePage].bw += qty; }
         else if (cat === "flange") { continuationWeldsPerPage[item.sourcePage].bw += qty; }
       }
     }
 
-    // Calculate BOM-inferred weld counts per page
     const RULES: Record<string, { bw: number; sw: number }> = {
       elbow: { bw: 2, sw: 0 }, tee: { bw: 3, sw: 0 }, reducer: { bw: 2, sw: 0 },
       cap: { bw: 1, sw: 0 }, flange: { bw: 1, sw: 0 },
@@ -103,8 +102,6 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
         if (rule) { inferredBW += qty * rule.bw; inferredSW += qty * rule.sw; }
       }
 
-      // Adjust visual count: subtract continuation-point welds on "to" pages
-      // These weld dots appear on both sheets but should only be counted once
       let adjustedVisualBW = visual.buttWelds || 0;
       let adjustedVisualSW = visual.socketWelds || 0;
       const contWelds = continuationWeldsPerPage[page];
@@ -134,15 +131,18 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
   }, [items]);
 
   const { rows, totals, details } = useMemo(() => {
-    const sizeMap: Record<string, { buttWelds: number; socketWelds: number; boltUps: number; threadedConns: number }> = {};
+    const sizeMap: Record<string, {
+      shopButtWelds: number; shopSocketWelds: number;
+      fieldButtWelds: number; fieldSocketWelds: number;
+      boltUps: number; threadedConns: number;
+    }> = {};
     const detailsList: { size: string; fitting: string; qty: number; connectionType: string; connectionCount: number; section: string }[] = [];
 
     const ensureSize = (size: string) => {
-      if (!sizeMap[size]) sizeMap[size] = { buttWelds: 0, socketWelds: 0, boltUps: 0, threadedConns: 0 };
+      if (!sizeMap[size]) sizeMap[size] = { shopButtWelds: 0, shopSocketWelds: 0, fieldButtWelds: 0, fieldSocketWelds: 0, boltUps: 0, threadedConns: 0 };
     };
 
-    // Detect butterfly valves per page — when a butterfly valve sits between two
-    // flanges, the entire joint counts as ONE bolt-up (single bolt set), not two.
+    // Detect butterfly valves per page
     const butterflyPages = new Set<number>();
     for (const item of filteredItems) {
       const desc = (item.description || "").toLowerCase();
@@ -157,116 +157,105 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       const qty = item.quantity || 0;
       const desc = (item.description || "").toLowerCase();
       const section = item.installLocation || ((item.notes || "").toLowerCase().includes("field") ? "field" : "shop");
+      const isField = section === "field";
 
       ensureSize(size);
 
-      // Determine connection type based on description keywords
       const isThreaded = desc.includes("threaded") || desc.includes("screw") || desc.includes("npt") || desc.includes("fnpt") || desc.includes("mnpt");
       const isSocketWeld = desc.includes("socket weld") || desc.includes("sw ") || desc.includes(",sw,") || desc.includes(" sw,") || /\bsw\b/i.test(desc);
 
-      // === PIPE LENGTH WELDS ===
-      // Every 40' of pipe run requires a field weld where 40' standard lengths are joined.
+      // Helper to route BW/SW to shop or field
+      const addBW = (count: number) => { if (isField) sizeMap[size].fieldButtWelds += count; else sizeMap[size].shopButtWelds += count; };
+      const addSW = (count: number) => { if (isField) sizeMap[size].fieldSocketWelds += count; else sizeMap[size].shopSocketWelds += count; };
+
+      // === PIPE LENGTH WELDS — always FIELD ===
       if (cat === "pipe" && qty >= 40) {
         const pipeJointWelds = Math.floor(qty / 40);
         if (pipeJointWelds > 0) {
-          sizeMap[size].buttWelds += pipeJointWelds;
-          detailsList.push({ size, fitting: `${qty.toFixed(1)} LF Pipe (40' joints)`, qty: pipeJointWelds, connectionType: "Butt Welds", connectionCount: pipeJointWelds, section });
+          sizeMap[size].fieldButtWelds += pipeJointWelds; // Always field
+          detailsList.push({ size, fitting: `${qty.toFixed(1)} LF Pipe (40' joints)`, qty: pipeJointWelds, connectionType: "Field BW", connectionCount: pipeJointWelds, section: "field" });
         }
         continue;
       }
       if (cat === "pipe") continue;
 
-      // Gaskets and stud bolts do NOT generate bolt-up counts — only flanges do.
-      // The flange is the connection that requires the bolt-up; gaskets and bolts
-      // are just the supplied hardware for that connection.
-      if (cat === "gasket" || desc.includes("gasket") || desc.includes("stud")) {
-        continue;
-      }
-      if (cat === "bolt" || desc.includes("bolt")) {
-        continue;
-      }
+      // Gaskets and stud bolts do NOT generate counts
+      if (cat === "gasket" || desc.includes("gasket") || desc.includes("stud")) continue;
+      if (cat === "bolt" || desc.includes("bolt")) continue;
 
       if (cat === "flange") {
-        // Each flange has 1 weld to pipe + contributes to a bolt-up connection.
-        // Two flanges = 1 bolt-up joint.
-        // Butterfly valve adjustment: when a butterfly valve is on the same page,
-        // the two flanges around it form a single butterfly joint = 1 bolt-up.
-        // Without butterfly: 2 flanges = 1 bolt-up. With butterfly: same math holds.
-        sizeMap[size].buttWelds += qty;
-        // Butterfly joint is 2 flanges + 1 valve, still counts as 1 bolt-up per joint.
+        addBW(qty);
         sizeMap[size].boltUps += Math.ceil(qty / 2);
         const noteSuffix = butterflyPages.has(item.sourcePage) ? " (butterfly joints on this page)" : "";
-        detailsList.push({ size, fitting: (item.description || "Flange") + noteSuffix, qty, connectionType: "Butt Weld + Bolt-Up", connectionCount: qty, section });
+        detailsList.push({ size, fitting: (item.description || "Flange") + noteSuffix, qty, connectionType: `${isField ? "Field" : "Shop"} BW + BU`, connectionCount: qty, section });
       } else if (isThreaded) {
-        // Threaded couplings/unions/valves: 0 welds, just threaded connections
         sizeMap[size].threadedConns += qty;
         detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Threaded", connectionCount: qty, section });
       } else if (cat === "coupling" || cat === "union") {
-        // Socket weld couplings/unions: 2 SW each (threaded already handled above)
         const weldCount = qty * 2;
-        if (isSocketWeld) {
-          sizeMap[size].socketWelds += weldCount;
-          detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Socket Welds", connectionCount: weldCount, section });
-        } else {
-          sizeMap[size].socketWelds += weldCount;
-          detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Socket Welds", connectionCount: weldCount, section });
-        }
+        addSW(weldCount);
+        detailsList.push({ size, fitting: item.description || cat, qty, connectionType: `${isField ? "Field" : "Shop"} SW`, connectionCount: weldCount, section });
       } else if (cat === "valve") {
-        // ONLY socket-weld valves generate welds. All other valves (flanged,
-        // threaded, butterfly, butt-weld end) connect via the surrounding
-        // flanges/joints and have no welds of their own.
         if (isSocketWeld) {
-          sizeMap[size].socketWelds += qty * 2;
-          detailsList.push({ size, fitting: item.description || "Valve (SW)", qty, connectionType: "Socket Welds", connectionCount: qty * 2, section });
+          addSW(qty * 2);
+          detailsList.push({ size, fitting: item.description || "Valve (SW)", qty, connectionType: `${isField ? "Field" : "Shop"} SW`, connectionCount: qty * 2, section });
         }
-        // Flanged, threaded, butterfly, BW valves: skipped (no weld entry)
       } else if (cat === "sockolet" || desc.includes("sockolet")) {
-        // Sockolet: 2 SW (header bore + branch)
-        sizeMap[size].socketWelds += qty * 2;
-        detailsList.push({ size, fitting: item.description || "Sockolet", qty, connectionType: "Socket Welds", connectionCount: qty * 2, section });
+        addSW(qty * 2);
+        detailsList.push({ size, fitting: item.description || "Sockolet", qty, connectionType: `${isField ? "Field" : "Shop"} SW`, connectionCount: qty * 2, section });
       } else if (cat === "weldolet" || desc.includes("weldolet")) {
-        // Weldolet: 1 BW to header
-        sizeMap[size].buttWelds += qty * 1;
-        detailsList.push({ size, fitting: item.description || "Weldolet", qty, connectionType: "Butt Weld", connectionCount: qty, section });
+        addBW(qty);
+        detailsList.push({ size, fitting: item.description || "Weldolet", qty, connectionType: `${isField ? "Field" : "Shop"} BW`, connectionCount: qty, section });
       } else if (desc.includes("threadolet")) {
-        // Threadolet: 1 weld to header
-        sizeMap[size].buttWelds += qty * 1;
-        detailsList.push({ size, fitting: item.description || "Threadolet", qty, connectionType: "Butt Weld", connectionCount: qty, section });
+        addBW(qty);
+        detailsList.push({ size, fitting: item.description || "Threadolet", qty, connectionType: `${isField ? "Field" : "Shop"} BW`, connectionCount: qty, section });
       } else if (WELD_RULES[cat]) {
         const rule = WELD_RULES[cat];
         const weldCount = qty * rule.welds;
         if (rule.type === "socket_weld" || isSocketWeld) {
-          sizeMap[size].socketWelds += weldCount;
+          addSW(weldCount);
         } else {
-          sizeMap[size].buttWelds += weldCount;
+          addBW(weldCount);
         }
-        detailsList.push({ size, fitting: item.description || cat, qty, connectionType: rule.label, connectionCount: weldCount, section });
+        detailsList.push({ size, fitting: item.description || cat, qty, connectionType: `${isField ? "Field" : "Shop"} ${rule.label}`, connectionCount: weldCount, section });
       }
     }
 
-    // Sort sizes numerically
     const sortedSizes = Object.keys(sizeMap).sort((a, b) => {
       const na = parseFloat(a) || 0;
       const nb = parseFloat(b) || 0;
       return na - nb;
     });
 
-    const rows: ConnectionRow[] = sortedSizes.map(size => ({
-      size,
-      buttWelds: sizeMap[size].buttWelds,
-      socketWelds: sizeMap[size].socketWelds,
-      boltUps: sizeMap[size].boltUps,
-      threadedConns: sizeMap[size].threadedConns,
-      totalConnections: sizeMap[size].buttWelds + sizeMap[size].socketWelds + sizeMap[size].boltUps + sizeMap[size].threadedConns,
-    })).filter(r => r.totalConnections > 0);
+    const rows: ConnectionRow[] = sortedSizes.map(size => {
+      const s = sizeMap[size];
+      const totalShopWelds = s.shopButtWelds + s.shopSocketWelds;
+      const totalFieldWelds = s.fieldButtWelds + s.fieldSocketWelds;
+      return {
+        size,
+        shopButtWelds: s.shopButtWelds,
+        shopSocketWelds: s.shopSocketWelds,
+        fieldButtWelds: s.fieldButtWelds,
+        fieldSocketWelds: s.fieldSocketWelds,
+        totalShopWelds,
+        totalFieldWelds,
+        boltUps: s.boltUps,
+        threadedConns: s.threadedConns,
+        totalConnections: totalShopWelds + totalFieldWelds + s.boltUps + s.threadedConns,
+      };
+    }).filter(r => r.totalConnections > 0);
 
     const totals = rows.reduce((acc, r) => ({
-      buttWelds: acc.buttWelds + r.buttWelds,
-      socketWelds: acc.socketWelds + r.socketWelds,
+      shopButtWelds: acc.shopButtWelds + r.shopButtWelds,
+      shopSocketWelds: acc.shopSocketWelds + r.shopSocketWelds,
+      fieldButtWelds: acc.fieldButtWelds + r.fieldButtWelds,
+      fieldSocketWelds: acc.fieldSocketWelds + r.fieldSocketWelds,
+      totalShopWelds: acc.totalShopWelds + r.totalShopWelds,
+      totalFieldWelds: acc.totalFieldWelds + r.totalFieldWelds,
       boltUps: acc.boltUps + r.boltUps,
       threadedConns: acc.threadedConns + r.threadedConns,
       totalConnections: acc.totalConnections + r.totalConnections,
-    }), { buttWelds: 0, socketWelds: 0, boltUps: 0, threadedConns: 0, totalConnections: 0 });
+    }), { shopButtWelds: 0, shopSocketWelds: 0, fieldButtWelds: 0, fieldSocketWelds: 0, totalShopWelds: 0, totalFieldWelds: 0, boltUps: 0, threadedConns: 0, totalConnections: 0 });
 
     return { rows, totals, details: detailsList };
   }, [filteredItems]);
@@ -278,16 +267,18 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       cap: { bw: 1, sw: 0, label: "1 BW" }, flange: { bw: 1, sw: 0, label: "1 BW + BU" },
       sockolet: { bw: 0, sw: 2, label: "2 SW" }, weldolet: { bw: 1, sw: 0, label: "1 BW" },
     };
-    const pageMap: Record<number, { drawingNumber: string | null; fittings: { category: string; size: string; description: string; qty: number; bw: number; sw: number; bu: number; ruleLabel: string }[]; totalBW: number; totalSW: number; totalBU: number }> = {};
+    const pageMap: Record<number, { drawingNumber: string | null; fittings: { category: string; size: string; description: string; qty: number; bw: number; sw: number; bu: number; ruleLabel: string; section: string }[]; shopBW: number; shopSW: number; fieldBW: number; fieldSW: number; totalBU: number }> = {};
 
     for (const item of filteredItems) {
       const page = item.sourcePage || 0;
-      if (!pageMap[page]) pageMap[page] = { drawingNumber: item.drawingNumber || null, fittings: [], totalBW: 0, totalSW: 0, totalBU: 0 };
+      if (!pageMap[page]) pageMap[page] = { drawingNumber: item.drawingNumber || null, fittings: [], shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, totalBU: 0 };
       if (!pageMap[page].drawingNumber && item.drawingNumber) pageMap[page].drawingNumber = item.drawingNumber;
 
       const cat = (item.category || "").toLowerCase();
       const desc = (item.description || "").toLowerCase();
       const qty = item.quantity || 0;
+      const section = item.installLocation || ((item.notes || "").toLowerCase().includes("field") ? "field" : "shop");
+      const isField = section === "field";
       const isThreaded = desc.includes("threaded") || desc.includes("npt") || desc.includes("screw");
       const isSW = desc.includes("socket") || desc.includes(" sw ") || desc.includes(",sw,") || /\bsw\b/i.test(desc);
       const isFlanged = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
@@ -295,7 +286,18 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       let bw = 0, sw = 0, bu = 0, ruleLabel = "";
 
       if (cat === "bolt" || cat === "gasket") {
-        bu = qty; ruleLabel = `${qty}x BU`;
+        // Skip — no counts
+      } else if (cat === "pipe") {
+        if (qty >= 40) {
+          const pipeJointWelds = Math.floor(qty / 40);
+          bw = pipeJointWelds;
+          ruleLabel = `${pipeJointWelds}x FW (40' joints)`;
+          // Pipe joints are always field
+          pageMap[page].fieldBW += bw;
+          pageMap[page].fittings.push({ category: "pipe", size: item.size || "N/A", description: `${qty.toFixed(1)} LF Pipe`, qty: pipeJointWelds, bw, sw: 0, bu: 0, ruleLabel, section: "field" });
+          continue;
+        }
+        continue;
       } else if (cat === "flange") {
         bw = qty; bu = Math.ceil(qty / 2); ruleLabel = `${qty}x 1 BW + BU`;
       } else if (cat === "valve") {
@@ -313,12 +315,12 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       }
 
       if (bw > 0 || sw > 0 || bu > 0 || ruleLabel) {
-        pageMap[page].fittings.push({
-          category: cat, size: item.size || "N/A", description: item.description || cat, qty, bw, sw, bu, ruleLabel,
-        });
-        pageMap[page].totalBW += bw;
-        pageMap[page].totalSW += sw;
+        if (isField) { pageMap[page].fieldBW += bw; pageMap[page].fieldSW += sw; }
+        else { pageMap[page].shopBW += bw; pageMap[page].shopSW += sw; }
         pageMap[page].totalBU += bu;
+        pageMap[page].fittings.push({
+          category: cat, size: item.size || "N/A", description: item.description || cat, qty, bw, sw, bu, ruleLabel, section,
+        });
       }
     }
 
@@ -327,6 +329,8 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       .map(([page, data]) => ({ page: parseInt(page), ...data }))
       .sort((a, b) => a.page - b.page);
   }, [filteredItems]);
+
+  const totalWelds = totals.totalShopWelds + totals.totalFieldWelds;
 
   if (rows.length === 0) {
     return (
@@ -353,16 +357,66 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
         </div>
       )}
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-card border rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-primary">{totals.buttWelds}</div>
-          <div className="text-xs text-muted-foreground">Butt Welds</div>
+      {/* Total Welds Banner */}
+      <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 flex items-center justify-between">
+        <div className="text-sm font-semibold">
+          Total Welds: <span className="text-lg text-primary">{totalWelds}</span>
         </div>
-        <div className="bg-card border rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-primary">{totals.socketWelds}</div>
-          <div className="text-xs text-muted-foreground">Socket Welds</div>
+        <div className="flex items-center gap-4 text-xs">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-green-500/80" />
+            Shop: <span className="font-bold">{totals.totalShopWelds}</span>
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500/80" />
+            Field: <span className="font-bold">{totals.totalFieldWelds}</span>
+          </span>
+          <span className="text-muted-foreground">+ {totals.boltUps} BU, {totals.threadedConns} THD</span>
         </div>
+      </div>
+
+      {/* Shop vs Field Summary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* SHOP WELDS */}
+        <div className="bg-card border border-green-500/20 rounded-lg p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-green-600 dark:text-green-400 mb-2">Shop Welds</div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div className="text-2xl font-bold text-primary">{totals.shopButtWelds}</div>
+              <div className="text-[10px] text-muted-foreground">Butt Welds</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-primary">{totals.shopSocketWelds}</div>
+              <div className="text-[10px] text-muted-foreground">Socket Welds</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-green-600 dark:text-green-400">{totals.totalShopWelds}</div>
+              <div className="text-[10px] text-muted-foreground font-semibold">Total Shop</div>
+            </div>
+          </div>
+        </div>
+        {/* FIELD WELDS */}
+        <div className="bg-card border border-orange-500/20 rounded-lg p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-orange-600 dark:text-orange-400 mb-2">Field Welds</div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div className="text-2xl font-bold text-primary">{totals.fieldButtWelds}</div>
+              <div className="text-[10px] text-muted-foreground">Butt Welds</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-primary">{totals.fieldSocketWelds}</div>
+              <div className="text-[10px] text-muted-foreground">Socket Welds</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-orange-600 dark:text-orange-400">{totals.totalFieldWelds}</div>
+              <div className="text-[10px] text-muted-foreground font-semibold">Total Field</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bolt-Ups & Threaded */}
+      <div className="grid grid-cols-2 gap-3">
         <div className="bg-card border rounded-lg p-3 text-center">
           <div className="text-2xl font-bold text-primary">{totals.boltUps}</div>
           <div className="text-xs text-muted-foreground">Bolt-Ups</div>
@@ -373,27 +427,35 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
         </div>
       </div>
 
-      {/* Connections by Size Table */}
+      {/* Connections by Size Table — Shop vs Field */}
       <div>
         <h3 className="text-sm font-semibold mb-2">Connections by Size</h3>
         <div className="border rounded-lg overflow-hidden">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-muted/50">
-                <th className="text-left p-2 font-semibold">Size</th>
-                <th className="text-right p-2 font-semibold">Butt Welds</th>
-                <th className="text-right p-2 font-semibold">Socket Welds</th>
-                <th className="text-right p-2 font-semibold">Bolt-Ups</th>
-                <th className="text-right p-2 font-semibold">Threaded</th>
-                <th className="text-right p-2 font-semibold">Total</th>
+                <th className="text-left p-2 font-semibold" rowSpan={2}>Size</th>
+                <th className="text-center p-1.5 font-semibold text-green-600 dark:text-green-400 border-b border-border" colSpan={2}>Shop</th>
+                <th className="text-center p-1.5 font-semibold text-orange-600 dark:text-orange-400 border-b border-border" colSpan={2}>Field</th>
+                <th className="text-right p-2 font-semibold" rowSpan={2}>BU</th>
+                <th className="text-right p-2 font-semibold" rowSpan={2}>THD</th>
+                <th className="text-right p-2 font-semibold" rowSpan={2}>Total</th>
+              </tr>
+              <tr className="bg-muted/30">
+                <th className="text-right p-1.5 text-[10px] font-medium text-muted-foreground">BW</th>
+                <th className="text-right p-1.5 text-[10px] font-medium text-muted-foreground">SW</th>
+                <th className="text-right p-1.5 text-[10px] font-medium text-muted-foreground">BW</th>
+                <th className="text-right p-1.5 text-[10px] font-medium text-muted-foreground">SW</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row, i) => (
                 <tr key={row.size} className={i % 2 === 0 ? "bg-background" : "bg-muted/20"}>
                   <td className="p-2 font-medium">{row.size}"</td>
-                  <td className="p-2 text-right">{row.buttWelds || "—"}</td>
-                  <td className="p-2 text-right">{row.socketWelds || "—"}</td>
+                  <td className="p-2 text-right text-green-700 dark:text-green-400">{row.shopButtWelds || "—"}</td>
+                  <td className="p-2 text-right text-green-700 dark:text-green-400">{row.shopSocketWelds || "—"}</td>
+                  <td className="p-2 text-right text-orange-700 dark:text-orange-400">{row.fieldButtWelds || "—"}</td>
+                  <td className="p-2 text-right text-orange-700 dark:text-orange-400">{row.fieldSocketWelds || "—"}</td>
                   <td className="p-2 text-right">{row.boltUps || "—"}</td>
                   <td className="p-2 text-right">{row.threadedConns || "—"}</td>
                   <td className="p-2 text-right font-semibold">{row.totalConnections}</td>
@@ -403,8 +465,10 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
             <tfoot>
               <tr className="bg-primary/10 font-semibold border-t">
                 <td className="p-2">TOTAL</td>
-                <td className="p-2 text-right">{totals.buttWelds}</td>
-                <td className="p-2 text-right">{totals.socketWelds}</td>
+                <td className="p-2 text-right text-green-700 dark:text-green-400">{totals.shopButtWelds}</td>
+                <td className="p-2 text-right text-green-700 dark:text-green-400">{totals.shopSocketWelds}</td>
+                <td className="p-2 text-right text-orange-700 dark:text-orange-400">{totals.fieldButtWelds}</td>
+                <td className="p-2 text-right text-orange-700 dark:text-orange-400">{totals.fieldSocketWelds}</td>
                 <td className="p-2 text-right">{totals.boltUps}</td>
                 <td className="p-2 text-right">{totals.threadedConns}</td>
                 <td className="p-2 text-right">{totals.totalConnections}</td>
@@ -480,16 +544,22 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
                   <td className="p-2 text-right">{d.qty}</td>
                   <td className="p-2">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                      d.connectionType.includes("Butt") ? "bg-orange-500/20 text-orange-400" :
-                      d.connectionType.includes("Socket") ? "bg-blue-500/20 text-blue-400" :
-                      d.connectionType.includes("Bolt") ? "bg-green-500/20 text-green-400" :
+                      d.connectionType.includes("Butt") || d.connectionType.includes("BW") ? "bg-orange-500/20 text-orange-400" :
+                      d.connectionType.includes("Socket") || d.connectionType.includes("SW") ? "bg-blue-500/20 text-blue-400" :
+                      d.connectionType.includes("Bolt") || d.connectionType.includes("BU") ? "bg-green-500/20 text-green-400" :
                       "bg-purple-500/20 text-purple-400"
                     }`}>
                       {d.connectionType}
                     </span>
                   </td>
                   <td className="p-2 text-right font-medium">{d.connectionCount}</td>
-                  <td className="p-2 capitalize text-muted-foreground">{d.section}</td>
+                  <td className="p-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium capitalize ${
+                      d.section === "field" ? "bg-orange-500/10 text-orange-500" : "bg-green-500/10 text-green-600 dark:text-green-400"
+                    }`}>
+                      {d.section}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -514,7 +584,7 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
             <div className="border rounded-lg overflow-hidden">
               {byPage.map((pageData) => {
                 const isExpanded = expandedPages.has(pageData.page);
-                const totalConns = pageData.totalBW + pageData.totalSW + pageData.totalBU;
+                const totalConns = pageData.shopBW + pageData.shopSW + pageData.fieldBW + pageData.fieldSW + pageData.totalBU;
                 return (
                   <div key={pageData.page} className="border-b border-border last:border-b-0">
                     <button
@@ -536,9 +606,13 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
                         )}
                       </div>
                       <div className="flex items-center gap-3">
-                        {pageData.totalBW > 0 && <span className="text-orange-500 font-medium">{pageData.totalBW} BW</span>}
-                        {pageData.totalSW > 0 && <span className="text-blue-500 font-medium">{pageData.totalSW} SW</span>}
-                        {pageData.totalBU > 0 && <span className="text-green-500 font-medium">{pageData.totalBU} BU</span>}
+                        {(pageData.shopBW + pageData.shopSW) > 0 && (
+                          <span className="text-green-600 dark:text-green-400 font-medium">S: {pageData.shopBW + pageData.shopSW}</span>
+                        )}
+                        {(pageData.fieldBW + pageData.fieldSW) > 0 && (
+                          <span className="text-orange-500 font-medium">F: {pageData.fieldBW + pageData.fieldSW}</span>
+                        )}
+                        {pageData.totalBU > 0 && <span className="text-muted-foreground font-medium">{pageData.totalBU} BU</span>}
                         <span className="text-muted-foreground">= {totalConns}</span>
                       </div>
                     </button>
@@ -552,6 +626,7 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
                               <th className="py-1 pr-2">Size</th>
                               <th className="py-1 pr-2 text-right">Qty</th>
                               <th className="py-1 pr-2">Rule</th>
+                              <th className="py-1 pr-2">Loc</th>
                               <th className="py-1 text-right">Welds</th>
                             </tr>
                           </thead>
@@ -562,6 +637,11 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
                                 <td className="py-1 pr-2 font-mono">{f.size}"</td>
                                 <td className="py-1 pr-2 text-right">{f.qty}</td>
                                 <td className="py-1 pr-2 text-muted-foreground">{f.ruleLabel}</td>
+                                <td className="py-1 pr-2">
+                                  <span className={`text-[9px] font-medium ${f.section === "field" ? "text-orange-500" : "text-green-600 dark:text-green-400"}`}>
+                                    {f.section === "field" ? "FLD" : "SHOP"}
+                                  </span>
+                                </td>
                                 <td className="py-1 text-right font-mono">
                                   {f.bw > 0 && <span className="text-orange-500">{f.bw} BW </span>}
                                   {f.sw > 0 && <span className="text-blue-500">{f.sw} SW </span>}

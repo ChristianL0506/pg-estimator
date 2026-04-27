@@ -4450,7 +4450,6 @@ function inferWeldsFromFittings(items: any[]): any[] {
   for (const item of items) {
     const cat = (item.category || "").toLowerCase();
     if (cat !== "pipe") continue;
-    if (isSmallBoreRollup(item)) continue;
     const lengthLF = item.quantity || 0;
     if (lengthLF < 40) continue;
     const pipeJointWelds = Math.floor(lengthLF / 40);
@@ -4458,12 +4457,13 @@ function inferWeldsFromFittings(items: any[]): any[] {
     const size = item.size || "";
     welds.push(computeEstimateItem({
       id: randomUUID(), lineNumber: 0, category: "weld" as any,
-      description: `BW for ${size} PIPE joints (40' lengths, auto-inferred)`,
+      description: `FW (Field) for ${size} PIPE joints (40' lengths, auto-inferred)`,
       size, quantity: pipeJointWelds, unit: "EA",
       materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
       materialExtension: 0, laborExtension: 0, totalCost: 0,
-      notes: `Auto-inferred: ${pipeJointWelds} pipe joint weld(s) for ${lengthLF.toFixed(1)} LF (1 weld per 40 ft of run)`, fromDatabase: false,
-      weldAssumption: `${pipeJointWelds} BW per ${lengthLF.toFixed(1)} LF run (40' standard lengths)`,
+      notes: `Auto-inferred: ${pipeJointWelds} FIELD pipe joint weld(s) for ${lengthLF.toFixed(1)} LF (1 weld per 40 ft of run)`, fromDatabase: false,
+      weldAssumption: `${pipeJointWelds} field BW per ${lengthLF.toFixed(1)} LF run (40' standard lengths)`,
+      installLocation: "field" as const,
     }));
   }
 
@@ -4474,11 +4474,9 @@ function inferWeldsFromFittings(items: any[]): any[] {
     const qty = item.quantity || 0;
     const size = item.size || "";
 
-    // Skip small-bore items (<=1.5") — their MH is rolled into weld factors
-    // Exception: branch connections like sockolets that DO need a weld on the header
-    if (isSmallBoreRollup(item) && !desc.includes("sockolet") && !desc.includes("weldolet")) {
-      continue;
-    }
+    // NOTE: Small-bore items (<=1.5") still generate weld counts for connection tracking.
+    // The MH rollup for small-bore is handled separately in the manhour calculation.
+    // We do NOT skip them here — every fitting has welds that must be counted.
 
     if (cat === "elbow" || desc.includes("elbow") || desc.includes("ell")) {
       welds.push(computeEstimateItem({
