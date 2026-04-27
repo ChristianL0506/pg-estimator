@@ -626,6 +626,17 @@ RULES — READ CAREFULLY:
 6. SKIP: title block text, engineer stamps, notes, revision blocks, drawing borders.
 7. If a page image has NO BOM table or only empty table headers, return an empty items array.
 
+*** CRITICAL — DO NOT MISS SMALL-BORE FITTINGS ***
+Small-bore fittings (1/2", 3/4", 1", 1-1/4", 2") are the MOST COMMONLY MISSED items.
+They often have:
+- Smaller fonts in the BOM table
+- Multi-line descriptions wrapped across rows
+- Many similar entries that look repetitive (8x "1" SW ELBOW" entries)
+- Socket Weld 3000# class fittings (very common — must extract as separate items)
+DO NOT skip these. Read EVERY ROW of the BOM. If you see 8 separate rows for 1" SW elbows on different sheets, output 8 separate items, not 1 consolidated item.
+DO NOT consolidate, summarize, or group similar items. Each BOM row = 1 output item with its exact qty.
+If you are unsure whether you've captured all small-bore items, look one more time. The BOM tables have a NO. (item number) column — make sure your output has ALL the item numbers from 1 through the highest numbered row.
+
 CRITICAL — AVOID DOUBLE COUNTING:
 - Extract items ONLY from the BOM TABLE (the tabular list of materials in the SHOP and FIELD sections). Do NOT count items from the isometric drawing graphic, callout bubbles, or match line annotations.
 - Callout numbers (circled numbers like ①②③ or plain numbers in circles) on the isometric drawing reference BOM line items. They appear at EACH LOCATION where that item is used. The BOM table QTY column already has the TOTAL count — do NOT add extra from callout locations.
@@ -726,6 +737,13 @@ BOM EXTRACTION RULES:
 4. DESCRIPTION: Copy the FULL text including all specs.
 5. Include ALL rows from BOTH SHOP and FIELD tables.
 6. SKIP: title block text, engineer stamps, notes, drawing borders.
+
+*** DO NOT MISS SMALL-BORE FITTINGS ***
+Small-bore (1/2", 3/4", 1", 2") items are commonly missed:
+- Read EVERY ROW of the BOM, including all small-bore SW fittings
+- Output ALL item numbers in the NO. column — do not skip any
+- DO NOT consolidate similar items. 8x separate "1" SW ELBOW" rows = 8 separate output items.
+- Each BOM row = 1 output item with its exact qty
 
 AVOID DOUBLE COUNTING:
 - Extract ONLY from the BOM TABLE. Do NOT count items from the isometric drawing graphic or callout bubbles.
@@ -1194,18 +1212,30 @@ async function verifyExtractionPass(
 Here are the items extracted in the first pass:
 ${itemsSummary}
 
-Please verify EACH item against what you see in the BOM table:
-1. Is the QTY correct? (Check feet/inches for pipe, integer count for fittings)
-2. Is the SIZE correct? (Watch for 1-1/2" vs 1-1/4", similar fractions)
-3. Is the DESCRIPTION complete and accurate?
-4. Are there any MISSING items in the BOM table that weren't extracted?
-5. Are there any DUPLICATE items that should only appear once?
-6. Is each item assigned to the correct SECTION (SHOP vs FIELD)?
+VERIFY EACH ITEM and most importantly LOOK FOR MISSED ITEMS:
 
-Return the CORRECTED item list in the same JSON format. If an item is correct, include it unchanged. If an item needs correction, include the corrected version. If an item was missed, add it. If an item is a duplicate, remove it.
+1. *** SMALL-BORE FITTINGS *** — these are the MOST COMMONLY MISSED. Carefully scan the BOM for:
+   - 1/2", 3/4", 1", 1-1/4", 2" SOCKET WELD elbows, tees, valves, flanges
+   - SOCKOLET, WELDOLET, THREADOLET items
+   - SOCKET WELD 3000# class fittings
+   Count how many small-bore (≤2") items are in the extracted list above. Now scan the BOM image. If the BOM has MORE small-bore items than the extracted list, ADD the missing ones.
+
+2. ITEM NUMBER CHECK: The BOM has a NO. column with sequential numbers (1, 2, 3...). Find the highest item number in the BOM image. Count items in the extracted list. If extracted count < highest item number, items were missed — find which item numbers are missing and add them.
+
+3. QTY CORRECTNESS: Check feet/inches for pipe. Watch for 8 vs 8", 11 vs 11". A bare "8" in qty almost always means 8 inches.
+
+4. SIZE CORRECTNESS: Watch for 1-1/2" vs 1-1/4", and similar lookalike fractions.
+
+5. DESCRIPTION COMPLETENESS: Full text with specs.
+
+6. SECTION TAG: SHOP vs FIELD assigned correctly.
+
+7. NO DUPLICATES within a single page.
+
+Return the CORRECTED item list including ALL missed items. The output should have AT LEAST as many items as the BOM table actually contains. If the BOM has 25 rows, output 25 items.
 
 Return ONLY valid JSON (no markdown fences):
-{"pages": [{"pageNum": NUMBER, "items": [...corrected items...], "corrections": ["description of each correction made"]}]}` });
+{"pages": [{"pageNum": NUMBER, "items": [...corrected items + missed items...], "corrections": ["description of each correction or addition"]}]}` });
 
     try {
       const msg = await client.messages.create({
@@ -1465,7 +1495,9 @@ async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promi
 
   // Render page-by-page to avoid OOM on limited-memory servers
   // Use 150 DPI for BOM tables (text-heavy, doesn't need high res)
-  const dpiForBom = 150;
+  // 200 DPI for better small-bore fitting detection. Was 150 but caused
+  // missed extractions on dense small-bore (1", 3/4") BOM rows.
+  const dpiForBom = 200;
   for (let p = 1; p <= pageCount; p++) {
     try {
       await execFileAsync("pdftoppm", [
@@ -1508,9 +1540,9 @@ async function renderBomWithFullPages(pdfPath: string, pageCount: number): Promi
   for (let p = 1; p <= pageCount; p++) {
     try {
       await execFileAsync("pdftoppm", [
-        "-r", "150", "-png", "-f", String(p), "-l", String(p),
+        "-r", "200", "-png", "-f", String(p), "-l", String(p),
         pdfPath, path.join(jobDir, "page")
-      ], { maxBuffer: 30 * 1024 * 1024, timeout: 45000 });
+      ], { maxBuffer: 40 * 1024 * 1024, timeout: 50000 });
     } catch (err: any) {
       console.warn(`  pdftoppm page ${p} (cloud) failed: ${err.message?.substring(0, 100)}`);
     }
@@ -1557,7 +1589,7 @@ async function renderFullPageImages(pdfPath: string, pageCount: number, dpi = 30
   fs.mkdirSync(jobDir, { recursive: true });
 
   // Render page-by-page at reduced DPI to save memory
-  const effectiveDpi = Math.min(dpi, 150); // Cap DPI for cloud deployment
+  const effectiveDpi = Math.min(dpi, 200); // Cap DPI for cloud deployment
   for (let p = 1; p <= pageCount; p++) {
     try {
       await execFileAsync("pdftoppm", [
