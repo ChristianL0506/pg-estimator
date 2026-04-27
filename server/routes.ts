@@ -6627,9 +6627,31 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         } else if (catLower === "cap") {
           connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "butt weld", connectionCount: 1 * qty, location });
           sm.buttWelds += 1 * qty;
-        } else if (catLower === "coupling") {
-          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
+        } else if (descLower.includes("sockolet")) {
+          // Sockolet: 2 socket welds (header bore + branch pipe)
+          connectionDetails.push({ size, fitting: item.description || "Sockolet", qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
           sm.socketWelds += 2 * qty;
+        } else if (descLower.includes("weldolet")) {
+          // Weldolet: 1 butt weld to header
+          connectionDetails.push({ size, fitting: item.description || "Weldolet", qty, connectionType: "butt weld", connectionCount: 1 * qty, location });
+          sm.buttWelds += 1 * qty;
+        } else if (descLower.includes("threadolet")) {
+          // Threadolet: 1 weld to header + threaded branch (only count the weld)
+          connectionDetails.push({ size, fitting: item.description || "Threadolet", qty, connectionType: "butt weld", connectionCount: 1 * qty, location });
+          sm.buttWelds += 1 * qty;
+        } else if (descLower.includes("olet")) {
+          // Generic olet (without sockolet/weldolet/threadolet keyword): treat as olet weld
+          connectionDetails.push({ size, fitting: item.description || "Olet", qty, connectionType: "butt weld", connectionCount: 1 * qty, location });
+          sm.buttWelds += 1 * qty;
+        } else if (catLower === "coupling") {
+          // Coupling: 2 SW unless threaded
+          if (isThreaded) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "threaded", connectionCount: 2 * qty, location });
+            sm.threaded += 2 * qty;
+          } else {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
+            sm.socketWelds += 2 * qty;
+          }
         } else if (catLower === "valve") {
           // Only socket-weld valves generate welds. Flanged/threaded/butterfly: 0 welds.
           if (isThreaded) {
