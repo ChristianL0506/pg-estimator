@@ -49,6 +49,17 @@ function inferWelds(item: any): WeldCounts {
   const isSW = desc.includes("socket") || desc.includes(" sw ") || desc.includes("sw-") || desc.includes(",sw,");
   const isFlanged = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
 
+  // === PIPE LENGTH WELDS ===
+  // Pipe is purchased in 40' standard lengths. Every 40' of run requires a field weld.
+  // 160' run = 3 welds (at 40, 80, 120 ft)
+  if (cat === "pipe") {
+    if (qty >= 40) {
+      const pipeJointWelds = Math.floor(qty / 40);
+      return { buttWelds: pipeJointWelds, socketWelds: 0, boltUps: 0, threaded: 0 };
+    }
+    return { buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: 0 };
+  }
+
   if (isThreaded) return { buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: qty * 2 };
 
   const r: WeldCounts = { buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: 0 };

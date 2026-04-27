@@ -154,6 +154,19 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       const isThreaded = desc.includes("threaded") || desc.includes("screw") || desc.includes("npt") || desc.includes("fnpt") || desc.includes("mnpt");
       const isSocketWeld = desc.includes("socket weld") || desc.includes("sw ") || desc.includes(",sw,") || desc.includes(" sw,") || /\bsw\b/i.test(desc);
 
+      // === PIPE LENGTH WELDS ===
+      // Every 40' of pipe run requires a field weld where 40' standard lengths are joined.
+      // Rule: floor(LF / 40) field welds per pipe item. 160 LF = 3 welds.
+      if (cat === "pipe" && qty >= 40) {
+        const pipeJointWelds = Math.floor(qty / 40);
+        if (pipeJointWelds > 0) {
+          sizeMap[size].buttWelds += pipeJointWelds;
+          detailsList.push({ size, fitting: `${qty.toFixed(1)} LF Pipe (40' joints)`, qty: pipeJointWelds, connectionType: "Butt Welds", connectionCount: pipeJointWelds, section });
+        }
+        continue;
+      }
+      if (cat === "pipe") continue; // Pipe under 40 LF: no joint welds needed
+
       if (cat === "bolt" || cat === "gasket" || desc.includes("bolt") || desc.includes("stud")) {
         // Bolts/studs = bolt-up connections
         // A set of bolts for one flange pair = 1 bolt-up

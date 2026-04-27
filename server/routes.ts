@@ -4437,6 +4437,37 @@ function mapTakeoffToEstimateCategory(discipline: string, category: string): str
 
 function inferWeldsFromFittings(items: any[]): any[] {
   const welds: any[] = [];
+
+  // === PIPE LENGTH WELDS ===
+  // Pipe is purchased in 40' standard lengths. Every 40' of pipe run requires
+  // a field weld where lengths are joined together.
+  // Rule: floor(length / 40) field welds per pipe item.
+  // Examples:
+  //   - 39' run = 0 weld (single length)
+  //   - 40' run = 1 weld (one joint between lengths)
+  //   - 80' run = 2 welds
+  //   - 160' run = 3 welds (welds at 40', 80', 120'; the 160' point connects to a fitting)
+  for (const item of items) {
+    const cat = (item.category || "").toLowerCase();
+    if (cat !== "pipe") continue;
+    if (isSmallBoreRollup(item)) continue;
+    const lengthLF = item.quantity || 0;
+    if (lengthLF < 40) continue;
+    const pipeJointWelds = Math.floor(lengthLF / 40);
+    if (pipeJointWelds === 0) continue;
+    const size = item.size || "";
+    welds.push(computeEstimateItem({
+      id: randomUUID(), lineNumber: 0, category: "weld" as any,
+      description: `BW for ${size} PIPE joints (40' lengths, auto-inferred)`,
+      size, quantity: pipeJointWelds, unit: "EA",
+      materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
+      materialExtension: 0, laborExtension: 0, totalCost: 0,
+      notes: `Auto-inferred: ${pipeJointWelds} pipe joint weld(s) for ${lengthLF.toFixed(1)} LF (1 weld per 40 ft of run)`, fromDatabase: false,
+      weldAssumption: `${pipeJointWelds} BW per ${lengthLF.toFixed(1)} LF run (40' standard lengths)`,
+    }));
+  }
+
+  // === FITTING WELDS ===
   for (const item of items) {
     const cat = (item.category || "").toLowerCase();
     const desc = (item.description || "").toLowerCase();
