@@ -77,13 +77,18 @@ function inferWelds(item: any): WeldCounts {
       // Threaded already handled above (returns 0 welds). SW couplings: 2 SW.
       r.socketWelds = 2 * qty; break;
     case "valve":
-      // Flanged/threaded valves: 0 welds. SW valves: 2 SW. Default (BW): 2 BW.
-      if (isFlanged) { /* 0 welds */ }
-      else if (isSW) r.socketWelds = 2 * qty;
-      else r.buttWelds = 2 * qty;
+      // ONLY socket-weld valves generate welds. All other valves (flanged,
+      // threaded, butterfly, butt-weld end) connect via the surrounding flanges.
+      if (isSW) r.socketWelds = 2 * qty;
+      // Other valve types: 0 welds, no entry
       break;
     case "flange":
       r.buttWelds = 1 * qty; r.boltUps = Math.ceil(qty / 2); break;
+    case "gasket":
+    case "bolt":
+      // Gaskets and stud bolts are supplied hardware, not connections.
+      // The flange they pair with is what counts as the bolt-up.
+      break;
     case "sockolet":
       // Sockolet: 2 SW (header bore + branch)
       r.socketWelds = 2 * qty; break;

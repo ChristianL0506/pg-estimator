@@ -4556,16 +4556,11 @@ function inferWeldsFromFittings(items: any[]): any[] {
         weldAssumption: "1 bolt-up per flange (auto-inferred)",
       }));
     } else if (cat === "valve" || desc.includes("valve")) {
-      // Flanged valves: 0 welds (bolt-up only). Threaded valves: 0 welds.
-      // Butt-weld end valves: 2 BW. Socket-weld valves: 2 SW.
-      const isButtWeldEnd = desc.includes("bwe") || desc.includes("butt weld") || desc.includes("bw end") || desc.includes(",be,") || desc.includes(", be");
-      const isFlangedValve = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
-      const isThreadedValve = desc.includes("threaded") || desc.includes("screw") || desc.includes("npt");
+      // ONLY socket-weld valves generate welds. All other valve types (flanged,
+      // threaded, butt-weld end, butterfly, etc.) connect via bolt-up or threads,
+      // not welds.
       const isSocketWeldValve = desc.includes("socket") || desc.includes(" sw ") || desc.includes(",sw,") || /\bsw\b/i.test(desc);
-
-      if (isFlangedValve || isThreadedValve) {
-        // Flanged and threaded valves: 0 welds — no weld entry
-      } else if (isSocketWeldValve) {
+      if (isSocketWeldValve) {
         welds.push(computeEstimateItem({
           id: randomUUID(), lineNumber: 0, category: "weld" as any,
           description: `SW for ${size} VALVE (auto-inferred)`,
@@ -4575,18 +4570,9 @@ function inferWeldsFromFittings(items: any[]): any[] {
           notes: "Auto-inferred: 2 socket welds per SW valve", fromDatabase: false,
           weldAssumption: "2 socket welds per socket-weld valve (auto-inferred)",
         }));
-      } else {
-        // Default: assume butt-weld ends
-        welds.push(computeEstimateItem({
-          id: randomUUID(), lineNumber: 0, category: "weld" as any,
-          description: `BW for ${size} VALVE (auto-inferred)`,
-          size, quantity: qty * 2, unit: "EA",
-          materialUnitCost: 0, laborUnitCost: 0, laborHoursPerUnit: 0,
-          materialExtension: 0, laborExtension: 0, totalCost: 0,
-          notes: "Auto-inferred: 2 butt welds per valve", fromDatabase: false,
-          weldAssumption: "2 butt welds per valve (auto-inferred)",
-        }));
       }
+      // Flanged, threaded, butterfly, butt-weld end valves: no welds inferred.
+      // Their connections come from the flanges/joints around them.
     } else if (desc.includes("sockolet")) {
       // Sockolet: 2 socket welds (1 to header bore + 1 to branch pipe)
       welds.push(computeEstimateItem({

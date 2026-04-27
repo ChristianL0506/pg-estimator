@@ -141,6 +141,16 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
       if (!sizeMap[size]) sizeMap[size] = { buttWelds: 0, socketWelds: 0, boltUps: 0, threadedConns: 0 };
     };
 
+    // Detect butterfly valves per page — when a butterfly valve sits between two
+    // flanges, the entire joint counts as ONE bolt-up (single bolt set), not two.
+    const butterflyPages = new Set<number>();
+    for (const item of filteredItems) {
+      const desc = (item.description || "").toLowerCase();
+      if (desc.includes("butterfly") && item.sourcePage) {
+        butterflyPages.add(item.sourcePage);
+      }
+    }
+
     for (const item of filteredItems) {
       const cat = (item.category || "").toLowerCase();
       const size = item.size || "N/A";
@@ -156,7 +166,6 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
 
       // === PIPE LENGTH WELDS ===
       // Every 40' of pipe run requires a field weld where 40' standard lengths are joined.
-      // Rule: floor(LF / 40) field welds per pipe item. 160 LF = 3 welds.
       if (cat === "pipe" && qty >= 40) {
         const pipeJointWelds = Math.floor(qty / 40);
         if (pipeJointWelds > 0) {
@@ -165,19 +174,29 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
         }
         continue;
       }
-      if (cat === "pipe") continue; // Pipe under 40 LF: no joint welds needed
+      if (cat === "pipe") continue;
 
-      if (cat === "bolt" || cat === "gasket" || desc.includes("bolt") || desc.includes("stud")) {
-        // Bolts/studs = bolt-up connections
-        // A set of bolts for one flange pair = 1 bolt-up
-        // Estimate: bolt qty / typical bolt count per flange (use raw count)
-        sizeMap[size].boltUps += qty;
-        detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Bolt-Up", connectionCount: qty, section });
-      } else if (cat === "flange") {
-        // Each flange has 1 weld to pipe + contributes to a bolt-up connection
-        sizeMap[size].buttWelds += qty; // 1 weld per flange
-        sizeMap[size].boltUps += Math.ceil(qty / 2); // 2 flanges = 1 bolt-up joint
-        detailsList.push({ size, fitting: item.description || "Flange", qty, connectionType: "Butt Weld + Bolt-Up", connectionCount: qty, section });
+      // Gaskets and stud bolts do NOT generate bolt-up counts — only flanges do.
+      // The flange is the connection that requires the bolt-up; gaskets and bolts
+      // are just the supplied hardware for that connection.
+      if (cat === "gasket" || desc.includes("gasket") || desc.includes("stud")) {
+        continue;
+      }
+      if (cat === "bolt" || desc.includes("bolt")) {
+        continue;
+      }
+
+      if (cat === "flange") {
+        // Each flange has 1 weld to pipe + contributes to a bolt-up connection.
+        // Two flanges = 1 bolt-up joint.
+        // Butterfly valve adjustment: when a butterfly valve is on the same page,
+        // the two flanges around it form a single butterfly joint = 1 bolt-up.
+        // Without butterfly: 2 flanges = 1 bolt-up. With butterfly: same math holds.
+        sizeMap[size].buttWelds += qty;
+        // Butterfly joint is 2 flanges + 1 valve, still counts as 1 bolt-up per joint.
+        sizeMap[size].boltUps += Math.ceil(qty / 2);
+        const noteSuffix = butterflyPages.has(item.sourcePage) ? " (butterfly joints on this page)" : "";
+        detailsList.push({ size, fitting: (item.description || "Flange") + noteSuffix, qty, connectionType: "Butt Weld + Bolt-Up", connectionCount: qty, section });
       } else if (isThreaded) {
         // Threaded couplings/unions/valves: 0 welds, just threaded connections
         sizeMap[size].threadedConns += qty;
@@ -193,17 +212,14 @@ export default function ConnectionsSummary({ items }: ConnectionsSummaryProps) {
           detailsList.push({ size, fitting: item.description || cat, qty, connectionType: "Socket Welds", connectionCount: weldCount, section });
         }
       } else if (cat === "valve") {
-        // Flanged/threaded valves: 0 welds. SW valves: 2 SW. BW valves: 2 BW.
-        const isFlangedValve = desc.includes("flanged") || desc.includes("flg") || desc.includes("rf ") || desc.includes("raised face");
-        if (isFlangedValve) {
-          // 0 welds for flanged valves
-        } else if (isSocketWeld) {
+        // ONLY socket-weld valves generate welds. All other valves (flanged,
+        // threaded, butterfly, butt-weld end) connect via the surrounding
+        // flanges/joints and have no welds of their own.
+        if (isSocketWeld) {
           sizeMap[size].socketWelds += qty * 2;
           detailsList.push({ size, fitting: item.description || "Valve (SW)", qty, connectionType: "Socket Welds", connectionCount: qty * 2, section });
-        } else {
-          sizeMap[size].buttWelds += qty * 2;
-          detailsList.push({ size, fitting: item.description || "Valve (BW)", qty, connectionType: "Butt Welds", connectionCount: qty * 2, section });
         }
+        // Flanged, threaded, butterfly, BW valves: skipped (no weld entry)
       } else if (cat === "sockolet" || desc.includes("sockolet")) {
         // Sockolet: 2 SW (header bore + branch)
         sizeMap[size].socketWelds += qty * 2;
