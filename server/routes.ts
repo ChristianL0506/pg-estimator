@@ -410,9 +410,30 @@ function correctPipeLengthIfInches(qty: number, rawQty: string, description: str
   const pipeSize = parseFloat(options?.size || "0") || 0;
   const isSmallBore = pipeSize > 0 && pipeSize <= 4; // Expanded: <=4" is small-bore for inch correction
 
+  // *** GUARD: qty matches the pipe size — the AI grabbed the SIZE column instead
+  // of the QTY column. This is the most common pipe-quantity error. We cannot
+  // recover the true qty here, so flag the item with qty=0 and a clear note so
+  // the estimator can spot it during review.
+  // Examples that trigger this guard:
+  //   pipe size = 1",  qty = 1   → misread
+  //   pipe size = 2",  qty = 2   → misread
+  //   pipe size = 4",  qty = 4   → misread
+  // Edge case: a 1" pipe that is genuinely 1 foot long would also trigger this.
+  // We accept that small risk because (a) 1' pipe lengths are almost never
+  // billed as integer 1 LF — they show up as "0'-11\"" or "1'-0\"" with markers,
+  // and (b) flagging is better than silently producing 0.08 LF.
+  if (pipeSize > 0 && Number.isInteger(qty) && qty === Math.round(pipeSize)) {
+    return {
+      correctedQty: 0,
+      wasCorrection: true,
+      note: `\u26a0\ufe0f QTY ${qty} matches pipe SIZE ${pipeSize}\" \u2014 likely the AI read the size column instead of the qty column. Set to 0 LF, please verify against drawing.`
+    };
+  }
+
   // AGGRESSIVE FIX for 8 and 11: These are almost ALWAYS inches on piping ISOs.
   // 8 feet and 11 feet of pipe on a single ISO line without a foot mark is extremely rare.
   // 8" and 11" spool pieces are extremely common.
+  // BUT: only when the qty does NOT match the pipe size (handled above).
   if (Number.isInteger(qty) && (qty === 8 || qty === 11)) {
     const correctedFeet = Math.round((qty / 12) * 100) / 100;
     return {
@@ -425,6 +446,7 @@ function correctPipeLengthIfInches(qty: number, rawQty: string, description: str
   // Values 1-11 without unit marker: auto-correct to inches
   // Rationale: 1-11 feet of pipe on a single ISO BOM line without a foot mark is
   // unusual. But 1"-11" spool pieces are extremely common on branch ISOs.
+  // (qty == size guard above already caught the misread cases.)
   if (Number.isInteger(qty) && qty >= 1 && qty <= 11) {
     const correctedFeet = Math.round((qty / 12) * 100) / 100;
     return {
@@ -616,6 +638,9 @@ RULES — READ CAREFULLY:
    - For PIPE: QTY is a length in feet-inches format like 16'-8" or 3'-0" or 22'-6". Copy it EXACTLY as written (e.g. "16'-8\""). The apostrophe means feet, the double-quote means inches.
    - For fittings/valves/bolts/gaskets: QTY is a simple integer (1, 2, 4, 8, etc.). Read the number carefully — distinguish between 1, 4, 8, etc.
    - DO NOT convert units. DO NOT do math. Just copy what is printed.
+   *** ANTI-PATTERN — DO NOT COPY THE SIZE COLUMN INTO QTY ***
+   The SIZE column always comes BEFORE the QTY column in the table layout. For pipe rows, if you output qty="1" for a 1" pipe, qty="2" for a 2" pipe, qty="4" for a 4" pipe, you are reading the WRONG COLUMN. The pipe QTY is ALWAYS a length with feet-inches markers (5'-3", 22'-6", 0'-8"). It is NEVER a bare integer that equals the pipe size.
+   If the pipe row's QTY cell appears empty, blank, or unreadable, output qty="" (empty string) — do NOT substitute the size value. An empty qty is acceptable and will be flagged for manual review.
 3. SIZE column — CRITICAL:
    - Piping sizes are ALWAYS in nominal pipe sizes: 1/2", 3/4", 1", 1-1/2", 2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48".
    - Reducers have two sizes like 6"x4" or 2"x1".
@@ -745,6 +770,8 @@ BOM EXTRACTION RULES:
    - For PIPE: QTY is a length in feet-inches format like 16'-8" or 3'-0" or 22'-6". Copy EXACTLY.
    - For fittings/valves/bolts/gaskets: QTY is a simple integer (1, 2, 4, 8, etc.).
    - DO NOT convert units. Just copy what is printed.
+   *** ANTI-PATTERN — DO NOT COPY THE SIZE COLUMN INTO QTY ***
+   For pipe rows, the QTY is ALWAYS a length with feet-inches markers (5'-3", 22'-6"). NEVER copy a bare integer (1, 2, 4) that equals the pipe size — that is the SIZE column, not QTY. If the QTY cell is empty or unreadable, output qty="" (empty string).
 3. SIZE column:
    - Piping sizes: 1/2", 3/4", 1", 1-1/2", 2", 3", 4", 6", 8", 10", 12", etc.
    - Reducers: 6"x4", 2"x1", etc.
