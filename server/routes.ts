@@ -637,6 +637,22 @@ DO NOT skip these. Read EVERY ROW of the BOM. If you see 8 separate rows for 1" 
 DO NOT consolidate, summarize, or group similar items. Each BOM row = 1 output item with its exact qty.
 If you are unsure whether you've captured all small-bore items, look one more time. The BOM tables have a NO. (item number) column — make sure your output has ALL the item numbers from 1 through the highest numbered row.
 
+*** SMALL-BORE TIE-IN SUBASSEMBLIES — SOCKET-WELD VALVE PATTERN ***
+Very common drain/vent/sample-tap assembly on 1" and 3/4" lines:
+  HEADER PIPE → SOCKOLET (or WELDOLET + REDUCER) → SHORT NIPPLE → SW VALVE → CAP
+A single ISO can have 4, 6, or 8 of these assemblies repeating along a header. Each one is its OWN BOM row group with its own QTY. The BOM may show ONE line item with QTY 4 (e.g. "1" BALL VALVE, SW, CLASS 800 — QTY 4") covering all four assemblies. **Read the QTY column carefully — do not assume QTY 1 just because the description text appears once.** When you see SW valves, sockolets, and caps with QTY > 1, output them with the FULL QTY shown in the BOM.
+
+*** WATCH FOR THESE FREQUENTLY MISSED 1" SW ITEMS ***
+When scanning a BOM, deliberately look for these row types and copy their QTY EXACTLY:
+- "1" BALL VALVE, SW, CLASS 800" or "1" PISTON VALVE, SW" — QTY is OFTEN 3-7
+- "1" SOCKOLET" or "1" THREADOLET" — QTY is OFTEN 4-8
+- "1" PIPE NIPPLE, TBE, SCH 80" — QTY is OFTEN 4-8 (one per drain/vent)
+- "1" CAP, SW, CLASS 3000" — QTY is OFTEN 4-8
+- "1" ELBOW 90, SW, CLASS 3000" — QTY varies, 1 to 12
+- "1" TEE, SW, CLASS 3000" — QTY varies
+- "1" SW x NPT REDUCER" or "1" COUPLING, SW"
+Before returning, verify: did you capture every 1" item in the BOM? If a header pipe has any branches (sockolets visible on the drawing), the BOM MUST have matching small-bore fittings, valves, and caps. Cross-check the drawing against the BOM.
+
 CRITICAL — AVOID DOUBLE COUNTING:
 - Extract items ONLY from the BOM TABLE (the tabular list of materials in the SHOP and FIELD sections). Do NOT count items from the isometric drawing graphic, callout bubbles, or match line annotations.
 - Callout numbers (circled numbers like ①②③ or plain numbers in circles) on the isometric drawing reference BOM line items. They appear at EACH LOCATION where that item is used. The BOM table QTY column already has the TOTAL count — do NOT add extra from callout locations.
@@ -742,6 +758,8 @@ BOM EXTRACTION RULES:
 Small-bore (1/2", 3/4", 1", 2") items are commonly missed:
 - Read EVERY ROW of the BOM, including all small-bore SW fittings
 - Output ALL item numbers in the NO. column — do not skip any
+- WATCH FOR DRAIN/VENT SUBASSEMBLIES: sockolet + nipple + SW valve + cap — these often have QTY 4-8 in a single BOM row. Copy QTY EXACTLY.
+- 1" BALL VALVE SW, 1" SOCKOLET, 1" PIPE NIPPLE, 1" SW CAP — these are FREQUENTLY MISSED row types. Look specifically for them.
 - DO NOT consolidate similar items. 8x separate "1" SW ELBOW" rows = 8 separate output items.
 - Each BOM row = 1 output item with its exact qty
 
@@ -1219,6 +1237,15 @@ VERIFY EACH ITEM and most importantly LOOK FOR MISSED ITEMS:
    - SOCKOLET, WELDOLET, THREADOLET items
    - SOCKET WELD 3000# class fittings
    Count how many small-bore (≤2") items are in the extracted list above. Now scan the BOM image. If the BOM has MORE small-bore items than the extracted list, ADD the missing ones.
+
+   *** SMALL-BORE QTY VERIFICATION *** — for each small-bore item already extracted, RE-READ its QTY from the BOM image. The QTY column is often misread because the digits are small. Specifically check:
+   - 1" BALL VALVE / PISTON VALVE SW: did you read QTY 3 when it says 4? Or QTY 1 when it says 7?
+   - 1" SOCKOLET: did you read QTY 2 when it says 8?
+   - 1" PIPE NIPPLE: did you read QTY 1 when it says 6?
+   - 1" CAP, SW: did you read QTY 1 when it says 4?
+   These rows often have QTY > 1 because they are part of repeating drain/vent subassemblies. UPDATE the QTY if you misread it.
+
+   *** SUBASSEMBLY COMPLETENESS CHECK *** — drain/vent subassemblies always come in groups: SOCKOLET + NIPPLE + VALVE + CAP. If the BOM has 4 sockolets, it should also have 4 nipples, 4 valves, and 4 caps (or close to that). If the counts don't roughly match, you missed something. Add the missing rows.
 
 2. ITEM NUMBER CHECK: The BOM has a NO. column with sequential numbers (1, 2, 3...). Find the highest item number in the BOM image. Count items in the extracted list. If extracted count < highest item number, items were missed — find which item numbers are missing and add them.
 
@@ -6619,9 +6646,18 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       const ExcelJS = await import("exceljs");
       const wb = new ExcelJS.default.Workbook();
 
-      // Infer connections from items
+      // Infer connections from items.
+      // We track each connection in BOTH a shop bucket and a field bucket so the
+      // estimator can compare directly against fab-shop pivots (which exclude the
+      // field welds added for 40-foot pipe-run joints).
       const connectionDetails: Array<{ size: string; fitting: string; qty: number; connectionType: string; connectionCount: number; location: string }> = [];
-      const sizeMap = new Map<string, { buttWelds: number; socketWelds: number; boltUps: number; threaded: number }>();
+      type ConnBucket = { buttWelds: number; socketWelds: number; boltUps: number; threaded: number };
+      const makeBucket = (): ConnBucket => ({ buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: 0 });
+      const sizeMap = new Map<string, { shop: ConnBucket; field: ConnBucket }>();
+      const ensureSize = (size: string) => {
+        if (!sizeMap.has(size)) sizeMap.set(size, { shop: makeBucket(), field: makeBucket() });
+        return sizeMap.get(size)!;
+      };
 
       for (const item of project.items) {
         const catLower = (item.category || "").toLowerCase();
@@ -6631,10 +6667,9 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         const isThreaded = descLower.includes("threaded") || descLower.includes("screw") || descLower.includes("npt") || descLower.includes("fnpt") || descLower.includes("mnpt");
         const isSocketWeld = descLower.includes("socket weld") || descLower.includes("socket") || descLower.includes("sw ") || descLower.includes("sw-") || descLower.includes(",sw,") || descLower.includes(", sw,") || descLower.includes(" sw,") || /\bsw\b/i.test(descLower);
         const isFlanged = descLower.includes("flanged") || descLower.includes("flg") || descLower.includes("rf ") || descLower.includes("raised face");
-        const location = item.installLocation || "shop";
-
-        if (!sizeMap.has(size)) sizeMap.set(size, { buttWelds: 0, socketWelds: 0, boltUps: 0, threaded: 0 });
-        const sm = sizeMap.get(size)!;
+        const location = (item.installLocation || "shop").toLowerCase();
+        const isField = location === "field";
+        const sm = isField ? ensureSize(size).field : ensureSize(size).shop;
 
         if (catLower === "elbow" || catLower === "ell") {
           const conns = isThreaded ? 0 : isSocketWeld ? 2 : 2;
@@ -6704,24 +6739,92 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         }
       }
 
-      // Sheet 1: Connections by Size
+      // Add the 40-foot pipe-run joint welds. These are field welds the app
+      // infers from each pipe length >40 LF. They are NOT in the fab-shop pivot
+      // and must be reported separately so the estimator can compare apples to
+      // apples against shop counts.
+      const inferredFieldWelds: Array<{ size: string; lengthLF: number; welds: number; pipeDescription: string }> = [];
+      for (const item of project.items) {
+        const cat = (item.category || "").toLowerCase();
+        if (cat !== "pipe") continue;
+        const lengthLF = item.quantity || 0;
+        if (lengthLF < 40) continue;
+        const pipeJointWelds = Math.floor(lengthLF / 40);
+        if (pipeJointWelds === 0) continue;
+        const size = item.size || "N/A";
+        const isPipeSocketWeld = lengthLF > 0 && parseFloat(String(size).replace(/[^0-9.]/g, "")) <= 1.5;
+        const fieldBucket = ensureSize(size).field;
+        if (isPipeSocketWeld) fieldBucket.socketWelds += pipeJointWelds;
+        else fieldBucket.buttWelds += pipeJointWelds;
+        inferredFieldWelds.push({
+          size,
+          lengthLF,
+          welds: pipeJointWelds,
+          pipeDescription: item.description || "PIPE",
+        });
+        connectionDetails.push({
+          size,
+          fitting: `[40' rule] ${item.description || "PIPE"}`,
+          qty: 1,
+          connectionType: isPipeSocketWeld ? "field socket weld (pipe joint)" : "field butt weld (pipe joint)",
+          connectionCount: pipeJointWelds,
+          location: "field",
+        });
+      }
+
+      // Sheet 1: Connections by Size — split into shop vs field columns so the
+      // estimator can compare directly against the fab-shop pivot.
       const ws = wb.addWorksheet("Connections by Size");
       ws.columns = [
-        { header: "Size", key: "size" },
-        { header: "Butt Welds", key: "buttWelds" },
-        { header: "Socket Welds", key: "socketWelds" },
-        { header: "Bolt-Ups", key: "boltUps" },
-        { header: "Threaded", key: "threaded" },
-        { header: "Total", key: "total" },
+        { header: "Size", key: "size", width: 10 },
+        { header: "Shop BW", key: "shopBW", width: 10 },
+        { header: "Shop SW", key: "shopSW", width: 10 },
+        { header: "Shop Bolt-Ups", key: "shopBU", width: 14 },
+        { header: "Shop Threaded", key: "shopTH", width: 14 },
+        { header: "Shop Total", key: "shopTotal", width: 12 },
+        { header: "Field BW (40' rule)", key: "fieldBW", width: 18 },
+        { header: "Field SW (40' rule)", key: "fieldSW", width: 18 },
+        { header: "Field Total", key: "fieldTotal", width: 12 },
+        { header: "Grand Total", key: "grandTotal", width: 12 },
       ];
-      let totBW = 0, totSW = 0, totBU = 0, totTH = 0;
-      for (const [size, vals] of sizeMap) {
-        const total = vals.buttWelds + vals.socketWelds + vals.boltUps + vals.threaded;
-        ws.addRow({ size, ...vals, total });
-        totBW += vals.buttWelds; totSW += vals.socketWelds; totBU += vals.boltUps; totTH += vals.threaded;
+      let totShopBW = 0, totShopSW = 0, totShopBU = 0, totShopTH = 0;
+      let totFieldBW = 0, totFieldSW = 0;
+      for (const [size, buckets] of sizeMap) {
+        const s = buckets.shop;
+        const f = buckets.field;
+        const shopTotal = s.buttWelds + s.socketWelds + s.boltUps + s.threaded;
+        const fieldTotal = f.buttWelds + f.socketWelds;
+        ws.addRow({
+          size,
+          shopBW: s.buttWelds,
+          shopSW: s.socketWelds,
+          shopBU: s.boltUps,
+          shopTH: s.threaded,
+          shopTotal,
+          fieldBW: f.buttWelds,
+          fieldSW: f.socketWelds,
+          fieldTotal,
+          grandTotal: shopTotal + fieldTotal,
+        });
+        totShopBW += s.buttWelds; totShopSW += s.socketWelds; totShopBU += s.boltUps; totShopTH += s.threaded;
+        totFieldBW += f.buttWelds; totFieldSW += f.socketWelds;
       }
-      ws.addRow({ size: "TOTAL", buttWelds: totBW, socketWelds: totSW, boltUps: totBU, threaded: totTH, total: totBW + totSW + totBU + totTH });
+      const shopGrand = totShopBW + totShopSW + totShopBU + totShopTH;
+      const fieldGrand = totFieldBW + totFieldSW;
+      ws.addRow({
+        size: "TOTAL",
+        shopBW: totShopBW, shopSW: totShopSW, shopBU: totShopBU, shopTH: totShopTH,
+        shopTotal: shopGrand,
+        fieldBW: totFieldBW, fieldSW: totFieldSW,
+        fieldTotal: fieldGrand,
+        grandTotal: shopGrand + fieldGrand,
+      });
       ws.getRow(ws.rowCount).font = { bold: true };
+      // Add a small legend / explanation block below the table
+      ws.addRow({});
+      ws.addRow({ size: "Shop Welds", shopBW: "= fittings, flanges, valves, olets (compare to fab-shop pivot)" });
+      ws.addRow({ size: "Field Welds", shopBW: "= 40-ft pipe-run joints inferred from pipe LF (NOT in fab-shop pivot)" });
+      ws.addRow({ size: "Rule", shopBW: "floor(pipe_LF / 40) field welds added per pipe item; size <=1.5\" => SW, else BW" });
       applyExcelStyles(ws);
 
       // Sheet 2: Connection Detail
@@ -6736,6 +6839,35 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       ];
       for (const d of connectionDetails) ws2.addRow(d);
       applyExcelStyles(ws2);
+
+      // Sheet 3: 40-Foot Field Weld Detail — itemised list of every field weld
+      // the app added for pipe joints, so the estimator can audit them.
+      const ws3 = wb.addWorksheet("40' Field Welds");
+      ws3.columns = [
+        { header: "Size", key: "size", width: 10 },
+        { header: "Pipe Description", key: "pipeDescription", width: 50 },
+        { header: "Length (LF)", key: "lengthLF", width: 14 },
+        { header: "Field Welds Added", key: "welds", width: 18 },
+        { header: "Weld Type", key: "weldType", width: 12 },
+      ];
+      let totFieldRowWelds = 0;
+      for (const w of inferredFieldWelds) {
+        const isSW = parseFloat(String(w.size).replace(/[^0-9.]/g, "")) <= 1.5;
+        ws3.addRow({
+          size: w.size,
+          pipeDescription: w.pipeDescription,
+          lengthLF: w.lengthLF,
+          welds: w.welds,
+          weldType: isSW ? "SW" : "BW",
+        });
+        totFieldRowWelds += w.welds;
+      }
+      ws3.addRow({ size: "TOTAL", pipeDescription: "", lengthLF: "", welds: totFieldRowWelds, weldType: "" });
+      ws3.getRow(ws3.rowCount).font = { bold: true };
+      ws3.addRow({});
+      ws3.addRow({ size: "Note", pipeDescription: "Rule: every 40 LF of pipe run requires 1 field weld at the joint between standard 40' lengths." });
+      ws3.addRow({ size: "", pipeDescription: "These welds are NOT in fab-shop weld counts — they are installed in the field during erection." });
+      applyExcelStyles(ws3);
 
       const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "");
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
