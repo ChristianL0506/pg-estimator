@@ -625,32 +625,40 @@ RULES — READ CAREFULLY:
 6. SKIP: title block text, engineer stamps, notes, revision blocks, drawing borders.
 7. If a page image has NO BOM table or only empty table headers, return an empty items array.
 
-*** CRITICAL — DO NOT MISS SMALL-BORE FITTINGS ***
-Small-bore fittings (1/2", 3/4", 1", 1-1/4", 2") are the MOST COMMONLY MISSED items.
-They often have:
+*** CRITICAL — SMALL-BORE FITTINGS REQUIRE EXTRA CARE ***
+Small-bore fittings (1/2", 3/4", 1", 1-1/4", 2") are common to misread because they have:
 - Smaller fonts in the BOM table
 - Multi-line descriptions wrapped across rows
-- Many similar entries that look repetitive (8x "1" SW ELBOW" entries)
-- Socket Weld 3000# class fittings (very common — must extract as separate items)
-DO NOT skip these. Read EVERY ROW of the BOM. If you see 8 separate rows for 1" SW elbows on different sheets, output 8 separate items, not 1 consolidated item.
-DO NOT consolidate, summarize, or group similar items. Each BOM row = 1 output item with its exact qty.
-If you are unsure whether you've captured all small-bore items, look one more time. The BOM tables have a NO. (item number) column — make sure your output has ALL the item numbers from 1 through the highest numbered row.
+- Many similar entries that can look repetitive (e.g. multiple "1" SW ELBOW" rows)
+- Socket Weld 3000# class fittings
+
+GOAL: extract EXACTLY what the BOM table shows — not more, not less.
+- Read every ROW of the BOM table. If the BOM has 8 separate rows for 1" SW elbows, output 8 separate items.
+- DO NOT consolidate similar items. Each BOM row = 1 output item with its exact qty.
+- DO NOT add items that aren't in the BOM table just because the drawing graphic shows them. The BOM table is the authoritative list.
+- If the BOM has 25 rows, output 25 items. If the BOM has 12 rows, output 12 items — do not invent extras to fill out a section.
+The BOM has a NO. (item number) column — your output should have a 1:1 match to the rows in that column.
 
 *** SMALL-BORE TIE-IN SUBASSEMBLIES — SOCKET-WELD VALVE PATTERN ***
-Very common drain/vent/sample-tap assembly on 1" and 3/4" lines:
+A common drain/vent/sample-tap assembly on 1" and 3/4" lines is:
   HEADER PIPE → SOCKOLET (or WELDOLET + REDUCER) → SHORT NIPPLE → SW VALVE → CAP
-A single ISO can have 4, 6, or 8 of these assemblies repeating along a header. Each one is its OWN BOM row group with its own QTY. The BOM may show ONE line item with QTY 4 (e.g. "1" BALL VALVE, SW, CLASS 800 — QTY 4") covering all four assemblies. **Read the QTY column carefully — do not assume QTY 1 just because the description text appears once.** When you see SW valves, sockolets, and caps with QTY > 1, output them with the FULL QTY shown in the BOM.
+The BOM may show ONE line item with QTY > 1 (e.g. "1" BALL VALVE, SW, CLASS 800 — QTY 4") covering all repeated instances. **Read the QTY column EXACTLY as printed — do not assume a default of 1, and do not assume a default of 4-8. The QTY can be ANYTHING from 1 upward; copy what is actually shown in the cell.**
 
-*** WATCH FOR THESE FREQUENTLY MISSED 1" SW ITEMS ***
-When scanning a BOM, deliberately look for these row types and copy their QTY EXACTLY:
-- "1" BALL VALVE, SW, CLASS 800" or "1" PISTON VALVE, SW" — QTY is OFTEN 3-7
-- "1" SOCKOLET" or "1" THREADOLET" — QTY is OFTEN 4-8
-- "1" PIPE NIPPLE, TBE, SCH 80" — QTY is OFTEN 4-8 (one per drain/vent)
-- "1" CAP, SW, CLASS 3000" — QTY is OFTEN 4-8
-- "1" ELBOW 90, SW, CLASS 3000" — QTY varies, 1 to 12
-- "1" TEE, SW, CLASS 3000" — QTY varies
+*** 1" SW ROW TYPES — READ THEM CAREFULLY ***
+When scanning a BOM, these row types tend to be the trickiest to read accurately. Copy their QTY EXACTLY as printed (do NOT assume a typical range):
+- "1" BALL VALVE, SW, CLASS 800" or "1" PISTON VALVE, SW"
+- "1" SOCKOLET" or "1" THREADOLET"
+- "1" PIPE NIPPLE, TBE, SCH 80"
+- "1" CAP, SW, CLASS 3000"
+- "1" ELBOW 90, SW, CLASS 3000"
+- "1" TEE, SW, CLASS 3000"
 - "1" SW x NPT REDUCER" or "1" COUPLING, SW"
-Before returning, verify: did you capture every 1" item in the BOM? If a header pipe has any branches (sockolets visible on the drawing), the BOM MUST have matching small-bore fittings, valves, and caps. Cross-check the drawing against the BOM.
+
+*** GROUND TRUTH = THE BOM TABLE, NOT THE DRAWING ***
+The BOM table is the SINGLE SOURCE OF TRUTH for what to extract.
+- If the drawing graphic SHOWS sockolets but the BOM table does NOT list them → do NOT add them. The drawing may be from a previous revision, or the items may be specified elsewhere.
+- If the BOM table LISTS items that you don't see on the drawing graphic → STILL extract them. The BOM is authoritative.
+- Output exactly what the BOM table contains. Do not invent items to "balance" what the drawing seems to show. Do not skip items because the drawing doesn't visually confirm them.
 
 CRITICAL — AVOID DOUBLE COUNTING:
 - Extract items ONLY from the BOM TABLE (the tabular list of materials in the SHOP and FIELD sections). Do NOT count items from the isometric drawing graphic, callout bubbles, or match line annotations.
@@ -755,14 +763,15 @@ BOM EXTRACTION RULES:
 5. Include ALL rows from BOTH SHOP and FIELD tables.
 6. SKIP: title block text, engineer stamps, notes, drawing borders.
 
-*** DO NOT MISS SMALL-BORE FITTINGS ***
-Small-bore (1/2", 3/4", 1", 2") items are commonly missed:
-- Read EVERY ROW of the BOM, including all small-bore SW fittings
-- Output ALL item numbers in the NO. column — do not skip any
-- WATCH FOR DRAIN/VENT SUBASSEMBLIES: sockolet + nipple + SW valve + cap — these often have QTY 4-8 in a single BOM row. Copy QTY EXACTLY.
-- 1" BALL VALVE SW, 1" SOCKOLET, 1" PIPE NIPPLE, 1" SW CAP — these are FREQUENTLY MISSED row types. Look specifically for them.
-- DO NOT consolidate similar items. 8x separate "1" SW ELBOW" rows = 8 separate output items.
-- Each BOM row = 1 output item with its exact qty
+*** SMALL-BORE FITTINGS — READ THEM CAREFULLY ***
+Small-bore (1/2", 3/4", 1", 2") items often have small fonts and are easy to misread. The goal is an EXACT match to what the BOM shows — not more, not less.
+- Read EVERY ROW of the BOM, including all small-bore SW fittings.
+- Output the item numbers in the NO. column EXACTLY — do not skip any, but do not add fictional ones either.
+- DRAIN/VENT SUBASSEMBLIES (sockolet + nipple + SW valve + cap) sometimes have QTY > 1 in a single row. Copy the QTY EXACTLY as printed — it could be 1, 2, 4, or 8. Do not assume a typical range.
+- 1" BALL VALVE SW, 1" SOCKOLET, 1" PIPE NIPPLE, 1" SW CAP — read these row types CAREFULLY. Their QTY can be anything from 1 upward; copy the cell value exactly.
+- DO NOT consolidate similar items. 8 separate "1" SW ELBOW" rows = 8 separate output items.
+- Each BOM row = 1 output item with its exact qty.
+- GROUND TRUTH = THE BOM TABLE. If the drawing graphic shows fittings the BOM does NOT list, do NOT add them. The BOM is authoritative.
 
 AVOID DOUBLE COUNTING:
 - Extract ONLY from the BOM TABLE. Do NOT count items from the isometric drawing graphic or callout bubbles.
@@ -1231,26 +1240,32 @@ async function verifyExtractionPass(
 Here are the items extracted in the first pass:
 ${itemsSummary}
 
-VERIFY EACH ITEM and most importantly LOOK FOR MISSED ITEMS:
+VERIFY EACH ITEM. Your goal is an EXACT MATCH to the BOM table — not more, not less.
+The extracted list above may have items that are missing, hallucinated, duplicated, or have wrong quantities. Your job is to MAKE THE LIST MATCH THE BOM EXACTLY.
 
-1. *** SMALL-BORE FITTINGS *** — these are the MOST COMMONLY MISSED. Carefully scan the BOM for:
+1. *** SMALL-BORE FITTINGS *** — these are the most commonly misread. Carefully cross-check the BOM for:
    - 1/2", 3/4", 1", 1-1/4", 2" SOCKET WELD elbows, tees, valves, flanges
    - SOCKOLET, WELDOLET, THREADOLET items
    - SOCKET WELD 3000# class fittings
-   Count how many small-bore (≤2") items are in the extracted list above. Now scan the BOM image. If the BOM has MORE small-bore items than the extracted list, ADD the missing ones.
 
-   *** SMALL-BORE QTY VERIFICATION *** — for each small-bore item already extracted, RE-READ its QTY from the BOM image. The QTY column is often misread because the digits are small. Specifically check:
-   - 1" BALL VALVE / PISTON VALVE SW: did you read QTY 3 when it says 4? Or QTY 1 when it says 7?
-   - 1" SOCKOLET: did you read QTY 2 when it says 8?
-   - 1" PIPE NIPPLE: did you read QTY 1 when it says 6?
-   - 1" CAP, SW: did you read QTY 1 when it says 4?
-   These rows often have QTY > 1 because they are part of repeating drain/vent subassemblies. UPDATE the QTY if you misread it.
+   COMPARE BOTH WAYS:
+   - If a small-bore item is IN THE BOM but MISSING from the extracted list → ADD it.
+   - If a small-bore item is IN THE EXTRACTED LIST but NOT IN THE BOM → REMOVE it. Do not invent items that aren't actually in the BOM table.
+   - If a small-bore item appears MORE TIMES in the extracted list than in the BOM → REMOVE the extras. Each BOM row should appear EXACTLY ONCE.
 
-   *** SUBASSEMBLY COMPLETENESS CHECK *** — drain/vent subassemblies always come in groups: SOCKOLET + NIPPLE + VALVE + CAP. If the BOM has 4 sockolets, it should also have 4 nipples, 4 valves, and 4 caps (or close to that). If the counts don't roughly match, you missed something. Add the missing rows.
+   *** SMALL-BORE QTY VERIFICATION *** — for each small-bore item already extracted, RE-READ its QTY from the BOM image. The QTY column is often misread because the digits are small. The QTY can be HIGHER or LOWER than what was extracted. UPDATE the QTY to match the BOM EXACTLY:
+   - If you read QTY 3 but the BOM shows 4 → update to 4.
+   - If you read QTY 8 but the BOM shows 4 → update to 4 (don't keep an inflated value).
+   - If you read QTY 1 but the BOM shows 6 → update to 6.
 
-2. ITEM NUMBER CHECK: The BOM has a NO. column with sequential numbers (1, 2, 3...). Find the highest item number in the BOM image. Count items in the extracted list. If extracted count < highest item number, items were missed — find which item numbers are missing and add them.
+   *** SUBASSEMBLY COMPLETENESS CHECK *** — drain/vent subassemblies typically come in groups: SOCKOLET + NIPPLE + VALVE + CAP. If the BOM has 4 sockolets and 4 valves but only 1 nipple, you may have missed nipples. BUT if the BOM truly only shows 1 nipple, that is correct — do not invent extra nipples just to balance the group. ALWAYS defer to what the BOM ACTUALLY SHOWS, not what you expect to see.
 
-3. QTY CORRECTNESS: Check feet/inches for pipe. Watch for 8 vs 8", 11 vs 11". A bare "8" in qty almost always means 8 inches.
+2. ITEM NUMBER CHECK: The BOM has a NO. column with sequential numbers. The extracted list should have EXACTLY THE SAME number of items as the BOM has rows.
+   - If extracted count < BOM rows → find missing item numbers and ADD them.
+   - If extracted count > BOM rows → find duplicate or hallucinated items and REMOVE them.
+   The goal is an exact 1:1 match.
+
+3. QTY CORRECTNESS: Pipe QTY is ALWAYS a length with feet-inch markers (5'-3", 22'-6"). NEVER a bare integer. If a pipe row has a bare integer in QTY, that is wrong — either re-read the cell or output empty string.
 
 4. SIZE CORRECTNESS: Watch for 1-1/2" vs 1-1/4", and similar lookalike fractions.
 
@@ -1258,9 +1273,11 @@ VERIFY EACH ITEM and most importantly LOOK FOR MISSED ITEMS:
 
 6. SECTION TAG: SHOP vs FIELD assigned correctly.
 
-7. NO DUPLICATES within a single page.
+7. NO DUPLICATES within a single page. Each BOM row = exactly 1 output item.
 
-Return the CORRECTED item list including ALL missed items. The output should have AT LEAST as many items as the BOM table actually contains. If the BOM has 25 rows, output 25 items.
+8. NO HALLUCINATIONS. Do NOT add items that aren't actually visible in the BOM table. Do NOT extract items from the isometric drawing graphic, callout bubbles, or notes — ONLY from the BOM table itself. If you can't see an item in the BOM table, it is NOT in your extraction.
+
+Return the CORRECTED item list. It should have EXACTLY as many items as the BOM table contains — not more, not less. If the BOM has 25 rows, output 25 items. If the BOM has 18 rows, output 18 items — even if your previous extraction had 22.
 
 Return ONLY valid JSON (no markdown fences):
 {"pages": [{"pageNum": NUMBER, "items": [...corrected items + missed items...], "corrections": ["description of each correction or addition"]}]}` });
