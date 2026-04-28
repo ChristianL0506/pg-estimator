@@ -410,66 +410,40 @@ function correctPipeLengthIfInches(qty: number, rawQty: string, description: str
   const pipeSize = parseFloat(options?.size || "0") || 0;
   const isSmallBore = pipeSize > 0 && pipeSize <= 4; // Expanded: <=4" is small-bore for inch correction
 
-  // *** GUARD: qty matches the pipe size — the AI grabbed the SIZE column instead
-  // of the QTY column. This is the most common pipe-quantity error. We cannot
-  // recover the true qty here, so flag the item with qty=0 and a clear note so
-  // the estimator can spot it during review.
-  // Examples that trigger this guard:
-  //   pipe size = 1",  qty = 1   → misread
-  //   pipe size = 2",  qty = 2   → misread
-  //   pipe size = 4",  qty = 4   → misread
-  // Edge case: a 1" pipe that is genuinely 1 foot long would also trigger this.
-  // We accept that small risk because (a) 1' pipe lengths are almost never
-  // billed as integer 1 LF — they show up as "0'-11\"" or "1'-0\"" with markers,
-  // and (b) flagging is better than silently producing 0.08 LF.
-  if (pipeSize > 0 && Number.isInteger(qty) && qty === Math.round(pipeSize)) {
+  // *** PRIMARY GUARD: any bare integer 1-11 with no unit marker is ALMOST CERTAINLY
+  // a misread — the AI grabbed the wrong column (size, item NO., or some other
+  // small integer cell) instead of the QTY field. We previously auto-converted
+  // these to inches/12 = LF, which silently produced fake 0.08, 0.17, 0.25, etc.
+  // pipe lengths across many sizes whenever extraction failed.
+  //
+  // The right behavior is to flag the row for review (qty=0) and let the
+  // estimator either (a) correct it from the drawing, or (b) re-run extraction.
+  // True 1"–11" inch spool pieces in real BOMs are written WITH a unit marker
+  // ("3\"", "0'-8\""), and those are handled by parsePipeLength upstream.
+  // True 1'–11' foot pipe lengths in real BOMs are also written WITH the foot
+  // marker ("5'", "3'-0\""). A bare integer with no marker means the AI failed
+  // to read the qty cell.
+  if (Number.isInteger(qty) && qty >= 1 && qty <= 11) {
+    const matchesSize = pipeSize > 0 && qty === Math.round(pipeSize);
+    const reason = matchesSize
+      ? `QTY ${qty} matches pipe SIZE ${pipeSize}\" \u2014 AI likely read the size column.`
+      : `QTY ${qty} has no feet/inch marker \u2014 AI likely missed the qty cell.`;
     return {
       correctedQty: 0,
       wasCorrection: true,
-      note: `\u26a0\ufe0f QTY ${qty} matches pipe SIZE ${pipeSize}\" \u2014 likely the AI read the size column instead of the qty column. Set to 0 LF, please verify against drawing.`
+      note: `\u26a0\ufe0f Pipe quantity flagged for review. ${reason} Set to 0 LF \u2014 please verify against drawing and edit the row.`
     };
   }
 
-  // AGGRESSIVE FIX for 8 and 11: These are almost ALWAYS inches on piping ISOs.
-  // 8 feet and 11 feet of pipe on a single ISO line without a foot mark is extremely rare.
-  // 8" and 11" spool pieces are extremely common.
-  // BUT: only when the qty does NOT match the pipe size (handled above).
-  if (Number.isInteger(qty) && (qty === 8 || qty === 11)) {
-    const correctedFeet = Math.round((qty / 12) * 100) / 100;
-    return {
-      correctedQty: correctedFeet,
-      wasCorrection: true,
-      note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF. Values 8 and 11 without unit markers are almost always inches on piping ISOs.`
-    };
-  }
-
-  // Values 1-11 without unit marker: auto-correct to inches
-  // Rationale: 1-11 feet of pipe on a single ISO BOM line without a foot mark is
-  // unusual. But 1"-11" spool pieces are extremely common on branch ISOs.
-  // (qty == size guard above already caught the misread cases.)
-  if (Number.isInteger(qty) && qty >= 1 && qty <= 11) {
-    const correctedFeet = Math.round((qty / 12) * 100) / 100;
-    return {
-      correctedQty: correctedFeet,
-      wasCorrection: true,
-      note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF. No unit marker found.`
-    };
-  }
-
-  // Values 12-18: auto-correct for small/medium bore (<=4") pipe, flag for larger
+  // Values 12-18 without unit marker: still ambiguous. Could be 12-18 feet of pipe
+  // (a real but uncommon length on a single BOM line) or 12-18 inches (1-1.5 feet).
+  // We previously auto-converted small-bore to inches; that risks the same
+  // silent-corruption issue. Flag instead.
   if (Number.isInteger(qty) && qty >= 12 && qty <= 18) {
-    if (isSmallBore) {
-      const correctedFeet = Math.round((qty / 12) * 100) / 100;
-      return {
-        correctedQty: correctedFeet,
-        wasCorrection: true,
-        note: `Auto-corrected: ${qty} interpreted as ${qty}" (inches) = ${correctedFeet} LF for ${pipeSize}" pipe (<=4" auto-corrects).`
-      };
-    }
     return {
       correctedQty: qty,
       wasCorrection: false,
-      note: `\u26a0\ufe0f Ambiguous: ${qty} could be ${qty}' (${qty} feet) or ${qty}" (${Math.round((qty / 12) * 100) / 100} LF). Verify against drawing.`
+      note: `\u26a0\ufe0f Ambiguous: ${qty} with no unit marker. Could be ${qty}' or ${qty}\" (${Math.round((qty / 12) * 100) / 100} LF). Verify against drawing.`
     };
   }
 
@@ -688,10 +662,10 @@ CRITICAL — AVOID DOUBLE COUNTING:
 
 COMMON ERRORS TO AVOID:
 - Pipe lengths: Don't confuse 11' (11 feet) with 11" (11 inches = 0.92 feet). The apostrophe (') means FEET, the double-quote (") means INCHES.
-- CRITICAL: Short pipe runs are often in INCHES. If you see 11" or 0'-11" that is 11 INCHES (0.92 LF), NOT 11 feet. Always include the " symbol for inches.
+- CRITICAL: Pipe QTY ALWAYS includes a foot or inch marker (e.g. 5'-3", 22'-6", 0'-8"). NEVER output a bare integer for pipe qty — the marker is REQUIRED so the system knows whether it is feet or inches.
 - Pipe lengths: 3'-4" means 3 feet 4 inches, NOT 34. 10'-2" means 10 feet 2 inches. 0'-8" means 8 inches = 0.67 feet.
-- If a pipe run has no ' or " symbol and the number is small (under 18), it is almost certainly INCHES. Write it as e.g. 11" not 11.
-- EXTRA CRITICAL — VALUES 8 AND 11: When you see a pipe qty of 8 or 11 with NO unit symbol, it is INCHES (8" = 0.67 LF, 11" = 0.92 LF), NOT feet. These are the two most commonly misread values. An 8-foot or 11-foot pipe run on a single ISO without a foot-mark is extremely rare. Always output as 8" or 11" with the inch symbol.
+- A pipe qty WITHOUT a unit marker is invalid — always output the marker. If unreadable, output empty string "".
+- IF YOU CANNOT READ THE QTY CELL: output qty="" (empty string). The system will flag the row for the estimator to review against the drawing. This is FAR BETTER than guessing or substituting a value from another column. Do NOT default to qty="1" or copy the size into qty when the actual qty cell is unreadable.
 - Size column: 1-1/2" is a valid pipe size (one and a half inches). Don't misread as 1" or 11/2".
 - NPS sizes: The ONLY valid NPS sizes are: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". If you read something else, you probably misread it.
 - Bolt sizes like 5/8"x4" or 3/4"x4 1/4" are bolt diameter x length, NOT pipe sizes.
@@ -797,10 +771,10 @@ AVOID DOUBLE COUNTING:
 
 COMMON ERRORS TO AVOID:
 - Pipe lengths: Don't confuse 11' (11 feet) with 11" (11 inches = 0.92 feet). The apostrophe (') means FEET, the double-quote (") means INCHES.
-- CRITICAL: Short pipe runs are often in INCHES. If you see 11" or 0'-11" that is 11 INCHES (0.92 LF), NOT 11 feet. Always include the " symbol for inches.
+- CRITICAL: Pipe QTY ALWAYS includes a foot or inch marker (e.g. 5'-3", 22'-6", 0'-8"). NEVER output a bare integer for pipe qty — the marker is REQUIRED so the system knows whether it is feet or inches.
 - Pipe lengths: 3'-4" means 3 feet 4 inches, NOT 34. 10'-2" means 10 feet 2 inches. 0'-8" means 8 inches = 0.67 feet.
-- If a pipe run has no ' or " symbol and the number is small (under 18), it is almost certainly INCHES. Write it as e.g. 11" not 11.
-- EXTRA CRITICAL — VALUES 8 AND 11: When you see a pipe qty of 8 or 11 with NO unit symbol, it is INCHES (8" = 0.67 LF, 11" = 0.92 LF), NOT feet. These are the two most commonly misread values. An 8-foot or 11-foot pipe run on a single ISO without a foot-mark is extremely rare. Always output as 8" or 11" with the inch symbol.
+- A pipe qty WITHOUT a unit marker is invalid — always output the marker. If unreadable, output empty string "".
+- IF YOU CANNOT READ THE QTY CELL: output qty="" (empty string). The system will flag the row for the estimator to review against the drawing. This is FAR BETTER than guessing or substituting a value from another column. Do NOT default to qty="1" or copy the size into qty when the actual qty cell is unreadable.
 - Size column: 1-1/2" is a valid pipe size (one and a half inches). Don't misread as 1" or 11/2".
 - NPS sizes: The ONLY valid NPS sizes are: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". If you read something else, you probably misread it.
 - Bolt sizes like 5/8"x4" or 3/4"x4 1/4" are bolt diameter x length, NOT pipe sizes.
