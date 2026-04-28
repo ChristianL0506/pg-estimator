@@ -6664,33 +6664,87 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         const descLower = (item.description || "").toLowerCase();
         const size = item.size || "N/A";
         const qty = item.quantity ?? 0;
-        const isThreaded = descLower.includes("threaded") || descLower.includes("screw") || descLower.includes("npt") || descLower.includes("fnpt") || descLower.includes("mnpt");
-        const isSocketWeld = descLower.includes("socket weld") || descLower.includes("socket") || descLower.includes("sw ") || descLower.includes("sw-") || descLower.includes(",sw,") || descLower.includes(", sw,") || descLower.includes(" sw,") || /\bsw\b/i.test(descLower);
+        const hasNpt = descLower.includes("threaded") || descLower.includes("screw") || descLower.includes("npt") || descLower.includes("fnpt") || descLower.includes("mnpt");
+        const hasSw = descLower.includes("socket weld") || descLower.includes("socket") || /\bsw\b/i.test(descLower) || descLower.includes(",sw,") || descLower.includes(", sw,") || descLower.includes(" sw,");
+        // Mixed-end fittings (e.g. "SW x NPT" valve, "SW x THD" coupling) have
+        // ONE socket weld end and one threaded end. Detect them and count 1 SW.
+        const isMixedSwNpt = hasSw && hasNpt && (
+          /sw\s*[xX/-]\s*(npt|thd|threaded|screw)/i.test(item.description || "")
+          || /(npt|thd|threaded)\s*[xX/-]\s*sw/i.test(item.description || "")
+        );
+        // True threaded (both ends or one end without SW): only treat as threaded
+        // if there is NO SW indication at all, OR the description explicitly says
+        // "threaded x threaded" / has no SW pattern. Mixed SW x NPT is handled separately.
+        const isThreaded = hasNpt && !hasSw;
+        // True socket weld: SW on both ends, no NPT mention. If both SW and NPT,
+        // we treat as mixed (handled above).
+        const isSocketWeld = hasSw && !isMixedSwNpt;
         const isFlanged = descLower.includes("flanged") || descLower.includes("flg") || descLower.includes("rf ") || descLower.includes("raised face");
         const location = (item.installLocation || "shop").toLowerCase();
         const isField = location === "field";
         const sm = isField ? ensureSize(size).field : ensureSize(size).shop;
 
         if (catLower === "elbow" || catLower === "ell") {
-          const conns = isThreaded ? 0 : isSocketWeld ? 2 : 2;
-          const connType = isThreaded ? "threaded" : isSocketWeld ? "socket weld" : "butt weld";
-          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
-          if (isThreaded) sm.threaded += conns * qty;
-          else if (isSocketWeld) sm.socketWelds += conns * qty;
-          else sm.buttWelds += conns * qty;
+          // Mixed SW x NPT elbows are rare but possible — 1 SW + 0 threaded weld
+          if (isMixedSwNpt) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "sw x npt mixed", connectionCount: 1 * qty, location });
+            sm.socketWelds += 1 * qty;
+            sm.threaded += 1 * qty;
+          } else {
+            const conns = isThreaded ? 0 : 2;
+            const connType = isThreaded ? "threaded" : isSocketWeld ? "socket weld" : "butt weld";
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
+            if (isThreaded) sm.threaded += conns * qty;
+            else if (isSocketWeld) sm.socketWelds += conns * qty;
+            else sm.buttWelds += conns * qty;
+          }
         } else if (catLower === "tee") {
-          const conns = isThreaded ? 0 : isSocketWeld ? 3 : 3;
+          // Reducing tees (e.g. 8"x6" or 8"X6") have TWO welds at the larger
+          // (run) size and ONE weld at the smaller (branch) size, NOT 3 at the
+          // larger size. Equal-size tees have 3 welds at the single size.
+          const reducerSizeMatch = (size || "").match(/^(\S+?)\s*[xX]\s*(\S+)$/);
           const connType = isThreaded ? "threaded" : isSocketWeld ? "socket weld" : "butt weld";
-          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
-          if (isThreaded) sm.threaded += conns * qty;
-          else if (isSocketWeld) sm.socketWelds += conns * qty;
-          else sm.buttWelds += conns * qty;
+          if (reducerSizeMatch && !isThreaded) {
+            const largerSize = reducerSizeMatch[1].trim();
+            const smallerSize = reducerSizeMatch[2].trim();
+            const largerBucket = isField ? ensureSize(largerSize).field : ensureSize(largerSize).shop;
+            const smallerBucket = isField ? ensureSize(smallerSize).field : ensureSize(smallerSize).shop;
+            // 2 run welds at larger size
+            if (isSocketWeld) largerBucket.socketWelds += 2 * qty;
+            else largerBucket.buttWelds += 2 * qty;
+            // 1 branch weld at smaller size
+            if (isSocketWeld) smallerBucket.socketWelds += 1 * qty;
+            else smallerBucket.buttWelds += 1 * qty;
+            connectionDetails.push({ size: largerSize, fitting: item.description || catLower, qty, connectionType: `${connType} (run)`, connectionCount: 2 * qty, location });
+            connectionDetails.push({ size: smallerSize, fitting: item.description || catLower, qty, connectionType: `${connType} (branch)`, connectionCount: 1 * qty, location });
+          } else {
+            const conns = isThreaded ? 0 : 3;
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
+            if (isThreaded) sm.threaded += conns * qty;
+            else if (isSocketWeld) sm.socketWelds += conns * qty;
+            else sm.buttWelds += conns * qty;
+          }
         } else if (catLower === "reducer" || catLower === "reducing") {
-          const conns = isSocketWeld ? 2 : 2;
+          // Reducers have 1 weld at EACH end (one at the larger size, one at the
+          // smaller size). Previously we were double-counting both at the larger
+          // size, which inflated 6"/8" BW totals.
+          const reducerSizeMatch = (size || "").match(/^(\S+?)\s*[xX]\s*(\S+)$/);
           const connType = isSocketWeld ? "socket weld" : "butt weld";
-          connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: conns * qty, location });
-          if (isSocketWeld) sm.socketWelds += conns * qty;
-          else sm.buttWelds += conns * qty;
+          if (reducerSizeMatch) {
+            const largerSize = reducerSizeMatch[1].trim();
+            const smallerSize = reducerSizeMatch[2].trim();
+            const largerBucket = isField ? ensureSize(largerSize).field : ensureSize(largerSize).shop;
+            const smallerBucket = isField ? ensureSize(smallerSize).field : ensureSize(smallerSize).shop;
+            if (isSocketWeld) { largerBucket.socketWelds += qty; smallerBucket.socketWelds += qty; }
+            else { largerBucket.buttWelds += qty; smallerBucket.buttWelds += qty; }
+            connectionDetails.push({ size: largerSize, fitting: item.description || catLower, qty, connectionType: `${connType} (large end)`, connectionCount: qty, location });
+            connectionDetails.push({ size: smallerSize, fitting: item.description || catLower, qty, connectionType: `${connType} (small end)`, connectionCount: qty, location });
+          } else {
+            // Single-size reducer string: fall back to old behavior (2 welds at this size)
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: connType, connectionCount: 2 * qty, location });
+            if (isSocketWeld) sm.socketWelds += 2 * qty;
+            else sm.buttWelds += 2 * qty;
+          }
         } else if (catLower === "cap") {
           connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "butt weld", connectionCount: 1 * qty, location });
           sm.buttWelds += 1 * qty;
@@ -6711,8 +6765,12 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
           connectionDetails.push({ size, fitting: item.description || "Olet", qty, connectionType: "butt weld", connectionCount: 1 * qty, location });
           sm.buttWelds += 1 * qty;
         } else if (catLower === "coupling") {
-          // Coupling: 2 SW unless threaded
-          if (isThreaded) {
+          // Coupling: 2 SW unless threaded. SW x NPT mixed: 1 SW + 1 threaded.
+          if (isMixedSwNpt) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "sw x npt mixed", connectionCount: 1 * qty, location });
+            sm.socketWelds += 1 * qty;
+            sm.threaded += 1 * qty;
+          } else if (isThreaded) {
             connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "threaded", connectionCount: 2 * qty, location });
             sm.threaded += 2 * qty;
           } else {
@@ -6721,7 +6779,12 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
           }
         } else if (catLower === "valve") {
           // Only socket-weld valves generate welds. Flanged/threaded/butterfly: 0 welds.
-          if (isThreaded) {
+          // SW x NPT mixed valves have 1 SW end (1 weld) + 1 threaded end (0 welds).
+          if (isMixedSwNpt) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "sw x npt mixed", connectionCount: 1 * qty, location });
+            sm.socketWelds += 1 * qty;
+            sm.threaded += 1 * qty;
+          } else if (isThreaded) {
             connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "threaded", connectionCount: 2 * qty, location });
             sm.threaded += 2 * qty;
           } else if (isSocketWeld) {
