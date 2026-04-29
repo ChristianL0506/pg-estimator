@@ -598,6 +598,24 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <FileSpreadsheet size={14} className="mr-1.5" />
                       Export Connections
                     </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-purple-700 border-purple-300 hover:bg-purple-50 dark:text-purple-400 dark:border-purple-700 dark:hover:bg-purple-900/30"
+                      title="Re-run dedup with the latest rules (catches duplicate drawing-numbers like multi-revision and multi-binding)"
+                      onClick={async () => {
+                        try {
+                          const res = await apiRequest("POST", `/api/takeoff-projects/${selectedProject.id}/redup`);
+                          const data = await res.json();
+                          toast({ title: data.message || "Dedup complete" });
+                          // Refresh project data
+                          queryClient.invalidateQueries({ queryKey: ["/api/takeoff-projects", selectedProject.id] });
+                          queryClient.invalidateQueries({ queryKey: ["/api/takeoff-projects"] });
+                        } catch { toast({ title: "Re-dedup failed", variant: "destructive" }); }
+                      }}
+                    >
+                      Re-run Dedup
+                    </Button>
                     {selectedProject.items.some(i => i.revisionClouded) && (
                       <Button
                         variant="outline"

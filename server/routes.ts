@@ -2321,6 +2321,68 @@ function applyHistoricalPatterns(items: any[]): any[] {
 // CONTINUATION PAGE DEDUP (Spec Item 5 - Improved)
 // ============================================================
 
+function dedupSameDrawingNumber(items: any[]): { items: any[]; dedupCount: number; dupGroups: number } {
+  // SAME-DRAWING-NUMBER DEDUP — If two or more pages share the same drawing
+  // number (e.g., a multi-revision package with both REV B and REV C of the
+  // same spool, or the same drawing appearing twice in the PDF), keep one
+  // page's items and mark the others as duplicates.
+  //
+  // Rule:
+  //   1. Group pages by normalized drawing number.
+  //   2. For groups with 2+ pages, pick the page with the HIGHEST page number
+  //      as the keeper (most recent revision in a typical engineering package
+  //      is usually placed later in the binder).
+  //   3. Mark all items on the OTHER pages as _dedupCandidate with a clear note.
+  //
+  // This is conservative: only triggers on EXACT drawing-number match.
+  //
+  // Returns: items array (unchanged), dedupCount, dupGroups
+
+  if (items.length === 0) return { items, dedupCount: 0, dupGroups: 0 };
+
+  // Build page → drawing number map
+  const pageDrawing: Record<number, string> = {};
+  for (const item of items) {
+    if (item.sourcePage && item.drawingNumber) {
+      const dwg = String(item.drawingNumber).replace(/[\s"'\u2019\u201D]/g, "").toLowerCase();
+      if (dwg && dwg !== "null" && dwg !== "undefined") {
+        pageDrawing[item.sourcePage] = dwg;
+      }
+    }
+  }
+
+  // Group pages by drawing number
+  const drawingPages: Record<string, number[]> = {};
+  for (const [pageStr, dwg] of Object.entries(pageDrawing)) {
+    const page = parseInt(pageStr);
+    if (!drawingPages[dwg]) drawingPages[dwg] = [];
+    drawingPages[dwg].push(page);
+  }
+
+  let dedupCount = 0;
+  let dupGroups = 0;
+
+  for (const [dwg, pages] of Object.entries(drawingPages)) {
+    if (pages.length < 2) continue;
+    dupGroups++;
+    pages.sort((a, b) => a - b);
+    const keeperPage = pages[pages.length - 1]; // keep the LAST occurrence
+    const dropPages = pages.slice(0, -1);
+    for (const item of items) {
+      if (item.sourcePage && dropPages.includes(item.sourcePage)) {
+        item._dedupCandidate = true;
+        item.dedupNote = `Same-drawing-number duplicate — drawing "${dwg}" appears on pages ${pages.join(", ")}, items on this page (${item.sourcePage}) are duplicates of the kept page (${keeperPage}).`;
+        dedupCount++;
+      }
+    }
+  }
+
+  if (dupGroups > 0) {
+    console.log(`  Same-drawing dedup: ${dupGroups} duplicate drawing(s) found, marked ${dedupCount} items as candidates`);
+  }
+  return { items, dedupCount, dupGroups };
+}
+
 function dedupContinuationPages(items: any[]): any[] {
   // CONTINUATION-BASED DEDUP — Only removes items that are explicitly marked
   // as being at a continuation point AND appear on both the "from" and "to" sheets.
@@ -3308,6 +3370,8 @@ async function processUploadedPdf(
 
     // Run post-processing pipeline on all items
     if (allItems.length > 0) {
+      // Same-drawing-number dedup (catches duplicate revisions / multi-binding)
+      dedupSameDrawingNumber(allItems);
       // Continuation page dedup
       const dedupedItems = dedupContinuationPages([...allItems]);
       allItems.length = 0;
@@ -3709,6 +3773,10 @@ async function processUploadedPdf(
   if (discipline === "mechanical") {
     console.log(`  Running post-processing validation on ${allItems.length} items...`);
     validateExtractedItems(allItems);
+
+    // Step: Same-drawing-number dedup (catches duplicate revisions)
+    console.log(`  Running same-drawing-number dedup...`);
+    dedupSameDrawingNumber(allItems);
 
     // Step: Continuation page dedup
     console.log(`  Running continuation page dedup...`);
@@ -6656,6 +6724,40 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     }
   });
 
+  // Re-run dedup on an existing project (no re-extraction needed).
+  // Useful after dedup logic improvements: apply the new rules to projects
+  // that were extracted before the fix.
+  app.post("/api/takeoff-projects/:id/redup", async (req, res) => {
+    const project = await storage.getTakeoffProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Project not found" });
+    try {
+      // Reset all dedup flags first so we start clean
+      for (const item of project.items) {
+        (item as any)._dedupCandidate = false;
+        (item as any).dedupNote = undefined;
+      }
+      // Run the same-drawing dedup
+      const sameResult = dedupSameDrawingNumber(project.items);
+      // Run the continuation dedup
+      dedupContinuationPages(project.items);
+      // Persist all items so the flags stick
+      for (const item of project.items) {
+        await storage.updateTakeoffItem(item.id, item);
+      }
+      const dedupTotal = project.items.filter(i => (i as any)._dedupCandidate).length;
+      res.json({
+        success: true,
+        dedupCandidates: dedupTotal,
+        sameDrawingDuplicateGroups: sameResult.dupGroups,
+        sameDrawingItemsMarked: sameResult.dedupCount,
+        message: `Marked ${dedupTotal} items as dedup candidates. ${sameResult.dupGroups} duplicate-drawing group(s) detected.`,
+      });
+    } catch (err: any) {
+      console.error("Re-dedup error:", err);
+      res.status(500).json({ message: err.message || "Re-dedup failed" });
+    }
+  });
+
   // 2. Connections Export
   app.get("/api/takeoff-projects/:id/export-connections", async (req, res) => {
     const project = await storage.getTakeoffProject(req.params.id);
@@ -6678,6 +6780,10 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       };
 
       for (const item of project.items) {
+        // Skip dedup candidates (same-drawing-number duplicates, continuation duplicates).
+        // These items are kept in the BOM (UI shows them at 50% opacity) but must not
+        // be counted in the connections totals.
+        if ((item as any)._dedupCandidate) continue;
         const catLower = (item.category || "").toLowerCase();
         const descLower = (item.description || "").toLowerCase();
         const size = item.size || "N/A";
@@ -6826,6 +6932,7 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       // apples against shop counts.
       const inferredFieldWelds: Array<{ size: string; lengthLF: number; welds: number; pipeDescription: string }> = [];
       for (const item of project.items) {
+        if ((item as any)._dedupCandidate) continue;
         const cat = (item.category || "").toLowerCase();
         if (cat !== "pipe") continue;
         const lengthLF = item.quantity || 0;
