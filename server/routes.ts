@@ -3353,9 +3353,12 @@ async function processUploadedPdf(
 
     // Run post-processing pipeline on all items
     if (allItems.length > 0) {
-      // Same-drawing-number dedup (catches duplicate revisions / multi-binding)
-      dedupSameDrawingNumber(allItems);
-      // Continuation page dedup
+      // NOTE: Same-drawing-number auto-dedup is intentionally disabled here.
+      // It can be triggered manually via the "Re-run Dedup" button (POST
+      // /api/takeoff-projects/:id/redup) when the user reviews the takeoff
+      // and wants to apply duplicate-drawing detection. We opted for manual
+      // control because automatic dedup occasionally removed legitimate items.
+      // Continuation page dedup (only fires on AI-marked atContinuation items)
       const dedupedItems = dedupContinuationPages([...allItems]);
       allItems.length = 0;
       allItems.push(...dedupedItems);
@@ -3757,11 +3760,12 @@ async function processUploadedPdf(
     console.log(`  Running post-processing validation on ${allItems.length} items...`);
     validateExtractedItems(allItems);
 
-    // Step: Same-drawing-number dedup (catches duplicate revisions)
-    console.log(`  Running same-drawing-number dedup...`);
-    dedupSameDrawingNumber(allItems);
+    // NOTE: Same-drawing-number auto-dedup is intentionally disabled here.
+    // Available manually via the "Re-run Dedup" button on the takeoff page.
+    // We opted for manual control because automatic dedup occasionally removed
+    // legitimate items.
 
-    // Step: Continuation page dedup
+    // Step: Continuation page dedup (only fires on AI-marked atContinuation items)
     console.log(`  Running continuation page dedup...`);
     const dedupedItems = dedupContinuationPages([...allItems]);
     allItems.length = 0;
