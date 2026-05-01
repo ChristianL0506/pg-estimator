@@ -364,6 +364,17 @@ try {
   // Column already exists — ignore
 }
 
+// Multi-pass voting + review-mode columns (high-accuracy mode)
+try { db.exec(`ALTER TABLE takeoff_items ADD COLUMN votingStatus TEXT`); } catch {}
+try { db.exec(`ALTER TABLE takeoff_items ADD COLUMN votingDetails TEXT`); } catch {} // JSON-serialized
+try { db.exec(`ALTER TABLE takeoff_items ADD COLUMN reviewStatus TEXT DEFAULT 'unreviewed'`); } catch {}
+try { db.exec(`ALTER TABLE takeoff_items ADD COLUMN reviewedBy TEXT`); } catch {}
+try { db.exec(`ALTER TABLE takeoff_items ADD COLUMN reviewedAt TEXT`); } catch {}
+
+// Project-level high-accuracy mode flag
+try { db.exec(`ALTER TABLE takeoff_projects ADD COLUMN highAccuracyMode INTEGER DEFAULT 0`); } catch {}
+try { db.exec(`ALTER TABLE takeoff_projects ADD COLUMN votingPassCount INTEGER DEFAULT 3`); } catch {}
+
 // Add manuallyVerified column to takeoff_items if it doesn't exist
 try {
   db.exec(`ALTER TABLE takeoff_items ADD COLUMN manuallyVerified INTEGER DEFAULT 0`);
@@ -587,6 +598,8 @@ function serializeTakeoffProject(row: any, items: TakeoffItem[]): TakeoffProject
     createdAt: row.createdAt,
     items,
     archived: row.archived === 1,
+    highAccuracyMode: row.highAccuracyMode === 1 || row.highAccuracyMode === true || false,
+    votingPassCount: row.votingPassCount != null ? row.votingPassCount : 3,
   };
 }
 
@@ -619,6 +632,11 @@ function rowToTakeoffItem(row: any): TakeoffItem {
     _dedupCandidate: row._dedupCandidate === 1 || row._dedupCandidate === true || undefined,
     dedupNote: row.dedupNote || undefined,
     manuallyVerified: row.manuallyVerified === 1 || row.manuallyVerified === true || undefined,
+    votingStatus: row.votingStatus || undefined,
+    votingDetails: row.votingDetails ? (() => { try { return JSON.parse(row.votingDetails); } catch { return undefined; } })() : undefined,
+    reviewStatus: row.reviewStatus || "unreviewed",
+    reviewedBy: row.reviewedBy || undefined,
+    reviewedAt: row.reviewedAt || undefined,
   };
 }
 
@@ -683,8 +701,8 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
 // ============================================================
 
 const stmts = {
-  insertTakeoffProject: db.prepare(`INSERT INTO takeoff_projects (id, name, fileName, discipline, lineNumber, area, revision, drawingDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  insertTakeoffItem: db.prepare(`INSERT INTO takeoff_items (id, projectId, lineNumber, discipline, category, description, size, quantity, unit, spec, material, schedule, rating, mark, grade, weight, depth, weldType, weldSize, notes, confidence, revisionClouded, confidenceNotes, confidenceScore, sourcePage, _dedupCandidate, dedupNote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertTakeoffProject: db.prepare(`INSERT INTO takeoff_projects (id, name, fileName, discipline, lineNumber, area, revision, drawingDate, createdAt, highAccuracyMode, votingPassCount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertTakeoffItem: db.prepare(`INSERT INTO takeoff_items (id, projectId, lineNumber, discipline, category, description, size, quantity, unit, spec, material, schedule, rating, mark, grade, weight, depth, weldType, weldSize, notes, confidence, revisionClouded, confidenceNotes, confidenceScore, sourcePage, _dedupCandidate, dedupNote, votingStatus, votingDetails, reviewStatus, reviewedBy, reviewedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getTakeoffProjects: db.prepare(`SELECT * FROM takeoff_projects ORDER BY createdAt DESC`),
   getTakeoffProjectsByDiscipline: db.prepare(`SELECT * FROM takeoff_projects WHERE discipline = ? ORDER BY createdAt DESC`),
   getTakeoffProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM takeoff_items GROUP BY projectId`),
@@ -794,7 +812,12 @@ const insertTakeoffItemsTransaction = db.transaction((projectId: string, items: 
       (item as any).confidenceScore != null ? (item as any).confidenceScore : null,
       (item as any).sourcePage != null ? (item as any).sourcePage : null,
       (item as any)._dedupCandidate ? 1 : 0,
-      (item as any).dedupNote || null
+      (item as any).dedupNote || null,
+      (item as any).votingStatus || null,
+      (item as any).votingDetails ? JSON.stringify((item as any).votingDetails) : null,
+      (item as any).reviewStatus || "unreviewed",
+      (item as any).reviewedBy || null,
+      (item as any).reviewedAt || null
     );
   }
 });
@@ -845,7 +868,9 @@ class Storage {
       discipline: data.discipline,
     }));
 
-    stmts.insertTakeoffProject.run(id, data.name, data.fileName, data.discipline, data.lineNumber || null, data.area || null, data.revision || null, data.drawingDate || null, createdAt);
+    const highAccuracyMode = (data as any).highAccuracyMode ? 1 : 0;
+    const votingPassCount = (data as any).votingPassCount || 3;
+    stmts.insertTakeoffProject.run(id, data.name, data.fileName, data.discipline, data.lineNumber || null, data.area || null, data.revision || null, data.drawingDate || null, createdAt, highAccuracyMode, votingPassCount);
     if (items.length > 0) {
       insertTakeoffItemsTransaction(id, items);
     }
@@ -854,6 +879,8 @@ class Storage {
       id, name: data.name, fileName: data.fileName, discipline: data.discipline,
       lineNumber: data.lineNumber, area: data.area, revision: data.revision,
       drawingDate: data.drawingDate, createdAt, items,
+      highAccuracyMode: !!highAccuracyMode,
+      votingPassCount,
     };
   }
 
@@ -901,7 +928,7 @@ class Storage {
   }
 
   updateTakeoffItem(itemId: string, updates: Record<string, any>): boolean {
-    const allowedFields = ["size", "quantity", "description", "category", "unit", "material", "schedule", "spec", "rating", "notes", "confidence", "confidenceScore", "confidenceNotes", "manuallyVerified"];
+    const allowedFields = ["size", "quantity", "description", "category", "unit", "material", "schedule", "spec", "rating", "notes", "confidence", "confidenceScore", "confidenceNotes", "manuallyVerified", "reviewStatus", "reviewedBy", "reviewedAt", "votingStatus"];
     const fields: string[] = [];
     const values: any[] = [];
     for (const field of allowedFields) {
@@ -913,6 +940,11 @@ class Storage {
     if (fields.length === 0) return false;
     values.push(itemId);
     const result = db.prepare(`UPDATE takeoff_items SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    return result.changes > 0;
+  }
+
+  deleteTakeoffItem(itemId: string): boolean {
+    const result = db.prepare(`DELETE FROM takeoff_items WHERE id = ?`).run(itemId);
     return result.changes > 0;
   }
 
@@ -1571,7 +1603,7 @@ class Storage {
         for (const project of data.takeoffProjects) {
           const existing = stmts.getTakeoffProject.get(project.id);
           if (!existing) {
-            stmts.insertTakeoffProject.run(project.id, project.name, project.fileName, project.discipline, project.lineNumber || null, project.area || null, project.revision || null, project.drawingDate || null, project.createdAt);
+            stmts.insertTakeoffProject.run(project.id, project.name, project.fileName, project.discipline, project.lineNumber || null, project.area || null, project.revision || null, project.drawingDate || null, project.createdAt, project.highAccuracyMode ? 1 : 0, project.votingPassCount || 3);
             if (project.items && project.items.length > 0) {
               insertTakeoffItemsTransaction(project.id, project.items);
             }
