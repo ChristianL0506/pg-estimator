@@ -1420,6 +1420,144 @@ async function extractWithVisionMultiPass(
   return { results: finalResults, authFailures };
 }
 
+// ============================================================
+// DRAWING-AS-QA PASS
+// ============================================================
+//
+// After BOM extraction completes, send the FULL ISO drawing image (not the
+// cropped BOM table) plus the extracted item list to Claude. Ask it to count
+// what it sees on the drawing for high-impact fittings (elbows, tees, valves,
+// flanges, olets) and flag mismatches against the BOM.
+//
+// This catches a class of errors where the BOM was extracted incorrectly but
+// the drawing makes the right answer obvious. Mismatches are added to the
+// item's _validationNotes and reset reviewStatus to 'unreviewed' so they
+// surface in Review Mode.
+
+interface PageDrawingImage { pageNum: number; fullImagePath: string }
+
+async function drawingQACheck(
+  pageImages: PageDrawingImage[],
+  extractedItems: Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>,
+): Promise<{ flaggedItems: number; checkedPages: number }> {
+  const client = getAnthropicClient();
+  if (!client || !getUserApiKey()) return { flaggedItems: 0, checkedPages: 0 };
+
+  let flaggedItems = 0;
+  let checkedPages = 0;
+
+  // Process one page at a time — we want the full drawing image and a focused prompt.
+  for (const pi of pageImages) {
+    const pageData = extractedItems.get(pi.pageNum);
+    if (!pageData || !pageData.items || pageData.items.length === 0) continue;
+    if (!fs.existsSync(pi.fullImagePath)) continue;
+
+    // Summarize the items as 'category, size, qty' for the QA prompt.
+    const itemSummary = pageData.items.map((it, idx) => {
+      const cat = (it.category || "").toLowerCase();
+      return `[${idx}] ${cat} | ${it.size || "?"} | qty=${it.quantity ?? "?"} | ${(it.description || "").substring(0, 50)}`;
+    }).join("\n");
+
+    const prompt = `You are auditing an extracted Bill of Materials against the visible isometric drawing.
+
+This is the FULL ISO sheet (drawing graphic + BOM table). Below is what was extracted from the BOM table:
+
+${itemSummary}
+
+Your job: count specific fittings VISIBLE ON THE DRAWING (not the BOM table) and report mismatches.
+
+Count each of these on the DRAWING ITSELF (look at the line work and symbols, not the BOM table):
+  - Elbow symbols (90 LR, 45, etc.)
+  - Tee symbols (T-shaped fittings)
+  - Valves (valve symbols on the line)
+  - Flange symbols (paired flat lines at line ends or connections)
+  - Olets / sockolets / weldolets (small-bore branches off larger headers)
+  - Reducers / swages (taper symbols between sizes)
+  - Caps (closed line ends)
+
+For each category, compare to the BOM. ONLY report mismatches where:
+  - The drawing CLEARLY shows MORE than the BOM has (BOM missed items)
+  - The drawing CLEARLY shows FEWER than the BOM has (BOM has phantom items)
+  - A specific item's size doesn't match what the drawing shows for that location
+
+BE CONSERVATIVE: if you're unsure, do not flag. Drawings can have legend symbols, key notes, or other markings that aren't real fittings.
+
+Return ONLY valid JSON:
+{
+  "mismatches": [
+    { "category": "elbow", "reason": "BOM has 4 elbows but drawing clearly shows 6 elbows", "affectedItemIndices": [0, 1] },
+    { "category": "valve", "reason": "Drawing shows a 1\" SW ball valve in the drain line that is not in the BOM", "affectedItemIndices": [] }
+  ],
+  "summary": "BOM-vs-drawing audit summary, 1-2 sentences"
+}
+
+If BOM and drawing agree, return {"mismatches":[],"summary":"BOM matches drawing"}.`;
+
+    try {
+      const imgData = fs.readFileSync(pi.fullImagePath);
+      const b64 = imgData.toString("base64");
+      const msg = await client.messages.create({
+        model: "claude-sonnet-4-5",
+        max_tokens: 4096,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image" as const, source: { type: "base64" as const, media_type: "image/png", data: b64 } },
+            { type: "text" as const, text: prompt },
+          ],
+        }],
+      });
+
+      const responseText = msg.content[0].type === "text" ? msg.content[0].text : "";
+      let jsonStr = responseText.trim();
+      if (jsonStr.startsWith("```")) jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+
+      const parsed = JSON.parse(jsonStr);
+      checkedPages++;
+
+      const mismatches = Array.isArray(parsed.mismatches) ? parsed.mismatches : [];
+      if (mismatches.length === 0) continue;
+
+      console.log(`  Drawing QA page ${pi.pageNum}: ${mismatches.length} mismatch(es) flagged`);
+
+      for (const m of mismatches) {
+        const reason = `\u2728 Drawing QA: ${m.category} \u2014 ${m.reason}`;
+        const indices: number[] = Array.isArray(m.affectedItemIndices) ? m.affectedItemIndices : [];
+
+        if (indices.length > 0) {
+          // Attach to specific items
+          for (const idx of indices) {
+            const item = pageData.items[idx];
+            if (item) {
+              (item as any)._validationNotes = (item as any)._validationNotes || [];
+              (item as any)._validationNotes.push(reason);
+              (item as any).reviewStatus = "unreviewed";
+              (item as any).reviewedBy = undefined;
+              (item as any).reviewedAt = undefined;
+              flaggedItems++;
+            }
+          }
+        } else {
+          // No specific items — attach to first item on the page as a page-level note
+          if (pageData.items.length > 0) {
+            const item = pageData.items[0];
+            (item as any)._validationNotes = (item as any)._validationNotes || [];
+            (item as any)._validationNotes.push(reason + " (page-level)");
+            flaggedItems++;
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn(`  Drawing QA page ${pi.pageNum} failed: ${err?.message?.substring(0, 100)}`);
+    }
+  }
+
+  if (checkedPages > 0) {
+    console.log(`  Drawing QA complete: ${flaggedItems} item(s) flagged across ${checkedPages} page(s)`);
+  }
+  return { flaggedItems, checkedPages };
+}
+
 // Double-pass verification: sends same images + extracted items to Claude for cross-check
 async function verifyExtractionPass(
   pageImages: { pageNum: number; imagePath: string }[],
@@ -3073,6 +3211,24 @@ async function extractMechanicalChunk(
       verifiedResults = await verifyExtractedItems(verifiedResults, bomImageMap);
     }
 
+    // Drawing QA pass (optional, gated by highAccuracyMode for cost): for each
+    // page, send the FULL ISO drawing + extracted items list to Claude and ask
+    // it to count fittings on the drawing vs the BOM. Mismatches get flagged
+    // and surface in Review Mode.
+    if (highAccuracyMode) {
+      const drawingPages: PageDrawingImage[] = [];
+      for (const pi of pageImages) {
+        const fullImg = (pi as any).fullImagePath;
+        if (fullImg) drawingPages.push({ pageNum: pi.pageNum, fullImagePath: fullImg });
+      }
+      if (drawingPages.length > 0) {
+        console.log(`  Running drawing-as-QA pass on ${drawingPages.length} pages...`);
+        await drawingQACheck(drawingPages, verifiedResults);
+      } else {
+        console.log(`  Skipping drawing QA: no full-page images available`);
+      }
+    }
+
     // BOM item count cross-check per page
     for (const [pageNum, pageData] of verifiedResults) {
       const crossCheckWarnings = crossCheckItemCount(pageData.items, pageNum + startPage - 1);
@@ -3207,30 +3363,62 @@ async function reExtractLowConfidencePages(
 ): Promise<{ reExtractedItems: any[]; reExtractedPages: number[]; warnings: string[] }> {
   const warnings: string[] = [];
 
-  // Group items by page, calculate average confidence per page
-  const pageConfidence: Record<number, { total: number; count: number }> = {};
+  // Per-page diagnostics. We use multiple heuristics to flag a page as
+  // suspicious — NOT just confidence score, because the AI is often confident
+  // about wrong answers when text is hard to read.
+  type PageStats = {
+    items: any[];
+    confTotal: number;
+    confCount: number;
+    flaggedQty: number;       // qty=0 with validation note (the "bare integer" guard fired)
+    emptyQty: number;         // pipe items with quantity = 0 and no length info
+    veryShortDesc: number;    // descriptions shorter than 15 chars (truncation indicator)
+    bareSmallQty: number;     // suspicious bare integer 1-11 fitting QTYs
+  };
+  const pageStats: Record<number, PageStats> = {};
   for (const item of items) {
     const page = item.sourcePage || 0;
-    if (!pageConfidence[page]) pageConfidence[page] = { total: 0, count: 0 };
-    pageConfidence[page].total += item.confidenceScore || 50;
-    pageConfidence[page].count++;
+    if (!pageStats[page]) pageStats[page] = { items: [], confTotal: 0, confCount: 0, flaggedQty: 0, emptyQty: 0, veryShortDesc: 0, bareSmallQty: 0 };
+    const ps = pageStats[page];
+    ps.items.push(item);
+    ps.confTotal += item.confidenceScore || 50;
+    ps.confCount++;
+    const validationNotes: string[] = (item as any)._validationNotes || [];
+    if (validationNotes.some(n => n.includes("flagged for review") || n.includes("matches pipe SIZE"))) ps.flaggedQty++;
+    if ((item.category || "").toLowerCase() === "pipe" && (!item.quantity || item.quantity === 0)) ps.emptyQty++;
+    if ((item.description || "").length < 15) ps.veryShortDesc++;
   }
 
-  // Find pages with average confidence below 70
-  const lowConfPages = Object.entries(pageConfidence)
-    .filter(([, data]) => data.count > 0 && (data.total / data.count) < 70)
+  // Page is "suspicious" if any of:
+  //   - average confidence < 70 (existing rule)
+  //   - 25%+ of items on the page have flagged qty (size==qty pattern, etc.)
+  //   - 2+ pipe items with empty qty
+  //   - 2+ items with very short descriptions
+  //   - extracted only 1-2 items (likely missed most of the BOM)
+  const lowConfPages = Object.entries(pageStats)
+    .filter(([, ps]) => {
+      if (ps.confCount === 0) return false;
+      const avgConf = ps.confTotal / ps.confCount;
+      const flagRate = ps.flaggedQty / ps.confCount;
+      const tooFewItems = ps.confCount > 0 && ps.confCount <= 2;
+      return avgConf < 70 || flagRate >= 0.25 || ps.emptyQty >= 2 || ps.veryShortDesc >= 2 || tooFewItems;
+    })
     .map(([page]) => parseInt(page))
     .sort((a, b) => a - b);
 
   if (lowConfPages.length === 0) return { reExtractedItems: items, reExtractedPages: [], warnings };
 
-  // Limit to 5 pages max for re-extraction (avoid excessive API cost)
-  const pagesToReExtract = lowConfPages.slice(0, 5);
+  // Limit to 8 pages max for re-extraction (was 5; bumped to handle bunched
+  // errors which often span 5-8 consecutive pages).
+  const pagesToReExtract = lowConfPages.slice(0, 8);
+  console.log(`  Suspicious pages flagged for 300 DPI re-extraction: ${pagesToReExtract.join(", ")}`);
 
   // Check that PDF still exists for re-rendering
   if (!fs.existsSync(pdfPath)) {
     for (const p of pagesToReExtract) {
-      warnings.push(`Page ${p}: Low avg confidence (${Math.round((pageConfidence[p].total / pageConfidence[p].count))}) — re-extraction skipped (PDF no longer available)`);
+      const ps = pageStats[p];
+      const avg = ps.confCount > 0 ? Math.round(ps.confTotal / ps.confCount) : 0;
+      warnings.push(`Page ${p}: Suspicious extraction (avg conf ${avg}, ${ps.flaggedQty} flagged qty, ${ps.emptyQty} empty pipe qty) — re-extraction skipped (PDF no longer available)`);
     }
     return { reExtractedItems: items, reExtractedPages: [], warnings };
   }
@@ -3266,20 +3454,15 @@ async function reExtractLowConfidencePages(
     return { reExtractedItems: items, reExtractedPages: [], warnings };
   }
 
-  // Crop BOM tables from the hi-res renders
-  await processRenderedPages(jobDir, "bom");
-
-  // Build page images from cropped BOM files
+  // Smart BOM region: instead of cropping the same fixed region (which may
+  // miss BOMs on left/bottom/center of the page), send the FULL hi-res page
+  // to Claude. The model can find the BOM itself — this is exactly the case
+  // where adaptive DPI is firing because the cropped region was wrong or
+  // unreadable. The 300 DPI full page is well within Claude's image limits.
   const pageImages: { pageNum: number; imagePath: string }[] = [];
   for (const rp of reRenderedPages) {
-    // processRenderedPages creates _bom.png files from the rendered PNGs
-    const base = path.basename(rp.imagePath, ".png");
-    const bomPath = path.join(jobDir, base + "_bom.png");
-    if (fs.existsSync(bomPath)) {
-      pageImages.push({ pageNum: rp.pageNum, imagePath: bomPath });
-    } else {
-      // If no BOM crop, use the full render
-      pageImages.push(rp);
+    if (fs.existsSync(rp.imagePath)) {
+      pageImages.push({ pageNum: rp.pageNum, imagePath: rp.imagePath });
     }
   }
 
