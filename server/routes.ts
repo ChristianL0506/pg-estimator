@@ -1190,233 +1190,6 @@ async function extractWithVision(
   return { results, authFailures };
 }
 
-// ============================================================
-// MULTI-PASS VOTING (HIGH-ACCURACY MODE)
-// ============================================================
-//
-// Runs extraction N times in parallel and reconciles the results to flag
-// disagreements. Items where all N passes agree on size + qty + category get
-// marked as 'unanimous' (high confidence). Items where N-1 of N agree get
-// 'majority' (medium confidence). Items where all differ get 'split' (needs
-// review). Items only seen in 1 of N passes are still included but flagged.
-//
-// Cost: Nx API calls per page. Recommended N=3.
-
-function normalizeForMatch(s: any): string {
-  return String(s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function descSignature(desc: string): string {
-  // Reduce description to a stable signature for matching across passes.
-  // Take the first 4 meaningful tokens (strip specs/grades/material codes).
-  const tokens = normalizeForMatch(desc).split(/[\s,]+/).filter(t => t.length >= 2);
-  return tokens.slice(0, 4).join(" ");
-}
-
-interface PassItem {
-  passNum: number;
-  size: string;
-  quantity: any;
-  category: string;
-  description: string;
-  raw: any;
-}
-
-// Match items from pass B back to a base item from pass A.
-// Returns the matching pass-B item or null. Match key: category + size + descSignature.
-function matchPassItem(baseItem: any, passItems: any[], usedIndices: Set<number>): { item: any; index: number } | null {
-  const baseKey = `${normalizeForMatch(baseItem.category)}|${normalizeForMatch(baseItem.size)}|${descSignature(baseItem.description || "")}`;
-  for (let i = 0; i < passItems.length; i++) {
-    if (usedIndices.has(i)) continue;
-    const it = passItems[i];
-    const k = `${normalizeForMatch(it.category)}|${normalizeForMatch(it.size)}|${descSignature(it.description || "")}`;
-    if (k === baseKey) {
-      usedIndices.add(i);
-      return { item: it, index: i };
-    }
-  }
-  // Looser match: just category + size
-  for (let i = 0; i < passItems.length; i++) {
-    if (usedIndices.has(i)) continue;
-    const it = passItems[i];
-    if (normalizeForMatch(it.category) === normalizeForMatch(baseItem.category)
-      && normalizeForMatch(it.size) === normalizeForMatch(baseItem.size)) {
-      usedIndices.add(i);
-      return { item: it, index: i };
-    }
-  }
-  return null;
-}
-
-// Reconciles N passes of extracted items for a single page. Returns the
-// consensus item list with voting metadata attached.
-function reconcilePassesForPage(passes: any[][]): any[] {
-  if (passes.length === 0) return [];
-  if (passes.length === 1) {
-    return passes[0].map(it => ({ ...it, votingStatus: "single" }));
-  }
-
-  const N = passes.length;
-  // Use the LONGEST pass as the base (most items captured).
-  const baseIdx = passes.reduce((maxI, _, i) => passes[i].length > passes[maxI].length ? i : maxI, 0);
-  const basePass = passes[baseIdx];
-  const otherPasses = passes.filter((_, i) => i !== baseIdx);
-
-  // Track which items in each other pass have been matched
-  const usedIndices = otherPasses.map(() => new Set<number>());
-
-  const reconciled: any[] = [];
-
-  for (const baseItem of basePass) {
-    const passItems: PassItem[] = [{
-      passNum: baseIdx + 1,
-      size: baseItem.size || "",
-      quantity: baseItem.quantity ?? "",
-      category: baseItem.category || "",
-      description: baseItem.description || "",
-      raw: baseItem,
-    }];
-
-    // Try to find this base item in each other pass
-    for (let p = 0; p < otherPasses.length; p++) {
-      const match = matchPassItem(baseItem, otherPasses[p], usedIndices[p]);
-      if (match) {
-        passItems.push({
-          passNum: (p < baseIdx ? p : p + 1) + 1,
-          size: match.item.size || "",
-          quantity: match.item.quantity ?? "",
-          category: match.item.category || "",
-          description: match.item.description || "",
-          raw: match.item,
-        });
-      }
-    }
-
-    // Compute agreements: how many passes agree on each field
-    const sizeVals = passItems.map(p => normalizeForMatch(p.size));
-    const qtyVals = passItems.map(p => String(p.quantity).trim());
-    const catVals = passItems.map(p => normalizeForMatch(p.category));
-
-    function countMatches(vals: string[], target: string) {
-      return vals.filter(v => v === target).length;
-    }
-    const sizeAgree = countMatches(sizeVals, sizeVals[0]);
-    const qtyAgree = countMatches(qtyVals, qtyVals[0]);
-    const catAgree = countMatches(catVals, catVals[0]);
-
-    // Voting status: based on the WORST-agreeing field among (size, qty, category).
-    // Need all N to agree on size+qty+cat for unanimous.
-    let votingStatus: "unanimous" | "majority" | "split" | "single" = "single";
-    const minAgree = Math.min(sizeAgree, qtyAgree, catAgree);
-    if (passItems.length === N && minAgree === N) votingStatus = "unanimous";
-    else if (passItems.length >= 2 && minAgree >= 2) votingStatus = "majority";
-    else if (passItems.length >= 2) votingStatus = "split";
-    else votingStatus = "single"; // only base pass had it
-
-    // Confidence mapping for downstream UI
-    const confidence = votingStatus === "unanimous" ? "high"
-      : votingStatus === "majority" ? "medium"
-      : "low";
-
-    reconciled.push({
-      ...baseItem,
-      confidence,
-      votingStatus,
-      votingDetails: {
-        passes: passItems.map(p => ({
-          passNum: p.passNum,
-          size: p.size,
-          quantity: p.quantity,
-          category: p.category,
-          description: p.description,
-        })),
-        agreements: { size: sizeAgree, quantity: qtyAgree, category: catAgree },
-      },
-    });
-  }
-
-  // Items that ONLY appeared in non-base passes are still important. Add them
-  // as votingStatus='single' (low confidence) so the user can review.
-  for (let p = 0; p < otherPasses.length; p++) {
-    for (let i = 0; i < otherPasses[p].length; i++) {
-      if (usedIndices[p].has(i)) continue;
-      const it = otherPasses[p][i];
-      reconciled.push({
-        ...it,
-        confidence: "low",
-        votingStatus: "single",
-        votingDetails: {
-          passes: [{
-            passNum: (p < baseIdx ? p : p + 1) + 1,
-            size: it.size || "",
-            quantity: it.quantity ?? "",
-            category: it.category || "",
-            description: it.description || "",
-          }],
-          agreements: { size: 1, quantity: 1, category: 1 },
-        },
-      });
-    }
-  }
-
-  return reconciled;
-}
-
-async function extractWithVisionMultiPass(
-  pageImages: { pageNum: number; imagePath: string }[],
-  prompt: string,
-  discipline: string,
-  passCount: number = 3,
-): Promise<{ results: Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>; authFailures: number }> {
-  console.log(`  Multi-pass voting enabled: running ${passCount} extraction passes...`);
-
-  // Run N passes in parallel. Each call hits the same images with the same
-  // prompt; AI temperature variability gives us slightly different results,
-  // and disagreements get flagged.
-  const passPromises: Promise<{ results: Map<number, any>; authFailures: number }>[] = [];
-  for (let p = 0; p < passCount; p++) {
-    passPromises.push(extractWithVision(pageImages, prompt, discipline));
-  }
-  const allPassResults = await Promise.all(passPromises);
-
-  // Sum auth failures across passes
-  const authFailures = allPassResults.reduce((sum, r) => sum + r.authFailures, 0);
-
-  // For each page, gather the N pass results and reconcile.
-  const finalResults = new Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>();
-  const allPageNums = new Set<number>();
-  for (const r of allPassResults) for (const pn of r.results.keys()) allPageNums.add(pn);
-
-  for (const pageNum of allPageNums) {
-    const pagePasses: any[][] = [];
-    let drawingNumber: string | null = null;
-    let weldCount: any = null;
-    let continuations: any[] = [];
-
-    for (const r of allPassResults) {
-      const pageResult = r.results.get(pageNum);
-      if (pageResult) {
-        pagePasses.push(pageResult.items || []);
-        // Take drawing/weldCount/continuations from the first pass that has them
-        if (drawingNumber == null && pageResult.drawingNumber) drawingNumber = pageResult.drawingNumber;
-        if (weldCount == null && pageResult.weldCount) weldCount = pageResult.weldCount;
-        if (continuations.length === 0 && pageResult.continuations?.length) continuations = pageResult.continuations;
-      }
-    }
-
-    const reconciled = reconcilePassesForPage(pagePasses);
-    finalResults.set(pageNum, { items: reconciled, drawingNumber, weldCount, continuations });
-
-    const unanimous = reconciled.filter(it => it.votingStatus === "unanimous").length;
-    const majority = reconciled.filter(it => it.votingStatus === "majority").length;
-    const split = reconciled.filter(it => it.votingStatus === "split").length;
-    const single = reconciled.filter(it => it.votingStatus === "single").length;
-    console.log(`    Page ${pageNum}: ${reconciled.length} items \u2014 unanimous=${unanimous} majority=${majority} split=${split} single=${single}`);
-  }
-
-  return { results: finalResults, authFailures };
-}
-
 // Double-pass verification: sends same images + extracted items to Claude for cross-check
 async function verifyExtractionPass(
   pageImages: { pageNum: number; imagePath: string }[],
@@ -2901,9 +2674,7 @@ async function renderMechanicalChunk(
 async function extractMechanicalChunk(
   rendered: RenderedMechanicalChunk,
   onPageComplete?: (pagesProcessed: number) => void,
-  verifyExtraction: boolean = true,
-  highAccuracyMode: boolean = false,
-  votingPassCount: number = 3,
+  verifyExtraction: boolean = true
 ): Promise<{ items: any[]; metadata: any; authFailures: number }> {
   const { startPage, hasRevisions } = rendered;
   const items: any[] = [];
@@ -2990,13 +2761,6 @@ async function extractMechanicalChunk(
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
         smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
         atContinuation: entry.atContinuation === true || entry.atContinuation === "true" || false,
-          // Preserve multi-pass voting metadata if present (high-accuracy mode)
-          votingStatus: entry.votingStatus,
-          votingDetails: entry.votingDetails,
-          // Items where voting was unanimous get auto-accepted; others stay unreviewed.
-          reviewStatus: entry.votingStatus === "unanimous" ? "accepted" as const : "unreviewed" as const,
-          reviewedBy: entry.votingStatus === "unanimous" ? "auto" : undefined,
-          reviewedAt: entry.votingStatus === "unanimous" ? new Date().toISOString() : undefined,
         };
         if (qtyNotes.length > 0) {
           rawItem._validationNotes = rawItem._validationNotes || [];
@@ -3037,9 +2801,7 @@ async function extractMechanicalChunk(
     if (pageImages.length === 0) return { items, metadata, authFailures };
 
     const adjustedPageImages = pageImages.map(pi => ({ ...pi, globalPageNum: pi.pageNum + startPage - 1 }));
-    const extractResult = highAccuracyMode
-      ? await extractWithVisionMultiPass(pageImages, MECHANICAL_PROMPT, "mechanical", votingPassCount)
-      : await extractWithVision(pageImages, MECHANICAL_PROMPT, "mechanical");
+    const extractResult = await extractWithVision(pageImages, MECHANICAL_PROMPT, "mechanical");
     const visionResults = extractResult.results;
     authFailures += extractResult.authFailures;
 
@@ -3107,13 +2869,6 @@ async function extractMechanicalChunk(
         valveType: category === "valve" ? detectValveType(entry.description) : undefined,
         smallBoreRollup: isSmallBoreRollup({ size: validatedSize, description: entry.description, category }),
         atContinuation: entry.atContinuation === true || entry.atContinuation === "true" || false,
-          // Preserve multi-pass voting metadata if present (high-accuracy mode)
-          votingStatus: entry.votingStatus,
-          votingDetails: entry.votingDetails,
-          // Items where voting was unanimous get auto-accepted; others stay unreviewed.
-          reviewStatus: entry.votingStatus === "unanimous" ? "accepted" as const : "unreviewed" as const,
-          reviewedBy: entry.votingStatus === "unanimous" ? "auto" : undefined,
-          reviewedAt: entry.votingStatus === "unanimous" ? new Date().toISOString() : undefined,
         };
         if (qtyNotes.length > 0) {
           rawItem._validationNotes = rawItem._validationNotes || [];
@@ -3464,9 +3219,7 @@ async function processUploadedPdf(
   discipline: string,
   verifyExtraction: boolean = true,
   hasRevisions: boolean = false,
-  dualModel: boolean = false,
-  highAccuracyMode: boolean = false,
-  votingPassCount: number = 3,
+  dualModel: boolean = false
 ): Promise<void> {
   console.log(`\n======= Processing [${discipline}]: ${fileName} (${pageCount} pages, jobId=${jobId}, revisions=${hasRevisions}, dualModel=${dualModel}) =======`);
 
@@ -3488,8 +3241,6 @@ async function processUploadedPdf(
     fileName,
     discipline: discipline as any,
     items: [], // Start with empty items
-    highAccuracyMode,
-    votingPassCount,
   });
   console.log(`Created project ${project.id} (will save items incrementally)`);
 
@@ -3562,9 +3313,7 @@ async function processUploadedPdf(
                 warnings: warnings.length > 0 ? warnings : undefined,
               });
             },
-            verifyExtraction,
-            highAccuracyMode,
-            votingPassCount,
+            verifyExtraction
           );
         } else if (discipline === "structural") {
           chunkResult = await extractStructuralChunk(rendered as RenderedStructuralChunk);
@@ -5162,8 +4911,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const verifyExtraction = req.body.verifyExtraction !== "false" && req.body.verifyExtraction !== false;
         const hasRevisions = req.body.hasRevisions === "true" || req.body.hasRevisions === true;
         const dualModel = req.body.dualModel === "true" || req.body.dualModel === true;
-        const highAccuracyMode = req.body.highAccuracyMode === "true" || req.body.highAccuracyMode === true;
-        const votingPassCount = parseInt(req.body.votingPassCount as string) || 3;
 
         const fileName = req.file.originalname;
         const pdfPath = req.file.path;
@@ -5196,7 +4943,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             : undefined,
         });
 
-        processUploadedPdf(jobId, fileName, pdfPath, pageCount, totalChunks, discipline, verifyExtraction, hasRevisions, dualModel, highAccuracyMode, votingPassCount).catch((err) => {
+        processUploadedPdf(jobId, fileName, pdfPath, pageCount, totalChunks, discipline, verifyExtraction, hasRevisions, dualModel).catch((err) => {
           console.error("Background processing error:", err);
           storage.setJobProgress(jobId, {
             jobId,
@@ -6729,13 +6476,6 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
 
   // ── Inline Edit / Verify Takeoff Items ──
 
-  app.delete("/api/takeoff-items/:itemId", (req, res) => {
-    const { itemId } = req.params;
-    const success = storage.deleteTakeoffItem(itemId);
-    if (!success) return res.status(404).json({ error: "Item not found" });
-    res.json({ success: true });
-  });
-
   app.patch("/api/takeoff-items/:itemId", (req, res) => {
     const { itemId } = req.params;
     const updates: Record<string, any> = {};
@@ -6749,12 +6489,6 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       if (body[field] !== undefined) {
         updates[field] = field === "quantity" ? (parseFloat(body[field]) || 0) : String(body[field]);
       }
-    }
-    // Review-mode fields (these don't need to be in allowedFields because they're
-    // controlled by the Review Mode UI, not free-form user input).
-    const reviewFields = ["reviewStatus", "reviewedBy", "reviewedAt"];
-    for (const f of reviewFields) {
-      if (body[f] !== undefined) updates[f] = body[f];
     }
 
     if (body.verified === true) {

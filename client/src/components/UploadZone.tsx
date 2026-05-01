@@ -23,7 +23,6 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
   const [isDragOver, setIsDragOver] = useState(false);
   const [hasRevisions, setHasRevisions] = useState(false);
   const [dualModel, setDualModel] = useState(false);
-  const [highAccuracyMode, setHighAccuracyMode] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [pollWarning, setPollWarning] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -197,7 +196,6 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
     formData.append("file", file);
     formData.append("discipline", discipline);
     formData.append("hasRevisions", String(hasRevisions));
-    formData.append("highAccuracyMode", String(highAccuracyMode));
     if (dualModel && geminiAvailable) formData.append("dualModel", "true");
 
     try {
@@ -343,27 +341,6 @@ export default function UploadZone({ discipline, onProjectCreated }: UploadZoneP
             className={`relative w-9 h-5 rounded-full transition-colors ${dualModel ? "bg-primary" : "bg-muted-foreground/30"}`}
           >
             <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${dualModel ? "translate-x-4" : "translate-x-0"}`} />
-          </button>
-        </div>
-      )}
-
-      {/* High-Accuracy Mode toggle (multi-pass voting) */}
-      {state === "idle" && !isProcessing && (
-        <div className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${highAccuracyMode ? "border-purple-400 bg-purple-50 dark:bg-purple-950/30" : "border-border bg-muted/20"}`}>
-          <div className="text-base" aria-hidden>✨</div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium">High-Accuracy Mode <span className="text-[10px] text-muted-foreground font-normal">(3x extraction · 3x cost)</span></p>
-            <p className="text-[10px] text-muted-foreground">Run extraction 3 times in parallel and flag disagreements for review. Items with all-pass agreement auto-accepted; mismatches require manual review.</p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={highAccuracyMode}
-            aria-label="High-Accuracy Mode"
-            onClick={() => setHighAccuracyMode(!highAccuracyMode)}
-            className={`relative w-9 h-5 rounded-full transition-colors ${highAccuracyMode ? "bg-purple-600" : "bg-muted-foreground/30"}`}
-          >
-            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${highAccuracyMode ? "translate-x-4" : "translate-x-0"}`} />
           </button>
         </div>
       )}

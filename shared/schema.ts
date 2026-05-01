@@ -34,26 +34,6 @@ export const takeoffItemSchema = z.object({
   sourcePage: z.number().optional(),
   _dedupCandidate: z.boolean().optional(),
   dedupNote: z.string().optional(),
-  // Multi-pass voting fields (set when high-accuracy mode is enabled)
-  votingStatus: z.enum(["unanimous", "majority", "split", "single"]).optional(),
-  votingDetails: z.object({
-    passes: z.array(z.object({
-      passNum: z.number(),
-      size: z.string(),
-      quantity: z.union([z.number(), z.string()]),
-      category: z.string(),
-      description: z.string().optional(),
-    })),
-    agreements: z.object({
-      size: z.number(), // 1-3, how many passes agreed
-      quantity: z.number(),
-      category: z.number(),
-    }),
-  }).optional(),
-  // Review mode fields
-  reviewedBy: z.string().optional(), // username or 'auto' if accepted automatically
-  reviewedAt: z.string().optional(), // ISO timestamp
-  reviewStatus: z.enum(["unreviewed", "accepted", "edited", "rejected"]).optional().default("unreviewed"),
 });
 export type TakeoffItem = z.infer<typeof takeoffItemSchema>;
 
@@ -70,9 +50,6 @@ export const takeoffProjectSchema = z.object({
   items: z.array(takeoffItemSchema).default([]),
   summary: z.any().optional(),
   archived: z.boolean().optional().default(false),
-  // High-accuracy mode (multi-pass voting). 3x cost, ~5-10% better consistency.
-  highAccuracyMode: z.boolean().optional().default(false),
-  votingPassCount: z.number().optional().default(3),
 });
 export type TakeoffProject = z.infer<typeof takeoffProjectSchema>;
 

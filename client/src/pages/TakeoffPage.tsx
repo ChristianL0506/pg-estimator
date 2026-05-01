@@ -15,7 +15,6 @@ import SummaryCards from "@/components/SummaryCards";
 import PivotSummary from "@/components/PivotSummary";
 import ConnectionsSummary from "@/components/ConnectionsSummary";
 import FabScopeSplitter from "@/components/FabScopeSplitter";
-import { ReviewMode } from "@/components/ReviewMode";
 import { useToast } from "@/hooks/use-toast";
 import { Input } from "@/components/ui/input";
 import {
@@ -763,26 +762,12 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                 <Tabs defaultValue="bom">
                   <TabsList className="mb-3">
                     <TabsTrigger value="bom" className="text-xs" data-testid="tab-bom">BOM Table</TabsTrigger>
-                    <TabsTrigger value="review" className="text-xs" data-testid="tab-review">
-                      Review
-                      {(() => {
-                        const needsReview = selectedProject.items.filter(i => {
-                          if ((i as any)._dedupCandidate) return false;
-                          const rs = i.reviewStatus || "unreviewed";
-                          return rs === "unreviewed" || rs === "rejected";
-                        }).length;
-                        return needsReview > 0 ? <Badge className="ml-1.5 h-4 px-1 text-[10px] bg-amber-500">{needsReview}</Badge> : null;
-                      })()}
-                    </TabsTrigger>
                     <TabsTrigger value="connections" className="text-xs" data-testid="tab-connections">Connections</TabsTrigger>
                     <TabsTrigger value="pivot" className="text-xs" data-testid="tab-pivot">Pivot Summary</TabsTrigger>
                     <TabsTrigger value="fab-scope" className="text-xs">Fab Scope</TabsTrigger>
                   </TabsList>
                   <TabsContent value="bom">
                     <TakeoffBomTable items={selectedProject.items} discipline={discipline} onItemUpdated={() => queryClient.invalidateQueries({ queryKey: ["/api/takeoff/projects", selectedId] })} />
-                  </TabsContent>
-                  <TabsContent value="review">
-                    <ReviewMode project={selectedProject} />
                   </TabsContent>
                   <TabsContent value="connections">
                     <ConnectionsSummary items={selectedProject.items} />
