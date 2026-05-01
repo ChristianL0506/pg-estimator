@@ -674,42 +674,15 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                 )}
 
                 {/* Verification Viewer */}
-                {verifyOpen && availablePages.length > 0 && (() => {
-                  // Compute drawing-number label for the current page (shows up
-                  // alongside the page number so the estimator can locate the ISO).
-                  const pageDrawing: Record<number, string> = {};
-                  for (const it of (selectedProject?.items || [])) {
-                    if (it.sourcePage && (it as any).drawingNumber && !pageDrawing[it.sourcePage]) {
-                      pageDrawing[it.sourcePage] = (it as any).drawingNumber;
-                    }
-                  }
-                  const currentIdx = verifyPage != null ? availablePages.indexOf(verifyPage) : -1;
-                  const goPrev = () => { if (currentIdx > 0) setVerifyPage(availablePages[currentIdx - 1]); };
-                  const goNext = () => { if (currentIdx >= 0 && currentIdx < availablePages.length - 1) setVerifyPage(availablePages[currentIdx + 1]); };
-                  return (
+                {verifyOpen && availablePages.length > 0 && (
                   <Card className="border-card-border shadow-sm">
                     <CardHeader className="p-3 pb-2">
-                      <CardTitle className="text-xs flex items-center justify-between gap-2">
-                        <span className="flex items-center gap-1.5">
-                          <Image size={12} /> ISO Page Viewer
-                          {verifyPage != null && (
-                            <span className="text-muted-foreground font-normal ml-2">
-                              Page {verifyPage} of {availablePages.length}
-                              {pageDrawing[verifyPage] && <span className="ml-2">· {pageDrawing[verifyPage]}</span>}
-                            </span>
-                          )}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={goPrev} disabled={currentIdx <= 0} title="Previous page">←</Button>
-                          <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={goNext} disabled={currentIdx < 0 || currentIdx >= availablePages.length - 1} title="Next page">→</Button>
-                          {verifyPage != null && (
-                            <Button variant="outline" size="sm" className="h-6 px-2 text-[10px]" onClick={() => window.open(`/api/takeoff/projects/${selectedId}/page/${verifyPage}`, "_blank")} title="Open full size in new tab">⛶ Open</Button>
-                          )}
-                        </span>
+                      <CardTitle className="text-xs flex items-center gap-1.5">
+                        <Image size={12} /> Page Verification Viewer
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="p-3 pt-0">
-                      <div className="flex gap-1 mb-2 flex-wrap max-h-24 overflow-y-auto">
+                      <div className="flex gap-1 mb-2 flex-wrap">
                         {availablePages.map(pg => (
                           <Button
                             key={pg}
@@ -717,26 +690,24 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                             size="sm"
                             className="h-7 text-xs px-2"
                             onClick={() => setVerifyPage(pg)}
-                            title={pageDrawing[pg] || `Page ${pg}`}
                           >
-                            {pageDrawing[pg] ? <>P{pg} <span className="ml-1 text-[9px] text-muted-foreground">{pageDrawing[pg].slice(0, 16)}</span></> : <>Page {pg}</>}
+                            Page {pg}
                           </Button>
                         ))}
                       </div>
                       {verifyPage != null && (
-                        <div className="border rounded-md overflow-hidden bg-white dark:bg-black cursor-pointer" onClick={() => window.open(`/api/takeoff/projects/${selectedId}/page/${verifyPage}`, "_blank")} title="Click to open full size">
+                        <div className="border rounded-md overflow-hidden bg-white dark:bg-black">
                           <img
                             src={`/api/takeoff/projects/${selectedId}/page/${verifyPage}`}
                             alt={`Page ${verifyPage}`}
-                            className="w-full h-auto max-h-[700px] object-contain"
+                            className="w-full h-auto"
                             onError={(e) => { (e.target as HTMLImageElement).alt = "Thumbnail not available"; }}
                           />
                         </div>
                       )}
                     </CardContent>
                   </Card>
-                  );
-                })()}
+                )}
 
                 {/* Change Order Dialog */}
                 <Dialog open={changeOrderOpen} onOpenChange={setChangeOrderOpen}>
