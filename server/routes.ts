@@ -1209,11 +1209,20 @@ function normalizeForMatch(s: any): string {
   return String(s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// Aggressively normalize a SIZE string for cross-pass matching:
+//   '1"', '1', '1.0"', "1''" all collapse to the same key.
+function normalizeSize(s: any): string {
+  return String(s ?? "").trim().toLowerCase()
+    .replace(/[\s"\u2018\u2019\u201C\u201D'`]/g, "")
+    .replace(/x/g, "x");
+}
+
 function descSignature(desc: string): string {
   // Reduce description to a stable signature for matching across passes.
-  // Take the first 4 meaningful tokens (strip specs/grades/material codes).
+  // Take the first 3 meaningful tokens (strip specs/grades/material codes).
+  // Keep this loose so descriptions that vary by minor wording still match.
   const tokens = normalizeForMatch(desc).split(/[\s,]+/).filter(t => t.length >= 2);
-  return tokens.slice(0, 4).join(" ");
+  return tokens.slice(0, 3).join(" ");
 }
 
 interface PassItem {
@@ -1226,26 +1235,52 @@ interface PassItem {
 }
 
 // Match items from pass B back to a base item from pass A.
-// Returns the matching pass-B item or null. Match key: category + size + descSignature.
+// Tries progressively looser keys to handle minor wording/spacing differences
+// across passes. If matching is too strict, items get duplicated; if too
+// loose, distinct items get merged. We err on the side of LOOSE matching
+// because the dedup step downstream (using votingDetails) keeps the
+// information about disagreements visible to the user in Review Mode.
 function matchPassItem(baseItem: any, passItems: any[], usedIndices: Set<number>): { item: any; index: number } | null {
-  const baseKey = `${normalizeForMatch(baseItem.category)}|${normalizeForMatch(baseItem.size)}|${descSignature(baseItem.description || "")}`;
+  const baseCat = normalizeForMatch(baseItem.category);
+  const baseSize = normalizeSize(baseItem.size);
+  const baseDescSig = descSignature(baseItem.description || "");
+
+  // Tier 1: cat + size + descSig (exact-ish)
   for (let i = 0; i < passItems.length; i++) {
     if (usedIndices.has(i)) continue;
     const it = passItems[i];
-    const k = `${normalizeForMatch(it.category)}|${normalizeForMatch(it.size)}|${descSignature(it.description || "")}`;
-    if (k === baseKey) {
+    if (normalizeForMatch(it.category) === baseCat
+      && normalizeSize(it.size) === baseSize
+      && descSignature(it.description || "") === baseDescSig) {
       usedIndices.add(i);
       return { item: it, index: i };
     }
   }
-  // Looser match: just category + size
+  // Tier 2: cat + size (looser — same fitting type and size on the page)
   for (let i = 0; i < passItems.length; i++) {
     if (usedIndices.has(i)) continue;
     const it = passItems[i];
-    if (normalizeForMatch(it.category) === normalizeForMatch(baseItem.category)
-      && normalizeForMatch(it.size) === normalizeForMatch(baseItem.size)) {
+    if (normalizeForMatch(it.category) === baseCat
+      && normalizeSize(it.size) === baseSize) {
       usedIndices.add(i);
       return { item: it, index: i };
+    }
+  }
+  // Tier 3: cat + first token of description (very loose — catches when size
+  // differs slightly across passes but the item is clearly the same category
+  // and same first-word description, e.g. an elbow that pass A read as 1"
+  // and pass B read as 2").
+  const baseFirstTok = baseDescSig.split(" ")[0] || "";
+  if (baseFirstTok && baseCat) {
+    for (let i = 0; i < passItems.length; i++) {
+      if (usedIndices.has(i)) continue;
+      const it = passItems[i];
+      const itDescSig = descSignature(it.description || "");
+      const itFirstTok = itDescSig.split(" ")[0] || "";
+      if (normalizeForMatch(it.category) === baseCat && itFirstTok === baseFirstTok) {
+        usedIndices.add(i);
+        return { item: it, index: i };
+      }
     }
   }
   return null;
@@ -1338,12 +1373,28 @@ function reconcilePassesForPage(passes: any[][]): any[] {
     });
   }
 
-  // Items that ONLY appeared in non-base passes are still important. Add them
-  // as votingStatus='single' (low confidence) so the user can review.
+  // Items that ONLY appeared in non-base passes need careful handling. If we
+  // blindly add them, items that the matcher missed get duplicated (3-pass
+  // voting was producing 3x items because matching was too strict).
+  //
+  // SAFETY: cross-dedup unmatched items against each other AND against the
+  // already-reconciled list using the loose category+size key. Only items
+  // that are NEW after this dedup get added.
+  const looseKey = (it: any) => `${normalizeForMatch(it.category)}|${normalizeSize(it.size)}|${descSignature(it.description || "").split(" ")[0]}`;
+  const seenLoose = new Set<string>();
+  for (const r of reconciled) seenLoose.add(looseKey(r));
+
   for (let p = 0; p < otherPasses.length; p++) {
     for (let i = 0; i < otherPasses[p].length; i++) {
       if (usedIndices[p].has(i)) continue;
       const it = otherPasses[p][i];
+      const k = looseKey(it);
+      if (seenLoose.has(k)) {
+        // Already represented in the reconciled list — do NOT add a duplicate.
+        // (This means the strict matcher failed but the loose key found it.)
+        continue;
+      }
+      seenLoose.add(k);
       reconciled.push({
         ...it,
         confidence: "low",
@@ -1407,14 +1458,25 @@ async function extractWithVisionMultiPass(
       }
     }
 
-    const reconciled = reconcilePassesForPage(pagePasses);
+    let reconciled = reconcilePassesForPage(pagePasses);
+
+    // SAFETY: if reconciled list is SIGNIFICANTLY larger than the largest pass,
+    // the matcher is failing and we'd be writing duplicates to the BOM. Fall
+    // back to the largest pass (no voting, but no duplicates either).
+    const largestPassSize = Math.max(0, ...pagePasses.map(p => p.length));
+    if (largestPassSize > 0 && reconciled.length > largestPassSize * 1.5) {
+      console.warn(`    Page ${pageNum}: reconciler produced ${reconciled.length} items vs largest pass ${largestPassSize}. Falling back to single pass to avoid duplicates.`);
+      const longestPassIdx = pagePasses.reduce((maxI, _, i) => pagePasses[i].length > pagePasses[maxI].length ? i : maxI, 0);
+      reconciled = pagePasses[longestPassIdx].map(it => ({ ...it, votingStatus: "single" }));
+    }
+
     finalResults.set(pageNum, { items: reconciled, drawingNumber, weldCount, continuations });
 
     const unanimous = reconciled.filter(it => it.votingStatus === "unanimous").length;
     const majority = reconciled.filter(it => it.votingStatus === "majority").length;
     const split = reconciled.filter(it => it.votingStatus === "split").length;
     const single = reconciled.filter(it => it.votingStatus === "single").length;
-    console.log(`    Page ${pageNum}: ${reconciled.length} items \u2014 unanimous=${unanimous} majority=${majority} split=${split} single=${single}`);
+    console.log(`    Page ${pageNum}: ${reconciled.length} items (largest pass: ${largestPassSize}) \u2014 unanimous=${unanimous} majority=${majority} split=${split} single=${single}`);
   }
 
   return { results: finalResults, authFailures };
@@ -3504,7 +3566,9 @@ async function reExtractLowConfidencePages(
         _reExtractNote: `Re-extracted at 300 DPI (was low confidence)`,
       });
     }
-    console.log(`  Page ${rp.pageNum}: Re-extracted ${pageData.items.length} items at 300 DPI (was ${pageConfidence[rp.pageNum]?.count || 0} items)`);
+    const ps = pageStats[rp.pageNum];
+    const wasCount = ps?.confCount || 0;
+    console.log(`  Page ${rp.pageNum}: Re-extracted ${pageData.items.length} items at 300 DPI (was ${wasCount} items)`);
   }
 
   try { cleanupJobDir(jobDir); } catch (e) { /* ignore */ }
