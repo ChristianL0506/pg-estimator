@@ -213,14 +213,17 @@ function savePageThumbnails(
       return;
     }
 
-    // Mechanical without revisions: has bomPageImages with imagePath
-    const bomImages = rendered.bomPageImages as { pageNum: number; imagePath: string }[] | undefined;
+    // Mechanical without revisions: has bomPageImages with imagePath (BOM crop)
+    // and optionally fullImagePath (whole ISO sheet). Prefer the full sheet so
+    // the user sees the complete drawing in the View Pages section.
+    const bomImages = rendered.bomPageImages as { pageNum: number; imagePath: string; fullImagePath?: string }[] | undefined;
     if (bomImages && bomImages.length > 0) {
       for (const pi of bomImages) {
         const globalPage = pi.pageNum + startPage - 1;
         const dest = path.join(projDir, `page-${globalPage}.png`);
-        if (fs.existsSync(pi.imagePath)) {
-          fs.copyFileSync(pi.imagePath, dest);
+        const src = pi.fullImagePath && fs.existsSync(pi.fullImagePath) ? pi.fullImagePath : pi.imagePath;
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, dest);
         }
       }
       return;
@@ -1742,7 +1745,7 @@ async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "
 
 
 async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promise<{
-  pageImages: { pageNum: number; imagePath: string; tesseractText: string }[];
+  pageImages: { pageNum: number; imagePath: string; fullImagePath?: string; tesseractText: string }[];
   jobDir: string;
 }> {
   const jobDir = path.join(RENDER_DIR, Date.now().toString());
@@ -1764,19 +1767,27 @@ async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promi
     }
   }
 
-    await processRenderedPages(jobDir, "bom");
+  // Always produce both the BOM crop AND a downscaled full-page image. The full
+  // page is what the user sees in the View Pages section of the takeoff UI.
+  await processRenderedPages(jobDir, "bom+full");
 
-  const pageImages: { pageNum: number; imagePath: string; tesseractText: string }[] = [];
+  const pageImages: { pageNum: number; imagePath: string; fullImagePath?: string; tesseractText: string }[] = [];
   const padLen = Math.max(2, String(pageCount).length);
 
   for (let p = 1; p <= pageCount; p++) {
     const padded = String(p).padStart(padLen, "0");
     const bomImg = path.join(jobDir, `page-${padded}_bom.png`);
+    const fullImg = path.join(jobDir, `page-${padded}_full.png`);
     const ocrFile = path.join(jobDir, `page-${padded}_ocr.txt`);
     let tesseractText = "";
     if (fs.existsSync(ocrFile)) tesseractText = fs.readFileSync(ocrFile, "utf-8");
     if (fs.existsSync(bomImg) && !isTitlePage(tesseractText)) {
-      pageImages.push({ pageNum: p, imagePath: bomImg, tesseractText });
+      pageImages.push({
+        pageNum: p,
+        imagePath: bomImg,
+        fullImagePath: fs.existsSync(fullImg) ? fullImg : undefined,
+        tesseractText,
+      });
     }
   }
 
@@ -2848,7 +2859,7 @@ type RenderedMechanicalChunk = {
   endPage: number;
   hasRevisions: boolean;
   // BOM-only path images (non-revision)
-  bomPageImages?: { pageNum: number; imagePath: string; tesseractText: string }[];
+  bomPageImages?: { pageNum: number; imagePath: string; fullImagePath?: string; tesseractText: string }[];
   // Cloud detection path images (revision)
   cloudPageImages?: { pageNum: number; bomImagePath: string; fullImagePath: string; tesseractText: string }[];
 };
