@@ -14,6 +14,7 @@ import SettingsPage from "@/pages/SettingsPage";
 import CostDatabasePage from "@/pages/CostDatabasePage";
 import ProjectHistoryPage from "@/pages/ProjectHistoryPage";
 import BidDashboardPage from "@/pages/BidDashboardPage";
+import HelpPage from "@/pages/HelpPage";
 
 function AppRouter() {
   return (
@@ -32,6 +33,7 @@ function AppRouter() {
       <Route path="/cost-database" component={CostDatabasePage} />
       <Route path="/project-history" component={ProjectHistoryPage} />
       <Route path="/bids" component={BidDashboardPage} />
+      <Route path="/help" component={HelpPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route component={NotFound} />
     </Switch>
