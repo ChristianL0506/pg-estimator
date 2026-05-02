@@ -2275,29 +2275,36 @@ function buildContinuationGraph(items: any[]): {
 // ============================================================
 
 function applyHistoricalPatterns(items: any[]): any[] {
-  const patterns = storage.getAutoApplyPatterns();
-  if (patterns.length === 0) return items;
-
-  let correctionCount = 0;
-  for (const item of items) {
-    for (const pattern of patterns) {
-      if (pattern.field === "size" && item.size === pattern.original_value) {
-        const oldSize = item.size;
-        item.size = pattern.corrected_value;
-        item.notes = (item.notes || "") + ` | Auto-corrected size: ${oldSize} \u2192 ${pattern.corrected_value} (learned)`;
-        correctionCount++;
-      }
-      if (pattern.field === "quantity" && String(item.quantity) === pattern.original_value) {
-        item.quantity = parseFloat(pattern.corrected_value) || item.quantity;
-        correctionCount++;
-      }
-    }
-  }
-
-  if (correctionCount > 0) {
-    console.log(`  Applied ${correctionCount} historical pattern corrections`);
-  }
+  // EMERGENCY DISABLE: Pattern auto-apply was causing ~85%% of items to get
+  // qty rewritten to a single value (e.g., qty=5 across 151 of 173 rows on
+  // Area 400). The DB clearly has a bad/over-eager pattern. Returning items
+  // unchanged until we add a UI to inspect and clear patterns.
   return items;
+
+  // Original logic (kept as reference, currently unreachable):
+  // const patterns = storage.getAutoApplyPatterns();
+  // if (patterns.length === 0) return items;
+  //
+  // let correctionCount = 0;
+  // for (const item of items) {
+  //   for (const pattern of patterns) {
+  //     if (pattern.field === "size" && item.size === pattern.original_value) {
+  //       const oldSize = item.size;
+  //       item.size = pattern.corrected_value;
+  //       item.notes = (item.notes || "") + ` | Auto-corrected size: ${oldSize} \u2192 ${pattern.corrected_value} (learned)`;
+  //       correctionCount++;
+  //     }
+  //     if (pattern.field === "quantity" && String(item.quantity) === pattern.original_value) {
+  //       item.quantity = parseFloat(pattern.corrected_value) || item.quantity;
+  //       correctionCount++;
+  //     }
+  //   }
+  // }
+  //
+  // if (correctionCount > 0) {
+  //   console.log(`  Applied ${correctionCount} historical pattern corrections`);
+  // }
+  // return items;
 }
 
 // ============================================================
@@ -6542,6 +6549,13 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     const { id } = req.params;
     storage.deleteCorrectionPattern(id);
     res.json({ success: true });
+  });
+
+  // Emergency: clear ALL correction patterns. Used to reset the pattern
+  // database when a bad pattern is causing extraction-wide issues.
+  app.delete("/api/correction-patterns", (_req, res) => {
+    const count = storage.deleteAllCorrectionPatterns();
+    res.json({ success: true, deleted: count });
   });
 
   // ── Project Folders ──

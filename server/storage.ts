@@ -738,6 +738,7 @@ const stmts = {
   incrementCorrectionPattern: db.prepare(`UPDATE correction_patterns SET occurrences = occurrences + 1, lastSeen = ? WHERE id = ?`),
   setPatternAutoApply: db.prepare(`UPDATE correction_patterns SET autoApply = ? WHERE id = ?`),
   deleteCorrectionPattern: db.prepare(`DELETE FROM correction_patterns WHERE id = ?`),
+  deleteAllCorrectionPatterns: db.prepare(`DELETE FROM correction_patterns`),
 
   // Completed Projects (Project History)
   insertCompletedProject: db.prepare(`INSERT INTO completed_projects (id, name, client, location, scopeDescription, startDate, endDate, welderHours, fitterHours, helperHours, foremanHours, operatorHours, totalManhours, materialCost, laborCost, totalCost, peakCrewSize, durationDays, tags, notes, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
@@ -952,6 +953,11 @@ class Storage {
 
   setCorrectionPatternAutoApply(id: string, autoApply: boolean): void {
     stmts.setPatternAutoApply.run(autoApply ? 1 : 0, id);
+  }
+
+  deleteAllCorrectionPatterns(): number {
+    const result = stmts.deleteAllCorrectionPatterns.run();
+    return result.changes;
   }
 
   deleteCorrectionPattern(id: string): void {
