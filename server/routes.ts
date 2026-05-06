@@ -2274,6 +2274,230 @@ function buildContinuationGraph(items: any[]): {
 // HISTORICAL PATTERN APPLICATION — Auto-correct from learned patterns
 // ============================================================
 
+// ============================================================
+// POTENTIAL DUPLICATE FLAGGING (does NOT remove items)
+// ============================================================
+//
+// User asked: 'I don't want anything to be taken off but i want it flagged
+// for review as well and marked low confidence'.
+//
+// Finds same-page items where the AI extracted multiple identical rows with
+// qty=1 each, when the BOM almost certainly had ONE row with qty=N. Common
+// case: '2 elbows extracted as 2 separate qty=1 rows instead of one qty=2'.
+// We mark them as low-confidence + add a clear note. The estimator decides
+// in Review Mode whether to merge / delete / keep.
+
+function flagPotentialDuplicates(items: any[]): { flaggedCount: number; groups: number } {
+  // Group items by (sourcePage, normalized desc+size+category)
+  const groupKey = (it: any) => {
+    const sp = it.sourcePage ?? "none";
+    const desc = (it.description || "").toLowerCase().replace(/[\s,]+/g, " ").trim();
+    const descSig = desc.split(" ").slice(0, 4).join(" ");
+    const size = (it.size || "").toLowerCase().replace(/[\s"\u2018\u2019\u201C\u201D'`]/g, "");
+    const cat = (it.category || "").toLowerCase();
+    return `${sp}|${cat}|${size}|${descSig}`;
+  };
+
+  const groups: Record<string, any[]> = {};
+  for (const item of items) {
+    const k = groupKey(item);
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(item);
+  }
+
+  let flaggedCount = 0;
+  let groupsCount = 0;
+  for (const [, group] of Object.entries(groups)) {
+    if (group.length < 2) continue;
+    // Only flag if MOST entries in the group are qty=1 (the typical AI duplication
+    // pattern). If the AI legitimately extracted multiple rows with varying qty,
+    // those are probably real distinct items.
+    const qty1Count = group.filter(it => Math.round(it.quantity || 0) === 1).length;
+    if (qty1Count < 2) continue;
+
+    groupsCount++;
+    const totalQty = group.reduce((s, it) => s + (Math.round(it.quantity || 0) || 0), 0);
+    const note = `\u26a0 Possible duplicate \u2014 ${group.length} identical rows on same page (combined qty would be ${totalQty}). Verify whether BOM has 1 row of qty=${totalQty} or ${group.length} separate rows.`;
+    for (const item of group) {
+      item.confidence = "low";
+      item.confidenceScore = Math.min(item.confidenceScore || 50, 50);
+      // Persist via BOTH _validationNotes (pre-confidence-scoring path) AND
+      // confidenceNotes (post-DB-persist path) so the note survives all flows.
+      item._validationNotes = item._validationNotes || [];
+      if (!item._validationNotes.some((n: string) => n.startsWith("\u26a0 Possible duplicate"))) {
+        item._validationNotes.push(note);
+      }
+      const existingNotes = item.confidenceNotes || "";
+      if (!existingNotes.includes("Possible duplicate")) {
+        item.confidenceNotes = existingNotes ? `${existingNotes} | ${note}` : note;
+      }
+      // Mark for review so Review Mode surfaces it
+      item.reviewStatus = "unreviewed";
+      flaggedCount++;
+    }
+  }
+
+  if (groupsCount > 0) {
+    console.log(`  Flagged ${flaggedCount} item(s) across ${groupsCount} potential duplicate group(s)`);
+  }
+  return { flaggedCount, groups: groupsCount };
+}
+
+// ============================================================
+// PIPE QTY BEST-GUESS RETRY (for items with qty=0 / unreadable)
+// ============================================================
+//
+// Pipe rows where the AI couldn't read the QTY cell come back with qty=0 and
+// a flag note. User asked for: 'put best guess and then flag with low
+// confidence'. This pass sends each unread pipe row back to Claude with the
+// FULL ISO drawing + the row's description and asks for a best-guess length.
+// Result is filled in as the qty + confidence='low' + clear note.
+
+async function pipeQtyBestGuessRetry(items: any[], pdfPath: string, startPage: number): Promise<{ guessedCount: number }> {
+  if (!fs.existsSync(pdfPath)) return { guessedCount: 0 };
+  const client = getAnthropicClient();
+  if (!client || !getUserApiKey()) return { guessedCount: 0 };
+
+  // Find pipe rows that need a best-guess (qty 0 OR explicitly flagged for review)
+  const unread = items.filter(it => {
+    const cat = (it.category || "").toLowerCase();
+    if (cat !== "pipe") return false;
+    if (it.quantity > 0) return false;
+    return true;
+  });
+  if (unread.length === 0) return { guessedCount: 0 };
+
+  console.log(`  Pipe-qty best-guess retry: ${unread.length} unread pipe row(s) to estimate from drawings...`);
+
+  // Group by sourcePage so we render each page once
+  const byPage: Record<number, any[]> = {};
+  for (const it of unread) {
+    const p = it.sourcePage ?? 0;
+    if (!byPage[p]) byPage[p] = [];
+    byPage[p].push(it);
+  }
+
+  let guessedCount = 0;
+  const tmpDir = path.join(RENDER_DIR, `pipe_retry_${Date.now()}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  try {
+    for (const [pageStr, pageItems] of Object.entries(byPage)) {
+      const globalPage = parseInt(pageStr);
+      const localPage = globalPage - startPage + 1;
+      if (localPage < 1) continue;
+
+      // Render the full page at 300 DPI
+      const pageImg = path.join(tmpDir, `p${globalPage}.png`);
+      try {
+        await execFileAsync("pdftoppm", [
+          "-r", "300", "-png", "-f", String(localPage), "-l", String(localPage),
+          pdfPath, path.join(tmpDir, `p${globalPage}_raw`),
+        ], { maxBuffer: 60 * 1024 * 1024, timeout: 60000 });
+        // pdftoppm appends a page-number suffix; find the produced file
+        const candidates = fs.readdirSync(tmpDir).filter(f => f.startsWith(`p${globalPage}_raw`) && f.endsWith(".png"));
+        if (candidates.length === 0) continue;
+        fs.renameSync(path.join(tmpDir, candidates[0]), pageImg);
+      } catch (renderErr: any) {
+        console.warn(`    Page ${globalPage} render failed: ${renderErr.message?.substring(0, 80)}`);
+        continue;
+      }
+
+      if (!fs.existsSync(pageImg)) continue;
+
+      // Build a single prompt asking for length estimates for all unread pipes on this page
+      const pipeList = pageItems.map((it, idx) => {
+        return `[${idx}] size=${it.size || "?"}, description=${(it.description || "").substring(0, 80)}`;
+      }).join("\n");
+
+      const prompt = `You are estimating pipe lengths from a piping isometric drawing.
+
+I have these PIPE rows from the BOM table where the QTY cell was unreadable:
+
+${pipeList}
+
+Look at the drawing graphic and the dimension callouts (e.g. '5'-3"', '22'-6"', or running dimensions along pipe segments). For each pipe row above, estimate the TOTAL length in feet-inches format.
+
+If you can read the BOM QTY cell after a closer look, use that value. Otherwise estimate from the drawing line work + dimension callouts.
+
+Return ONLY valid JSON (no markdown):
+{
+  "estimates": [
+    { "index": 0, "length": "5'-3\"", "source": "bom" | "drawing" | "unreadable", "confidence": "high" | "medium" | "low" }
+  ]
+}
+
+Rules:
+- 'source": "bom"' means you read the QTY cell directly. Use this if you can read it now.
+- 'source": "drawing"' means you estimated from drawing line work / dimension callouts.
+- 'source": "unreadable"' means you genuinely cannot determine the length. Set length to "" in that case.
+- Always include a unit marker on length (5'-3", 22'-6", 0'-8", etc.) — NEVER a bare integer.
+- Be conservative: if you're unsure, mark unreadable.`;
+
+      try {
+        const imgData = fs.readFileSync(pageImg);
+        const b64 = imgData.toString("base64");
+        const msg = await client.messages.create({
+          model: "claude-sonnet-4-5",
+          max_tokens: 4096,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image" as const, source: { type: "base64" as const, media_type: "image/png", data: b64 } },
+              { type: "text" as const, text: prompt },
+            ],
+          }],
+        });
+
+        const responseText = msg.content[0].type === "text" ? msg.content[0].text : "";
+        let jsonStr = responseText.trim();
+        if (jsonStr.startsWith("```")) jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+        const parsed = JSON.parse(jsonStr);
+        const estimates = Array.isArray(parsed.estimates) ? parsed.estimates : [];
+
+        for (const est of estimates) {
+          const idx = typeof est.index === "number" ? est.index : -1;
+          if (idx < 0 || idx >= pageItems.length) continue;
+          const item = pageItems[idx];
+          if (est.source === "unreadable" || !est.length) continue;
+
+          const parsedLen = parsePipeLength(String(est.length));
+          if (!parsedLen || parsedLen <= 0) continue;
+
+          item.quantity = parsedLen;
+          item.unit = "LF";
+          item.confidence = "low";
+          item.confidenceScore = est.source === "bom" ? 60 : 40;
+          // Persist note via BOTH _validationNotes AND confidenceNotes
+          // so it survives downstream cleanup and shows up in the UI.
+          item._validationNotes = item._validationNotes || [];
+          item._validationNotes = item._validationNotes.filter((n: string) =>
+            !n.includes("Pipe quantity flagged for review") && !n.includes("matches pipe SIZE"));
+          const sourceTxt = est.source === "bom" ? "BOM cell on closer read" : "drawing dimensions / line work estimate";
+          const flagNote = `\u26a0 Best-guess pipe length (${parsedLen} LF) from ${sourceTxt}. VERIFY against drawing.`;
+          item._validationNotes.push(flagNote);
+          // Strip the old 'flagged for review' note from confidenceNotes too
+          let existing = item.confidenceNotes || "";
+          existing = existing.replace(/[^|]*Pipe quantity flagged for review[^|]*(\|\s*)?/g, "").trim();
+          existing = existing.replace(/^\|\s*|\s*\|$/g, "").trim();
+          item.confidenceNotes = existing ? `${existing} | ${flagNote}` : flagNote;
+          item.reviewStatus = "unreviewed";
+          guessedCount++;
+        }
+      } catch (err: any) {
+        console.warn(`    Page ${globalPage} retry failed: ${err.message?.substring(0, 80)}`);
+      }
+    }
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+
+  if (guessedCount > 0) {
+    console.log(`  Pipe-qty retry: filled ${guessedCount} pipe length(s) with best-guess values (flagged low confidence)`);
+  }
+  return { guessedCount };
+}
+
 function applyHistoricalPatterns(items: any[]): any[] {
   // EMERGENCY DISABLE: Pattern auto-apply was causing ~85%% of items to get
   // qty rewritten to a single value (e.g., qty=5 across 151 of 173 rows on
@@ -3355,8 +3579,8 @@ async function processUploadedPdf(
     // Skip to post-processing (bypass the two-phase logic below)
     console.log(`\n=== STREAMING COMPLETE: ${chunksCompleted}/${chunks.length} chunks, ${allItems.length} items ===`);
 
-    // Clean up original PDF
-    try { if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath); } catch (e) { console.warn("Suppressed error:", e); }
+    // NOTE: Original PDF cleanup deferred until AFTER pipe-qty retry, which
+    // needs the PDF to render specific pages at high DPI for best-guess.
 
     // Run post-processing pipeline on all items
     if (allItems.length > 0) {
@@ -3369,6 +3593,33 @@ async function processUploadedPdf(
       const dedupedItems = dedupContinuationPages([...allItems]);
       allItems.length = 0;
       allItems.push(...dedupedItems);
+
+      // Pipe quantity best-guess retry (must run BEFORE we clean up the PDF)
+      if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+        try {
+          const retryResult = await pipeQtyBestGuessRetry(allItems, pdfPath, 1);
+          if (retryResult.guessedCount > 0) {
+            warnings.push(`Pipe quantity best-guess: ${retryResult.guessedCount} pipe length(s) estimated from drawings (flagged low confidence \u2014 verify before bidding).`);
+          }
+        } catch (retryErr: any) {
+          console.warn(`  Pipe-qty retry failed: ${retryErr.message?.substring(0, 100)}`);
+        }
+      }
+
+      // Flag potential same-page duplicates (does NOT remove anything)
+      if (discipline === "mechanical") {
+        try {
+          const dupResult = flagPotentialDuplicates(allItems);
+          if (dupResult.flaggedCount > 0) {
+            warnings.push(`Possible duplicates: ${dupResult.flaggedCount} item(s) across ${dupResult.groups} group(s) flagged for review (same description repeated on same page).`);
+          }
+        } catch (dupErr: any) {
+          console.warn(`  Duplicate flagging failed: ${dupErr.message?.substring(0, 100)}`);
+        }
+      }
+
+      // Now safe to clean up original PDF
+      try { if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath); } catch (e) { console.warn("Suppressed error:", e); }
 
       // Apply historical pattern corrections (learned from user edits)
       applyHistoricalPatterns(allItems);
@@ -3386,14 +3637,28 @@ async function processUploadedPdf(
       // Confidence scoring
       for (const item of allItems) {
         const { confidence, confidenceScore, confidenceNotes } = computeConfidenceScore(item, pdfQuality);
+        // Preserve any 'low' confidence already set by post-processing (pipe-qty
+        // retry, duplicate flagging, etc.) — these are explicit signals from
+        // logic we trust more than the heuristic computeConfidenceScore.
+        const preservedLow = item.confidence === "low";
         if (item._verifiedCorrect) {
           item.confidence = "high";
           item.confidenceScore = Math.max(confidenceScore, 90);
+        } else if (preservedLow) {
+          item.confidence = "low";
+          item.confidenceScore = Math.min(confidenceScore, item.confidenceScore || 50);
         } else {
           item.confidence = confidence;
           item.confidenceScore = confidenceScore;
         }
-        item.confidenceNotes = confidenceNotes;
+        // Merge validation notes (pipe-qty retry, duplicate flag, etc.) into
+        // confidenceNotes so they survive the cleanup below.
+        const validationNotes: string[] = (item as any)._validationNotes || [];
+        if (validationNotes.length > 0) {
+          item.confidenceNotes = [confidenceNotes, ...validationNotes].filter(Boolean).join(" | ");
+        } else {
+          item.confidenceNotes = confidenceNotes;
+        }
         delete item._validationFlag;
         delete item._validationNotes;
         delete item._sizeWarning;
@@ -3842,6 +4107,36 @@ async function processUploadedPdf(
       }
     } catch (reExtractErr: any) {
       console.warn(`  Adaptive DPI re-extraction failed: ${reExtractErr.message?.substring(0, 100)}`);
+    }
+  }
+
+  // Step: Pipe quantity best-guess retry for unread pipes
+  // Sends the FULL ISO drawing back to Claude for any pipe row with qty=0 and
+  // asks for a length estimate from the drawing line work + dimension callouts.
+  // Result is filled in with confidence=low + a clear flag note for review.
+  if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+    try {
+      const startPage = chunks[0]?.startPage || 1;
+      const retryResult = await pipeQtyBestGuessRetry(allItems, pdfPath, startPage);
+      if (retryResult.guessedCount > 0) {
+        warnings.push(`Pipe quantity best-guess: ${retryResult.guessedCount} pipe length(s) estimated from drawings (flagged low confidence \u2014 verify before bidding).`);
+      }
+    } catch (retryErr: any) {
+      console.warn(`  Pipe-qty retry failed: ${retryErr.message?.substring(0, 100)}`);
+    }
+  }
+
+  // Step: Flag potential same-page duplicate items (does NOT remove anything)
+  // User asked: 'I don't want anything to be taken off but i want it flagged
+  // for review as well and marked low confidence'.
+  if (discipline === "mechanical") {
+    try {
+      const dupResult = flagPotentialDuplicates(allItems);
+      if (dupResult.flaggedCount > 0) {
+        warnings.push(`Possible duplicates: ${dupResult.flaggedCount} item(s) across ${dupResult.groups} group(s) flagged for review (same description repeated on same page).`);
+      }
+    } catch (dupErr: any) {
+      console.warn(`  Duplicate flagging failed: ${dupErr.message?.substring(0, 100)}`);
     }
   }
 
