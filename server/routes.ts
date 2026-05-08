@@ -844,6 +844,7 @@ async function verifyExtractedItems(
       const msg = await client.messages.create({
         model: "claude-sonnet-4-5",
         max_tokens: 8192,
+        temperature: 0,
         messages: [{ role: "user", content }],
       });
 
@@ -1093,6 +1094,7 @@ async function extractWithVision(
         const msg = await client.messages.create({
           model: "claude-sonnet-4-5",
           max_tokens: 16384,
+          temperature: 0,
           messages: [{ role: "user", content }],
         });
 
@@ -1237,6 +1239,7 @@ Return ONLY valid JSON (no markdown fences):
       const msg = await client.messages.create({
         model: "claude-sonnet-4-5",
         max_tokens: 16384,
+        temperature: 0,
         messages: [{ role: "user", content }],
       });
 
@@ -1304,6 +1307,7 @@ async function extractWithCloudDetection(
         const msg = await client.messages.create({
           model: "claude-sonnet-4-5",
           max_tokens: 16384,
+          temperature: 0,
           messages: [{ role: "user", content }],
         });
 
@@ -2510,6 +2514,7 @@ Rules:
         const msg = await client.messages.create({
           model: "claude-sonnet-4-5",
           max_tokens: 2048,
+          temperature: 0,
           messages: [{
             role: "user",
             content: [
@@ -2667,6 +2672,7 @@ Rules:
         const msg = await client.messages.create({
           model: "claude-sonnet-4-5",
           max_tokens: 4096,
+          temperature: 0,
           messages: [{
             role: "user",
             content: [
