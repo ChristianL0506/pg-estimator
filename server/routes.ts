@@ -2353,6 +2353,187 @@ function flagPotentialDuplicates(items: any[]): { flaggedCount: number; groups: 
 // FULL ISO drawing + the row's description and asks for a best-guess length.
 // Result is filled in as the qty + confidence='low' + clear note.
 
+// ============================================================
+// MISSED PIPE-ROW RECOVERY
+// ============================================================
+//
+// User reported: 'I am missing whole lines for pipe, like multiple pages that
+// have pipe doesn't even have it on the takeoff'.
+//
+// The bare-integer guard catches pipe rows where the QTY was misread as a
+// number, but cannot help when the AI SKIPS the pipe row entirely. Looking
+// at the FP-Isos package, 6 of 22 pages had a pipe row in the BOM that the
+// AI never extracted at all.
+//
+// This pass goes through ALL pages and for each page, sends the rendered BOM
+// image to Claude with a tightly focused prompt: 'count and list every PIPE
+// row in this BOM table'. Anything Claude finds that we don't already have
+// gets added as a new item with low confidence + a clear flag note.
+//
+// Different from pipeQtyBestGuessRetry (which only fixes existing items with
+// qty=0). This recovers ROWS THAT WERE NEVER EXTRACTED.
+
+async function pipeRowRecovery(items: any[], pdfPath: string, startPage: number): Promise<{ recoveredCount: number; pagesScanned: number }> {
+  if (!fs.existsSync(pdfPath)) return { recoveredCount: 0, pagesScanned: 0 };
+  const client = getAnthropicClient();
+  if (!client || !getUserApiKey()) return { recoveredCount: 0, pagesScanned: 0 };
+
+  // Group existing pipe items by source page so we know what's already there
+  const existingPipesByPage: Record<number, any[]> = {};
+  const allPagesWithItems = new Set<number>();
+  for (const it of items) {
+    const pg = it.sourcePage;
+    if (typeof pg !== "number") continue;
+    allPagesWithItems.add(pg);
+    const cat = (it.category || "").toLowerCase();
+    if (cat === "pipe") {
+      if (!existingPipesByPage[pg]) existingPipesByPage[pg] = [];
+      existingPipesByPage[pg].push(it);
+    }
+  }
+
+  if (allPagesWithItems.size === 0) return { recoveredCount: 0, pagesScanned: 0 };
+
+  console.log(`  Pipe-row recovery: scanning ${allPagesWithItems.size} page(s) for missed pipe rows...`);
+
+  let recoveredCount = 0;
+  let pagesScanned = 0;
+  const tmpDir = path.join(RENDER_DIR, `pipe_recovery_${Date.now()}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  try {
+    for (const globalPage of allPagesWithItems) {
+      const localPage = globalPage - startPage + 1;
+      if (localPage < 1) continue;
+
+      // Render the page at 250 DPI (good legibility, manageable size)
+      const pageImg = path.join(tmpDir, `p${globalPage}.png`);
+      try {
+        await execFileAsync("pdftoppm", [
+          "-r", "250", "-png", "-f", String(localPage), "-l", String(localPage),
+          pdfPath, path.join(tmpDir, `p${globalPage}_raw`),
+        ], { maxBuffer: 60 * 1024 * 1024, timeout: 60000 });
+        const candidates = fs.readdirSync(tmpDir).filter(f => f.startsWith(`p${globalPage}_raw`) && f.endsWith(".png"));
+        if (candidates.length === 0) continue;
+        fs.renameSync(path.join(tmpDir, candidates[0]), pageImg);
+      } catch (renderErr: any) {
+        console.warn(`    Page ${globalPage} render failed: ${renderErr.message?.substring(0, 80)}`);
+        continue;
+      }
+
+      if (!fs.existsSync(pageImg)) continue;
+
+      // Build a list of existing pipe items so Claude doesn't re-report them
+      const existing = existingPipesByPage[globalPage] || [];
+      const existingDesc = existing.length > 0
+        ? existing.map((p, i) => `[${i}] size=${p.size}, qty=${p.quantity}, desc=${(p.description || "").substring(0, 60)}`).join("\n")
+        : "(none extracted yet for this page)";
+
+      const prompt = `You are auditing the BOM table on a piping isometric drawing for missed PIPE rows.
+
+Look at the BOM table on this page. The BOM has columns: NO. | QTY | SIZE | DESCRIPTION.
+
+For EACH pipe row in the BOM (description starts with 'PIPE,' or contains 'PIPE'), list:
+  - The size (e.g. "4\"")
+  - The QTY exactly as printed (e.g. "38'-1\"", "25'-5\"", "4'", "6.5")
+  - The full description
+
+We already have these pipe rows extracted from this page:
+${existingDesc}
+
+Report ONLY pipe rows that are in the BOM but NOT in the existing list above. Do not duplicate.
+
+If there are no missed pipe rows, return an empty array.
+
+Return ONLY valid JSON (no markdown):
+{
+  "missing_pipes": [
+    { "size": "4\"", "qty": "38'-1\"", "description": "PIPE, PE, SCH 40, ASTM A53, TYPE E, GRD B", "section": "SHOP" }
+  ]
+}
+
+Rules:
+- Only report pipe rows you can clearly see in the BOM table.
+- Always include the unit marker on qty ("38'-1\"", "4'", etc.).
+- If you're unsure whether a row is missed, do NOT report it.
+- 'section' is "SHOP" or "FIELD" depending on which sub-table the row is in.`;
+
+      try {
+        const imgData = fs.readFileSync(pageImg);
+        const b64 = imgData.toString("base64");
+        const msg = await client.messages.create({
+          model: "claude-sonnet-4-5",
+          max_tokens: 2048,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image" as const, source: { type: "base64" as const, media_type: "image/png", data: b64 } },
+              { type: "text" as const, text: prompt },
+            ],
+          }],
+        });
+
+        const responseText = msg.content[0].type === "text" ? msg.content[0].text : "";
+        let jsonStr = responseText.trim();
+        if (jsonStr.startsWith("```")) jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+
+        const parsed = JSON.parse(jsonStr);
+        const missing = Array.isArray(parsed.missing_pipes) ? parsed.missing_pipes : [];
+        pagesScanned++;
+
+        for (const mp of missing) {
+          const size = String(mp.size || "").trim();
+          const qtyStr = String(mp.qty || "").trim();
+          const desc = String(mp.description || "PIPE").trim();
+          if (!size || !qtyStr) continue;
+
+          // Parse the qty as a pipe length
+          const parsedLen = parsePipeLength(qtyStr);
+          if (parsedLen === null || parsedLen <= 0) continue;
+
+          // Build a takeoff item that looks like the rest
+          const drawingNumber = (existing[0] && (existing[0] as any).drawingNumber) || null;
+          const newItem: any = {
+            id: randomUUID(),
+            lineNumber: items.length + 1,
+            discipline: "mechanical",
+            category: "pipe",
+            description: desc.substring(0, 250),
+            size,
+            quantity: parsedLen,
+            unit: "LF",
+            spec: extractSpec(desc) || undefined,
+            material: extractMaterial(desc) || undefined,
+            schedule: extractSchedule(desc) || undefined,
+            rating: extractRating(desc) || undefined,
+            notes: `Sheet ${globalPage}${drawingNumber ? " | " + drawingNumber : ""} (${(mp.section || "SHOP").toUpperCase()})`,
+            sourcePage: globalPage,
+            drawingNumber,
+            installLocation: (mp.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
+            confidence: "low" as const,
+            confidenceScore: 45,
+            confidenceNotes: `\u26a0 Recovered missed pipe row \u2014 not in initial extraction. Verify against drawing.`,
+            reviewStatus: "unreviewed" as const,
+          };
+          items.push(newItem);
+          recoveredCount++;
+        }
+      } catch (err: any) {
+        console.warn(`    Page ${globalPage} pipe recovery failed: ${err.message?.substring(0, 80)}`);
+      }
+    }
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+
+  if (recoveredCount > 0) {
+    console.log(`  Pipe-row recovery: added ${recoveredCount} missed pipe row(s) (flagged low confidence) across ${pagesScanned} page(s) scanned`);
+  } else {
+    console.log(`  Pipe-row recovery: no missed rows found across ${pagesScanned} page(s) scanned`);
+  }
+  return { recoveredCount, pagesScanned };
+}
+
 async function pipeQtyBestGuessRetry(items: any[], pdfPath: string, startPage: number): Promise<{ guessedCount: number }> {
   if (!fs.existsSync(pdfPath)) return { guessedCount: 0 };
   const client = getAnthropicClient();
@@ -3594,6 +3775,21 @@ async function processUploadedPdf(
       allItems.length = 0;
       allItems.push(...dedupedItems);
 
+      // Missed pipe ROW recovery — scans every page's BOM looking for pipe rows
+      // that were skipped entirely during initial extraction. Adds them as new
+      // items with low confidence so qty retry below can fill in lengths.
+      // Must run BEFORE pipeQtyBestGuessRetry and BEFORE we clean up the PDF.
+      if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+        try {
+          const recoveryResult = await pipeRowRecovery(allItems, pdfPath, 1);
+          if (recoveryResult.recoveredCount > 0) {
+            warnings.push(`Missed pipe rows recovered: ${recoveryResult.recoveredCount} pipe row(s) found on second pass across ${recoveryResult.pagesScanned} page(s) (flagged low confidence \u2014 verify against drawings).`);
+          }
+        } catch (recoveryErr: any) {
+          console.warn(`  Pipe-row recovery failed: ${recoveryErr.message?.substring(0, 100)}`);
+        }
+      }
+
       // Pipe quantity best-guess retry (must run BEFORE we clean up the PDF)
       if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
         try {
@@ -4107,6 +4303,22 @@ async function processUploadedPdf(
       }
     } catch (reExtractErr: any) {
       console.warn(`  Adaptive DPI re-extraction failed: ${reExtractErr.message?.substring(0, 100)}`);
+    }
+  }
+
+  // Step: Missed pipe ROW recovery — scans every page's BOM for pipe rows that
+  // were skipped entirely during initial extraction (e.g. when the AI got the
+  // elbow/tee/flange but missed the PIPE row at the top of the BOM). Must run
+  // BEFORE pipeQtyBestGuessRetry so newly recovered rows can also get lengths.
+  if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+    try {
+      const startPage = chunks[0]?.startPage || 1;
+      const recoveryResult = await pipeRowRecovery(allItems, pdfPath, startPage);
+      if (recoveryResult.recoveredCount > 0) {
+        warnings.push(`Missed pipe rows recovered: ${recoveryResult.recoveredCount} pipe row(s) found on second pass across ${recoveryResult.pagesScanned} page(s) (flagged low confidence \u2014 verify against drawings).`);
+      }
+    } catch (recoveryErr: any) {
+      console.warn(`  Pipe-row recovery failed: ${recoveryErr.message?.substring(0, 100)}`);
     }
   }
 
