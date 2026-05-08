@@ -178,6 +178,42 @@ function extractText(pdfPath: string): string {
   }
 }
 
+// Per-page PDF text extraction. Returns the embedded vector text for one page,
+// or empty string if the PDF is image-only (scanned) or pdftotext is missing.
+// This is the lowest-risk implementation of the council's PDF text suggestion:
+// when CAD-exported ISOs are loaded, every BOM cell is in the PDF as text and
+// pdftotext gives us the rows for free — we then pass it to Claude as evidence.
+// For scanned PDFs this returns "" and behavior is unchanged.
+function extractPageText(pdfPath: string, pageNum: number): string {
+  try {
+    return execFileSync("pdftotext", [
+      "-layout",
+      "-f", String(pageNum),
+      "-l", String(pageNum),
+      pdfPath, "-",
+    ], { maxBuffer: 8 * 1024 * 1024, timeout: 15000 }).toString("utf-8");
+  } catch (e) {
+    return "";
+  }
+}
+
+// Probes a PDF to see whether it has embedded vector text. Returns true if
+// the first 3 pages average >100 chars of text (typical CAD-exported ISO).
+// Used to decide whether to pay the per-page extractPageText cost on every
+// page or skip it entirely.
+function pdfHasVectorText(pdfPath: string, pageCount: number): boolean {
+  try {
+    const samplePages = Math.min(3, pageCount);
+    let totalChars = 0;
+    for (let p = 1; p <= samplePages; p++) {
+      totalChars += extractPageText(pdfPath, p).length;
+    }
+    return (totalChars / samplePages) > 100;
+  } catch {
+    return false;
+  }
+}
+
 function cleanupJobDir(jobDir: string) {
   try {
     const files = fs.readdirSync(jobDir);
@@ -600,219 +636,140 @@ function buildCalibrationSummary(items: any[]): any {
 // MECHANICAL BOM EXTRACTION
 // ============================================================
 
-const MECHANICAL_PROMPT = `You are an expert at reading BOM (Bill of Materials) tables from piping isometric drawings.
-Your job is to produce EXACT, ACCURATE data. Accuracy is critical — this is used for material procurement.
+const MECHANICAL_PROMPT = `You are an expert at reading BOM (Bill of Materials) tables from piping isometric drawings. Your job is to produce EXACT, ACCURATE data — this is used for material procurement.
 
-Each image is a cropped BOM table from a piping isometric drawing page.
-The table has SHOP and FIELD sections, each with columns: NO. | QTY | SIZE | DESCRIPTION
+The image is a piping isometric drawing page (or a cropped BOM area from one). The BOM has SHOP and FIELD sub-tables, both with columns: NO. | QTY | SIZE | DESCRIPTION
 
-RULES — READ CAREFULLY:
-1. Read every cell EXACTLY as printed. Do NOT guess, round, estimate, or infer values.
-2. QTY column:
-   - For PIPE: QTY is a length in feet-inches format like 16'-8" or 3'-0" or 22'-6". Copy it EXACTLY as written (e.g. "16'-8\""). The apostrophe means feet, the double-quote means inches.
-   - For fittings/valves/bolts/gaskets: QTY is a simple integer (1, 2, 4, 8, etc.). Read the number carefully — distinguish between 1, 4, 8, etc.
-   - DO NOT convert units. DO NOT do math. Just copy what is printed.
-   *** ANTI-PATTERN — DO NOT COPY THE SIZE COLUMN INTO QTY ***
-   The SIZE column always comes BEFORE the QTY column in the table layout. For pipe rows, if you output qty="1" for a 1" pipe, qty="2" for a 2" pipe, qty="4" for a 4" pipe, you are reading the WRONG COLUMN. The pipe QTY is ALWAYS a length with feet-inches markers (5'-3", 22'-6", 0'-8"). It is NEVER a bare integer that equals the pipe size.
-   If the pipe row's QTY cell appears empty, blank, or unreadable, output qty="" (empty string) — do NOT substitute the size value. An empty qty is acceptable and will be flagged for manual review.
-3. SIZE column — CRITICAL:
-   - Piping sizes are ALWAYS in nominal pipe sizes: 1/2", 3/4", 1", 1-1/2", 2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48".
-   - Reducers have two sizes like 6"x4" or 2"x1".
-   - Bolts have sizes like 5/8"x3 3/4" or 3/4"x4 1/4" (bolt diameter x bolt length).
-   - NEVER report a pipe size larger than 48". Standard pipe sizes do not exceed 48".
-4. DESCRIPTION: Copy the FULL text, joining multi-line text with spaces. Include all specs (ASME B16.xx, ASTM Axxx, CLASS xxxx, SCH xx, etc.)
-5. Include ALL rows from BOTH the SHOP table and the FIELD table.
-6. SKIP: title block text, engineer stamps, notes, revision blocks, drawing borders.
-7. If a page image has NO BOM table or only empty table headers, return an empty items array.
+=== STEP 1: ROW CENSUS (do this FIRST) ===
+Before extracting fields, scan the NO. column of every visible BOM sub-table and list every integer you see, in order, for each section (SHOP and FIELD). Your output "items" array must contain ONE entry per visible numbered row. NEVER skip a numbered row — not even if a cell is unreadable, not even if the row appears different (PIPE rows often look different from fitting rows).
 
-*** CRITICAL — DO NOT MISS SMALL-BORE FITTINGS ***
-Small-bore fittings (1/2", 3/4", 1", 1-1/4", 2") are the MOST COMMONLY MISSED items.
-They often have:
-- Smaller fonts in the BOM table
-- Multi-line descriptions wrapped across rows
-- Many similar entries that look repetitive (8x "1" SW ELBOW" entries)
-- Socket Weld 3000# class fittings (very common — must extract as separate items)
-DO NOT skip these. Read EVERY ROW of the BOM. If you see 8 separate rows for 1" SW elbows on different sheets, output 8 separate items, not 1 consolidated item.
-DO NOT consolidate, summarize, or group similar items. Each BOM row = 1 output item with its exact qty.
-If you are unsure whether you've captured all small-bore items, look one more time. The BOM tables have a NO. (item number) column — make sure your output has ALL the item numbers from 1 through the highest numbered row.
+Row 1 of the SHOP section is almost always PIPE. If you cannot find a PIPE row but you see fittings (elbow, tee, flange, reducer, valve), look harder — you almost certainly missed it. PIPE rows are commonly missed because:
+- The QTY is a length like 38'-1" or 22'-6" instead of an integer
+- The DESCRIPTION wraps across multiple visual lines
+- The row sits at the very top of the table
+Look again. Output the PIPE row.
 
-*** SMALL-BORE TIE-IN SUBASSEMBLIES — SOCKET-WELD VALVE PATTERN ***
-Very common drain/vent/sample-tap assembly on 1" and 3/4" lines:
-  HEADER PIPE → SOCKOLET (or WELDOLET + REDUCER) → SHORT NIPPLE → SW VALVE → CAP
-A single ISO can have 4, 6, or 8 of these assemblies repeating along a header. Each one is its OWN BOM row group with its own QTY. The BOM may show ONE line item with QTY 4 (e.g. "1" BALL VALVE, SW, CLASS 800 — QTY 4") covering all four assemblies. **Read the QTY column carefully — do not assume QTY 1 just because the description text appears once.** When you see SW valves, sockolets, and caps with QTY > 1, output them with the FULL QTY shown in the BOM.
+=== STEP 2: FIELD EXTRACTION (one entry per numbered row) ===
+For every NO. value in the row census, output an item with:
 
-*** WATCH FOR THESE FREQUENTLY MISSED 1" SW ITEMS ***
-When scanning a BOM, deliberately look for these row types and copy their QTY EXACTLY:
-- "1" BALL VALVE, SW, CLASS 800" or "1" PISTON VALVE, SW" — QTY is OFTEN 3-7
-- "1" SOCKOLET" or "1" THREADOLET" — QTY is OFTEN 4-8
-- "1" PIPE NIPPLE, TBE, SCH 80" — QTY is OFTEN 4-8 (one per drain/vent)
-- "1" CAP, SW, CLASS 3000" — QTY is OFTEN 4-8
-- "1" ELBOW 90, SW, CLASS 3000" — QTY varies, 1 to 12
-- "1" TEE, SW, CLASS 3000" — QTY varies
-- "1" SW x NPT REDUCER" or "1" COUPLING, SW"
-Before returning, verify: did you capture every 1" item in the BOM? If a header pipe has any branches (sockolets visible on the drawing), the BOM MUST have matching small-bore fittings, valves, and caps. Cross-check the drawing against the BOM.
+- itemNo: the integer from the NO. column
+- qty: the value EXACTLY as printed in the QTY cell (see QTY rules below)
+- size: the value from the SIZE column
+- description: the FULL description text, joining wrapped lines with spaces
+- section: "SHOP" or "FIELD"
 
-CRITICAL — AVOID DOUBLE COUNTING:
-- Extract items ONLY from the BOM TABLE (the tabular list of materials in the SHOP and FIELD sections). Do NOT count items from the isometric drawing graphic, callout bubbles, or match line annotations.
-- Callout numbers (circled numbers like ①②③ or plain numbers in circles) on the isometric drawing reference BOM line items. They appear at EACH LOCATION where that item is used. The BOM table QTY column already has the TOTAL count — do NOT add extra from callout locations.
-- Example: BOM says "Item 5 | QTY: 3 | 4" COUPLING" = 3 couplings total. Even if callout "5" appears 3 times on the drawing, the QTY of 3 already covers all of them. Output qty=3, not 9.
-- If a BOM continues on a second sheet ("CONT'D"), only count items on THIS page's portion of the BOM table. The other sheet's BOM will be extracted separately.
-- Each BOM line item should appear EXACTLY ONCE in your output per page. Never duplicate a row.
-- If you see duplicate item numbers (same NO. column value), they are likely from different sections (SHOP vs FIELD). Include both but mark the correct section.
+If any single cell is unreadable or empty, output the row anyway with that field as an empty string "". A row with one empty field is far better than a missing row.
 
-COMMON ERRORS TO AVOID:
-- Pipe lengths: Don't confuse 11' (11 feet) with 11" (11 inches = 0.92 feet). The apostrophe (') means FEET, the double-quote (") means INCHES.
-- CRITICAL: Pipe QTY ALWAYS includes a foot or inch marker (e.g. 5'-3", 22'-6", 0'-8"). NEVER output a bare integer for pipe qty — the marker is REQUIRED so the system knows whether it is feet or inches.
-- Pipe lengths: 3'-4" means 3 feet 4 inches, NOT 34. 10'-2" means 10 feet 2 inches. 0'-8" means 8 inches = 0.67 feet.
-- A pipe qty WITHOUT a unit marker is invalid — always output the marker. If unreadable, output empty string "".
-- IF YOU CANNOT READ THE QTY CELL: output qty="" (empty string). The system will flag the row for the estimator to review against the drawing. This is FAR BETTER than guessing or substituting a value from another column. Do NOT default to qty="1" or copy the size into qty when the actual qty cell is unreadable.
-- Size column: 1-1/2" is a valid pipe size (one and a half inches). Don't misread as 1" or 11/2".
-- NPS sizes: The ONLY valid NPS sizes are: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". If you read something else, you probably misread it.
-- Bolt sizes like 5/8"x4" or 3/4"x4 1/4" are bolt diameter x length, NOT pipe sizes.
-- QTY for pipe is ALWAYS a length (feet-inches). QTY for everything else is ALWAYS a count (integer).
-- Don't confuse item numbers (NO. column) with quantities (QTY column). The NO. column is just a line number.
-- SHOP items are fabricated in a shop. FIELD items are installed in the field. Read both tables.
-- If a row has empty QTY, SIZE, or DESCRIPTION cells, skip it — it's a header or separator.
+=== QTY RULES ===
+The QTY column contains either a length (for pipe) or an integer count (for everything else). Copy the value exactly as printed. Do not convert units, do not do math, do not infer missing units.
 
-VALIDATION — before returning, verify each item:
-(a) QTY is either a feet-inches length for pipe OR an integer count for non-pipe.
-(b) SIZE is a valid NPS or bolt size from the lists above.
-(c) DESCRIPTION starts with a material type keyword (PIPE, ELBOW, TEE, FLANGE, VALVE, GASKET, BOLT, STUD, REDUCER, CAP, etc.)
-Double-check your work before returning. Review each item and fix any obvious errors.
+- PIPE rows: QTY is a length like 16'-8", 3'-0", 22'-6", or 0'-8". The apostrophe (') means feet, the double-quote (") means inches. Copy it EXACTLY (e.g. qty: "16'-8\"").
+- FITTING / VALVE / BOLT / GASKET rows: QTY is a small integer (1, 2, 3, 4, 6, 8, 12, etc.). Distinguish 1 from 4 from 8 carefully.
+- If the QTY cell is empty or unreadable, output qty: "".
 
-ISO DRAWING NUMBER:
-Every piping isometric has a drawing number in the title block (usually bottom-right corner).
-This is a formatted identifier like "1"-150E-080-WW-4805-600" or "4"-150A2-10S-P-1000-500" or "6-300B-CS-P-2001".
-It typically includes: pipe size, pressure class, material code, line number, and sequence number.
-Extract this drawing number for each page and include it as "drawingNumber" in the page output.
-Look in the bottom-right title block area of the drawing. If you cannot find it, set "drawingNumber" to null.
+Note: the SIZE column is BEFORE the QTY column in the table layout. The pipe QTY is the length, not the size. (Post-processing will catch if size and qty get swapped, so don't drop the row out of caution — just output what you read.)
 
-WELD SYMBOL COUNTING:
-On piping isometrics, welds are shown as symbols on the drawing:
-- Filled/solid black dots (●) = BUTT WELDS (BW)
-- Open/hollow circles (○) = SOCKET WELDS (SW)
-- Small triangles or arrows at connections = FIELD WELDS (FW)
-Count ALL weld symbols visible on the drawing for each page. Include the count in your output as:
-"weldCount": {"buttWelds": NUMBER, "socketWelds": NUMBER, "fieldWelds": NUMBER}
-This is used to verify against the BOM-inferred weld count. Count carefully.
+=== SIZE RULES ===
+- Valid NPS sizes: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". Sizes never exceed 48".
+- 1-1/2" is one-and-a-half inches (do not misread as 1" or 11/2").
+- Reducers: two sizes like 6"x4" or 2"x1".
+- Bolts: diameter x length like 5/8"x4" or 3/4"x4 1/4".
 
-CONTINUATION REFERENCES — CRITICAL FOR AVOIDING DOUBLE COUNTING:
-Isometric drawings show continuation callouts where a pipe line leaves one sheet and continues on another.
-These callouts look like:
-- "CONT'D FROM DWG# 4"-150A2-10S-PA-9100-600-2" (this sheet receives the continuation)
-- "CONT'D TO DWG# 4"-150A2-10S-PA-9100-600-3" (this sheet sends to another)
-- "CONT'D ON DWG xxx" or "CONT FROM DWG xxx"
-- The callout includes the referenced drawing number, and often coordinates (E, N, EL values)
+=== DESCRIPTION RULES ===
+Copy the FULL text. Join wrapped lines with spaces. Include all specs (ASME B16.xx, ASTM Axxx, CLASS xxxx, SCH xx, etc.).
 
-When you find these continuation callouts:
-1. Include them in the "continuations" array with direction ("from" or "to") and the referenced drawing number
-2. The fitting AT the continuation point (the last/first fitting where the line connects between sheets) EXISTS IN BOTH SHEETS' BOM TABLES — but it is ONE physical fitting, not two.
-3. Mark that specific fitting with "atContinuation": true so the system can deduplicate it.
-4. The fitting at a continuation point is typically the item closest to the continuation callout — usually an elbow, tee, reducer, coupling, or flange at the boundary.
-5. Look at the BOM table: the item that corresponds to where the continuation callout is located should be flagged.
+=== SMALL-BORE COMPLETENESS (1", 3/4", 1/2") ===
+Small-bore fittings are the second-most-commonly missed items after PIPE rows. Common patterns:
+- Drain/vent assemblies: SOCKOLET + NIPPLE + SW VALVE + CAP, often QTY 4-8 each
+- 1" BALL VALVE / PISTON VALVE / SOCKOLET / SW NIPPLE / SW CAP / SW ELBOW / SW TEE
 
-Return ONLY valid JSON (no markdown fences, no extra text):
-{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}, {"direction": "from", "drawing": "P-1001-500", "sheet": 2}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}`;
+Rules:
+- Read the QTY column carefully on small-bore rows — it's often 3-8, not 1.
+- Do NOT consolidate similar rows. 8 separate "1" SW ELBOW" rows = 8 separate output items.
+- The BOM QTY is the total. Do not multiply by callout count.
 
-const MECHANICAL_CLOUD_PROMPT = `You are an expert at reading piping isometric drawings and identifying REVISION CLOUDS.
+=== WHAT TO SKIP ===
+- Title block, engineer stamps, revision blocks, drawing border text — these are not BOM rows.
+- Header rows / column-name rows that have no NO. value.
+- Drawing graphics, callout bubbles, and match-line annotations — the BOM TABLE is the only source. Callout numbers reference BOM rows; do not multiply by their occurrence count.
+- If a BOM continues onto another sheet ("CONT'D"), only extract THIS sheet's portion of the table. The fitting AT the continuation boundary appears in both sheets' BOMs — mark it with atContinuation: true.
+- If the page has no BOM table at all, return items: [].
 
-For each page, you will see TWO images:
-1. The FULL PAGE isometric drawing (showing the piping, fittings, and any revision clouds)
+=== TITLE BLOCK / DRAWING NUMBER ===
+Look in the bottom-right title block for a drawing number like "1\"-150E-080-WW-4805-600" or "6-300B-CS-P-2001" (size, pressure class, material code, line number, sequence). Output as drawingNumber. If absent, set null.
+
+=== CONTINUATION CALLOUTS ===
+Look for "CONT'D FROM DWG# ..." or "CONT'D TO DWG# ..." callouts. Add to continuations[] with direction ("from" or "to") and the referenced drawing number. The fitting at the boundary (typically an elbow, tee, reducer, or flange) should also have atContinuation: true.
+
+=== WELD COUNTING ===
+On drawings (not BOM crops): count weld symbols visible on the page — filled black dots (BW), open circles (SW), triangles (FW). Output as weldCount: {buttWelds, socketWelds, fieldWelds}. If the image is just a BOM crop with no drawing visible, omit weldCount or set all three to 0.
+
+=== OUTPUT ===
+Return ONLY valid JSON (no markdown fences, no commentary):
+{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}
+
+Final check before returning: count the integers in your row census from Step 1. The items array length must equal that count. If it doesn't, you missed a row — go back and find it.`;
+
+const MECHANICAL_CLOUD_PROMPT = `You are an expert at reading piping isometric drawings AND identifying REVISION CLOUDS. Your job is to produce EXACT, ACCURATE BOM data and flag any items inside revision clouds. Accuracy is critical — this drives material procurement and revision tracking.
+
+For each page, you receive TWO images:
+1. The FULL PAGE isometric drawing (piping, fittings, dimensions, AND any revision clouds)
 2. The CROPPED BOM TABLE from the same page
 
-REVISION CLOUD IDENTIFICATION:
-Revision clouds are wavy/scalloped bubbles or irregular curved outlines drawn around parts of the drawing to indicate changes from the previous revision. They look like bumpy cloud shapes surrounding modified areas.
+=== REVISION CLOUDS ===
+Revision clouds are wavy/scalloped bubbles or irregular curved outlines drawn around parts of the drawing to mark changes from the previous revision.
 
-Your job:
-1. First, extract the BOM exactly as described below.
-2. Then, examine the FULL PAGE drawing for any REVISION CLOUDS.
-3. For each BOM item, determine whether the corresponding component on the drawing is INSIDE a revision cloud.
-4. An item is "clouded" if:
-   - Its corresponding piping/fitting/valve on the drawing is enclosed in or touched by a revision cloud
-   - Its BOM table row itself is enclosed in a revision cloud
-   - The dimension, routing, or connection point it represents was changed (shown by a cloud)
-5. If NO revision clouds exist on the page, mark all items as clouded=false.
-6. CONFIDENCE: For each item, provide a cloudConfidence score (0-100):
-   - 90-100: Item is clearly inside/outside a cloud, no ambiguity
-   - 70-89: Item is near a cloud boundary, likely correct
-   - 50-69: Ambiguous — item is partially overlapping or near a cloud
-   - Below 50: Uncertain — flag for manual review
+For each BOM item, mark clouded:true if any of these are true:
+- The item's piping / fitting / valve on the drawing is enclosed in or touched by a revision cloud
+- The item's BOM row itself is enclosed in a revision cloud
+- The item's dimension or routing was changed (shown by a cloud)
 
-BOM EXTRACTION RULES:
-1. Read every cell EXACTLY as printed. Do NOT guess, round, estimate, or infer values.
-2. QTY column:
-   - For PIPE: QTY is a length in feet-inches format like 16'-8" or 3'-0" or 22'-6". Copy EXACTLY.
-   - For fittings/valves/bolts/gaskets: QTY is a simple integer (1, 2, 4, 8, etc.).
-   - DO NOT convert units. Just copy what is printed.
-   *** ANTI-PATTERN — DO NOT COPY THE SIZE COLUMN INTO QTY ***
-   For pipe rows, the QTY is ALWAYS a length with feet-inches markers (5'-3", 22'-6"). NEVER copy a bare integer (1, 2, 4) that equals the pipe size — that is the SIZE column, not QTY. If the QTY cell is empty or unreadable, output qty="" (empty string).
-3. SIZE column:
-   - Piping sizes: 1/2", 3/4", 1", 1-1/2", 2", 3", 4", 6", 8", 10", 12", etc.
-   - Reducers: 6"x4", 2"x1", etc.
-   - Bolts: 5/8"x3 3/4", 3/4"x4 1/4", etc.
-   - NEVER report pipe sizes larger than 48".
-4. DESCRIPTION: Copy the FULL text including all specs.
-5. Include ALL rows from BOTH SHOP and FIELD tables.
-6. SKIP: title block text, engineer stamps, notes, drawing borders.
+Provide cloudConfidence (0-100) for each item:
+- 90-100: clearly inside or outside a cloud, no ambiguity
+- 70-89: near a cloud boundary, likely correct
+- 50-69: ambiguous, partially overlapping
+- below 50: uncertain, flag for manual review
 
-*** DO NOT MISS SMALL-BORE FITTINGS ***
-Small-bore (1/2", 3/4", 1", 2") items are commonly missed:
-- Read EVERY ROW of the BOM, including all small-bore SW fittings
-- Output ALL item numbers in the NO. column — do not skip any
-- WATCH FOR DRAIN/VENT SUBASSEMBLIES: sockolet + nipple + SW valve + cap — these often have QTY 4-8 in a single BOM row. Copy QTY EXACTLY.
-- 1" BALL VALVE SW, 1" SOCKOLET, 1" PIPE NIPPLE, 1" SW CAP — these are FREQUENTLY MISSED row types. Look specifically for them.
-- DO NOT consolidate similar items. 8x separate "1" SW ELBOW" rows = 8 separate output items.
-- Each BOM row = 1 output item with its exact qty
+If there are no revision clouds on the page, set clouded:false and cloudConfidence:100 for every item.
 
-AVOID DOUBLE COUNTING:
-- Extract ONLY from the BOM TABLE. Do NOT count items from the isometric drawing graphic or callout bubbles.
-- Callout numbers on the drawing reference BOM items. The BOM QTY already has the total — don't add extra.
-- Each BOM line item should appear EXACTLY ONCE per page.
+=== STEP 1: ROW CENSUS (do this FIRST for the BOM) ===
+Scan the NO. column of every visible BOM sub-table (SHOP and FIELD) and list every integer you see, in order. Your output "items" array must contain ONE entry per visible numbered row. NEVER skip a numbered row — not even if a cell is unreadable.
 
-COMMON ERRORS TO AVOID:
-- Pipe lengths: Don't confuse 11' (11 feet) with 11" (11 inches = 0.92 feet). The apostrophe (') means FEET, the double-quote (") means INCHES.
-- CRITICAL: Pipe QTY ALWAYS includes a foot or inch marker (e.g. 5'-3", 22'-6", 0'-8"). NEVER output a bare integer for pipe qty — the marker is REQUIRED so the system knows whether it is feet or inches.
-- Pipe lengths: 3'-4" means 3 feet 4 inches, NOT 34. 10'-2" means 10 feet 2 inches. 0'-8" means 8 inches = 0.67 feet.
-- A pipe qty WITHOUT a unit marker is invalid — always output the marker. If unreadable, output empty string "".
-- IF YOU CANNOT READ THE QTY CELL: output qty="" (empty string). The system will flag the row for the estimator to review against the drawing. This is FAR BETTER than guessing or substituting a value from another column. Do NOT default to qty="1" or copy the size into qty when the actual qty cell is unreadable.
-- Size column: 1-1/2" is a valid pipe size (one and a half inches). Don't misread as 1" or 11/2".
-- NPS sizes: The ONLY valid NPS sizes are: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". If you read something else, you probably misread it.
-- Bolt sizes like 5/8"x4" or 3/4"x4 1/4" are bolt diameter x length, NOT pipe sizes.
-- QTY for pipe is ALWAYS a length (feet-inches). QTY for everything else is ALWAYS a count (integer).
-- Don't confuse item numbers (NO. column) with quantities (QTY column). The NO. column is just a line number.
-- SHOP items are fabricated in a shop. FIELD items are installed in the field. Read both tables.
-- If a row has empty QTY, SIZE, or DESCRIPTION cells, skip it — it's a header or separator.
+Row 1 of the SHOP section is almost always PIPE. If you cannot find a PIPE row but you see fittings (elbow, tee, flange, reducer, valve), look harder — you almost certainly missed it. Output the PIPE row.
 
-WELD SYMBOL COUNTING:
-On piping isometrics, welds are shown as symbols on the drawing:
-- Filled/solid black dots (●) = BUTT WELDS (BW)
-- Open/hollow circles (○) = SOCKET WELDS (SW)
-- Small triangles or arrows at connections = FIELD WELDS (FW)
-Count ALL weld symbols visible on the drawing for each page. Include the count in your output as:
-"weldCount": {"buttWelds": NUMBER, "socketWelds": NUMBER, "fieldWelds": NUMBER}
-This is used to verify against the BOM-inferred weld count. Count carefully.
+=== STEP 2: FIELD EXTRACTION ===
+For every NO. value in the row census, output an item with itemNo, qty, size, description, section ("SHOP" or "FIELD"), clouded, cloudConfidence, and atContinuation.
 
-CONTINUATION REFERENCES — CRITICAL FOR AVOIDING DOUBLE COUNTING:
-Isometric drawings show continuation callouts where a pipe line leaves one sheet and continues on another.
-These callouts look like:
-- "CONT'D FROM DWG# 4"-150A2-10S-PA-9100-600-2" (this sheet receives the continuation)
-- "CONT'D TO DWG# 4"-150A2-10S-PA-9100-600-3" (this sheet sends to another)
-- "CONT'D ON DWG xxx" or "CONT FROM DWG xxx"
-- The callout includes the referenced drawing number, and often coordinates (E, N, EL values)
+If any single cell is unreadable or empty, output the row anyway with that field as an empty string "".
 
-When you find these continuation callouts:
-1. Include them in the "continuations" array with direction ("from" or "to") and the referenced drawing number
-2. The fitting AT the continuation point EXISTS IN BOTH SHEETS' BOM TABLES — but it is ONE physical fitting, not two.
-3. Mark that specific fitting with "atContinuation": true so the system can deduplicate it.
+=== QTY RULES ===
+Copy the QTY value exactly as printed. Do not convert units, do not infer.
+- PIPE rows: a length like 16'-8", 22'-6", 0'-8". The apostrophe (') means feet, double-quote (") means inches.
+- FITTING / VALVE / BOLT / GASKET rows: a small integer (1, 2, 3, 4, 6, 8, etc.).
+- If the cell is unreadable, output qty: "".
 
-VALIDATION — before returning, verify each item:
-(a) QTY is either a feet-inches length for pipe OR an integer count for non-pipe.
-(b) SIZE is a valid NPS or bolt size from the lists above.
-(c) DESCRIPTION starts with a material type keyword (PIPE, ELBOW, TEE, FLANGE, VALVE, GASKET, BOLT, STUD, REDUCER, CAP, etc.)
-Double-check your work before returning. Review each item and fix any obvious errors.
+=== SIZE RULES ===
+Valid NPS sizes only: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". Reducers: "6\"x4\"". Bolts: diameter x length like 5/8"x4".
 
-Return ONLY valid JSON (no markdown fences, no extra text):
-{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "16'-8\\"", "size": "1\\"", "description": "PIPE, SMLS, BE, SCH 10S, ASME B36.19, SS ASTM A312", "section": "SHOP", "clouded": false, "cloudConfidence": 95, "atContinuation": false}]}]}`;
+=== SMALL-BORE COMPLETENESS ===
+Small-bore SW fittings (1", 3/4", 1/2") are commonly missed. Read every row. Drain/vent assemblies (sockolet + nipple + SW valve + cap) typically have QTY 4-8 each — read the QTY column carefully. Do not consolidate similar rows.
+
+=== WHAT TO SKIP / AVOID DOUBLE COUNTING ===
+- Extract from the BOM table only. Drawing graphics, callout bubbles, and match-line annotations are not BOM rows.
+- Callout numbers on the drawing reference BOM rows; do not multiply by their occurrence count.
+- For continuation callouts ("CONT'D FROM/TO DWG# ..."), only extract this sheet's portion. The fitting at the boundary appears in both BOMs — mark atContinuation:true so post-processing can dedup.
+
+=== WELD COUNTING ===
+Count weld symbols on the FULL PAGE drawing (not the BOM crop): filled black dots = butt welds, open circles = socket welds, small triangles = field welds. Output as weldCount: {buttWelds, socketWelds, fieldWelds}.
+
+=== TITLE BLOCK / DRAWING NUMBER ===
+Look in the bottom-right title block for a drawing number like "1\"-150E-080-WW-4805-600". Output as drawingNumber. If absent, set null.
+
+=== OUTPUT ===
+Return ONLY valid JSON (no markdown fences):
+{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "16'-8\\"", "size": "1\\"", "description": "PIPE, SMLS, BE, SCH 10S, ASME B36.19, SS ASTM A312", "section": "SHOP", "clouded": false, "cloudConfidence": 95, "atContinuation": false}]}]}
+
+Final check before returning: count the integers in your row census from Step 1. The items array length must equal that count. If it doesn't, you missed a row — go back and find it.`;
 
 // ============================================================
 // MECHANICAL VERIFICATION PROMPT (Multi-Pass)
@@ -1063,7 +1020,7 @@ async function extractBatchWithGemini(
 }
 
 async function extractWithVision(
-  pageImages: { pageNum: number; imagePath: string }[],
+  pageImages: { pageNum: number; imagePath: string; pdfText?: string }[],
   prompt: string,
   discipline: string
 ): Promise<{ results: Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>; authFailures: number }> {
@@ -1107,6 +1064,17 @@ async function extractWithVision(
       const b64 = imgData.toString("base64");
       content.push({ type: "image" as const, source: { type: "base64" as const, media_type: "image/png", data: b64 } });
       content.push({ type: "text" as const, text: `[PAGE ${page.pageNum}]` });
+      // Optional PDF text hint: if the PDF has embedded vector text (CAD-exported
+      // ISOs typically do), pass it as evidence — the model treats this as a
+      // high-quality OCR result and is much less likely to drop rows. Only add
+      // when the text actually contains BOM-shaped content to avoid noise.
+      if (page.pdfText && page.pdfText.length > 50) {
+        const trimmed = page.pdfText.length > 6000 ? page.pdfText.substring(0, 6000) + "\n[\u2026truncated]" : page.pdfText;
+        content.push({
+          type: "text" as const,
+          text: `[PAGE ${page.pageNum} \u2014 PDF embedded text, treat as evidence not authority; the image is still the source of truth]\n${trimmed}`,
+        });
+      }
     }
 
     content.push({ type: "text" as const, text: prompt });
@@ -1539,7 +1507,7 @@ async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "
 
 
 async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promise<{
-  pageImages: { pageNum: number; imagePath: string; tesseractText: string }[];
+  pageImages: { pageNum: number; imagePath: string; tesseractText: string; pdfText?: string }[];
   jobDir: string;
 }> {
   const jobDir = path.join(RENDER_DIR, Date.now().toString());
@@ -1563,7 +1531,15 @@ async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promi
 
     await processRenderedPages(jobDir, "bom");
 
-  const pageImages: { pageNum: number; imagePath: string; tesseractText: string }[] = [];
+  // Probe whether the PDF has embedded vector text. If yes, we will pull the
+  // per-page text and pass it to the extractor as evidence — this dramatically
+  // reduces row-skip errors on CAD-exported ISOs (which is most of them).
+  const hasVectorText = pdfHasVectorText(pdfPath, pageCount);
+  if (hasVectorText) {
+    console.log(`  PDF has embedded vector text \u2014 will pass per-page text to extractor as evidence`);
+  }
+
+  const pageImages: { pageNum: number; imagePath: string; tesseractText: string; pdfText?: string }[] = [];
   const padLen = Math.max(2, String(pageCount).length);
 
   for (let p = 1; p <= pageCount; p++) {
@@ -1573,7 +1549,8 @@ async function renderCroppedBomImages(pdfPath: string, pageCount: number): Promi
     let tesseractText = "";
     if (fs.existsSync(ocrFile)) tesseractText = fs.readFileSync(ocrFile, "utf-8");
     if (fs.existsSync(bomImg) && !isTitlePage(tesseractText)) {
-      pageImages.push({ pageNum: p, imagePath: bomImg, tesseractText });
+      const pdfText = hasVectorText ? extractPageText(pdfPath, p) : "";
+      pageImages.push({ pageNum: p, imagePath: bomImg, tesseractText, pdfText });
     }
   }
 
