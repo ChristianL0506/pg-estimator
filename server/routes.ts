@@ -640,36 +640,48 @@ const MECHANICAL_PROMPT = `You are an expert at reading BOM (Bill of Materials) 
 
 The image is a piping isometric drawing page (or a cropped BOM area from one). The BOM has SHOP and FIELD sub-tables, both with columns: NO. | QTY | SIZE | DESCRIPTION
 
-=== STEP 1: ROW CENSUS (do this FIRST) ===
-Before extracting fields, scan the NO. column of every visible BOM sub-table and list every integer you see, in order, for each section (SHOP and FIELD). Your output "items" array must contain ONE entry per visible numbered row. NEVER skip a numbered row — not even if a cell is unreadable, not even if the row appears different (PIPE rows often look different from fitting rows).
+=== ABSOLUTE RULE: NEVER DROP A NUMBERED ROW ===
+This is the most important rule in this prompt. Output one item for every numbered row you can see in the BOM — NO EXCEPTIONS. If a cell is hard to read, fill it with the fallback value below; do NOT omit the row. The estimator can fix a wrong field; they cannot fix a missing row.
 
-Row 1 of the SHOP section is almost always PIPE. If you cannot find a PIPE row but you see fittings (elbow, tee, flange, reducer, valve), look harder — you almost certainly missed it. PIPE rows are commonly missed because:
-- The QTY is a length like 38'-1" or 22'-6" instead of an integer
-- The DESCRIPTION wraps across multiple visual lines
-- The row sits at the very top of the table
-Look again. Output the PIPE row.
+Fallback values when a cell is unreadable:
+- itemNo unreadable: copy the row's position (1, 2, 3...) anyway
+- qty unreadable on a PIPE row: output qty: "0'-0\"" (post-processing will flag for drawing review)
+- qty unreadable on a fitting/valve/bolt/gasket row: output qty: "1"
+- size unreadable: output size: ""
+- description unreadable: output description: "PIPE" (or appropriate category from visible icons)
 
-=== STEP 2: FIELD EXTRACTION (one entry per numbered row) ===
-For every NO. value in the row census, output an item with:
+A row with one wrong field is FAR BETTER than a missing row. Never decide "I'm not sure, so I'll skip it." Always extract.
 
-- itemNo: the integer from the NO. column
-- qty: the value EXACTLY as printed in the QTY cell (see QTY rules below)
-- size: the value from the SIZE column
-- description: the FULL description text, joining wrapped lines with spaces
-- section: "SHOP" or "FIELD"
+=== ROW CENSUS (do this BEFORE extracting fields) ===
+First, scan the NO. column of every visible BOM sub-table (SHOP and FIELD) and count the numbered rows. Your output "items" array length must equal this count.
 
-If any single cell is unreadable or empty, output the row anyway with that field as an empty string "". A row with one empty field is far better than a missing row.
+Row 1 of the SHOP section is ALMOST ALWAYS a PIPE row. If you see fittings (elbow, tee, flange, reducer, valve, gasket, bolt) but no PIPE row, look harder — you missed it. The PIPE row gets dropped most often because:
+- Its QTY is a length like "40'-9\"" or "6'-6\"" instead of an integer
+- Its DESCRIPTION wraps across multiple visual lines
+- It sits at the very top of the table near the crop edge
 
-=== QTY RULES ===
-The QTY column contains either a length (for pipe) or an integer count (for everything else). Copy the value exactly as printed. Do not convert units, do not do math, do not infer missing units.
+If you cannot find the PIPE row's QTY clearly, still output the row with qty: "0'-0\"" and the description you can read. DO NOT skip the row.
 
-- PIPE rows: QTY is a length like 16'-8", 3'-0", 22'-6", or 0'-8". The apostrophe (') means feet, the double-quote (") means inches. Copy it EXACTLY (e.g. qty: "16'-8\"").
-- FITTING / VALVE / BOLT / GASKET rows: QTY is a small integer (1, 2, 3, 4, 6, 8, 12, etc.). Distinguish 1 from 4 from 8 carefully.
-- If the QTY cell is empty or unreadable, output qty: "".
+=== FIELD EXTRACTION ===
+For every numbered row, output: itemNo (integer), qty (string), size (string), description (string), section ("SHOP" or "FIELD").
 
-Note: the SIZE column is BEFORE the QTY column in the table layout. The pipe QTY is the length, not the size. (Post-processing will catch if size and qty get swapped, so don't drop the row out of caution — just output what you read.)
+=== QTY COLUMN RULES ===
+The QTY column has TWO formats depending on the row:
 
-=== SIZE RULES ===
+1. PIPE rows: a length with feet/inch markers — like "16'-8\"", "40'-9\"", "3'-0\"", "22'-6\"", "0'-8\"". The apostrophe (') means feet, double-quote (") means inches. Copy EXACTLY as printed. The marker is REQUIRED.
+
+2. FITTING / VALVE / BOLT / GASKET rows: a small integer like 1, 2, 3, 4, 6, 8, 12. Distinguish 1 from 4 from 8 carefully.
+
+COMMON ERROR — do not copy the SIZE into the QTY for pipe rows:
+- The SIZE column comes BEFORE the QTY column in the table layout.
+- For a 4" pipe row, qty is a LENGTH (like "40'-9\""), NOT "4".
+- For an 8" pipe row, qty is a LENGTH (like "6'-6\""), NOT "8".
+- If you find yourself about to output qty="4" for a 4" pipe, STOP — that's the size, not the quantity. Look one column to the right for the actual QTY.
+- If the actual QTY cell is too unclear to read confidently, output qty: "0'-0\"" and continue — do NOT substitute the size value, but do NOT drop the row either.
+
+Do not convert units, do not do math, do not infer missing markers.
+
+=== SIZE COLUMN RULES ===
 - Valid NPS sizes: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". Sizes never exceed 48".
 - 1-1/2" is one-and-a-half inches (do not misread as 1" or 11/2").
 - Reducers: two sizes like 6"x4" or 2"x1".
@@ -679,36 +691,40 @@ Note: the SIZE column is BEFORE the QTY column in the table layout. The pipe QTY
 Copy the FULL text. Join wrapped lines with spaces. Include all specs (ASME B16.xx, ASTM Axxx, CLASS xxxx, SCH xx, etc.).
 
 === SMALL-BORE COMPLETENESS (1", 3/4", 1/2") ===
-Small-bore fittings are the second-most-commonly missed items after PIPE rows. Common patterns:
-- Drain/vent assemblies: SOCKOLET + NIPPLE + SW VALVE + CAP, often QTY 4-8 each
-- 1" BALL VALVE / PISTON VALVE / SOCKOLET / SW NIPPLE / SW CAP / SW ELBOW / SW TEE
+Small-bore fittings are commonly missed alongside PIPE rows. Watch for:
+- Drain/vent assemblies: SOCKOLET + NIPPLE + SW VALVE + CAP, often QTY 4-8 each per BOM row
+- 1" BALL VALVE SW, 1" SOCKOLET, 1" SW NIPPLE, 1" SW CAP, 1" SW ELBOW / TEE
 
-Rules:
-- Read the QTY column carefully on small-bore rows — it's often 3-8, not 1.
-- Do NOT consolidate similar rows. 8 separate "1" SW ELBOW" rows = 8 separate output items.
-- The BOM QTY is the total. Do not multiply by callout count.
+Read the QTY column carefully on small-bore rows — it's often 3-8, not 1.
+Do NOT consolidate similar rows. 8 separate "1\" SW ELBOW" rows = 8 separate output items.
+The BOM QTY is the total. Do not multiply by callout occurrence count.
 
 === WHAT TO SKIP ===
-- Title block, engineer stamps, revision blocks, drawing border text — these are not BOM rows.
+- Title block, engineer stamps, revision blocks, drawing border text — not BOM rows.
 - Header rows / column-name rows that have no NO. value.
-- Drawing graphics, callout bubbles, and match-line annotations — the BOM TABLE is the only source. Callout numbers reference BOM rows; do not multiply by their occurrence count.
-- If a BOM continues onto another sheet ("CONT'D"), only extract THIS sheet's portion of the table. The fitting AT the continuation boundary appears in both sheets' BOMs — mark it with atContinuation: true.
-- If the page has no BOM table at all, return items: [].
+- Drawing graphics, callout bubbles, match-line annotations — the BOM TABLE is the only source.
+- If a BOM continues onto another sheet ("CONT'D"), only extract THIS sheet's portion. The fitting AT the continuation boundary appears in both sheets' BOMs — mark it with atContinuation: true.
+- If the page has NO BOM table at all (only the isometric drawing), return items: [].
 
 === TITLE BLOCK / DRAWING NUMBER ===
-Look in the bottom-right title block for a drawing number like "1\"-150E-080-WW-4805-600" or "6-300B-CS-P-2001" (size, pressure class, material code, line number, sequence). Output as drawingNumber. If absent, set null.
+Look in the bottom-right title block for a drawing number like "1\"-150E-080-WW-4805-600" or "6-300B-CS-P-2001". Output as drawingNumber. If absent, set null.
 
 === CONTINUATION CALLOUTS ===
-Look for "CONT'D FROM DWG# ..." or "CONT'D TO DWG# ..." callouts. Add to continuations[] with direction ("from" or "to") and the referenced drawing number. The fitting at the boundary (typically an elbow, tee, reducer, or flange) should also have atContinuation: true.
+Look for "CONT'D FROM DWG# ..." or "CONT'D TO DWG# ..." callouts. Add to continuations[] with direction ("from" or "to") and the referenced drawing number. The fitting at the boundary should have atContinuation: true.
 
 === WELD COUNTING ===
-On drawings (not BOM crops): count weld symbols visible on the page — filled black dots (BW), open circles (SW), triangles (FW). Output as weldCount: {buttWelds, socketWelds, fieldWelds}. If the image is just a BOM crop with no drawing visible, omit weldCount or set all three to 0.
+On drawings (not BOM-only crops): count weld symbols — filled black dots (BW), open circles (SW), triangles (FW). Output as weldCount: {buttWelds, socketWelds, fieldWelds}. If only the BOM is visible, set all three to 0.
 
-=== OUTPUT ===
+=== OUTPUT FORMAT ===
 Return ONLY valid JSON (no markdown fences, no commentary):
-{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "16'-8\"", "size": "1\"", "description": "PIPE, SMLS, BE OR PE, SCH 80, ASME B36.10, CS ASTM A106, GRD B", "section": "SHOP", "atContinuation": false}]}]}
+{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "40'-9\"", "size": "4\"", "description": "PIPE, PE, SCH 40, ASTM A53, TYPE E, GRD B", "section": "SHOP", "atContinuation": false}]}]}
 
-Final check before returning: count the integers in your row census from Step 1. The items array length must equal that count. If it doesn't, you missed a row — go back and find it.`;
+=== FINAL SELF-CHECK (do this before returning) ===
+1. Did you count the visible numbered rows in the BOM?
+2. Does items.length equal that count?
+3. Is there a PIPE row in items? (Almost every page has one. If items has fittings but no pipe row, you missed it — go back and add it. Use qty: "0'-0\"" if you cannot read the length.)
+
+If any check fails, fix it before returning. NEVER return a result with a missing numbered row.`;
 
 const MECHANICAL_CLOUD_PROMPT = `You are an expert at reading piping isometric drawings AND identifying REVISION CLOUDS. Your job is to produce EXACT, ACCURATE BOM data and flag any items inside revision clouds. Accuracy is critical — this drives material procurement and revision tracking.
 
@@ -732,44 +748,68 @@ Provide cloudConfidence (0-100) for each item:
 
 If there are no revision clouds on the page, set clouded:false and cloudConfidence:100 for every item.
 
-=== STEP 1: ROW CENSUS (do this FIRST for the BOM) ===
-Scan the NO. column of every visible BOM sub-table (SHOP and FIELD) and list every integer you see, in order. Your output "items" array must contain ONE entry per visible numbered row. NEVER skip a numbered row — not even if a cell is unreadable.
+=== ABSOLUTE RULE: NEVER DROP A NUMBERED BOM ROW ===
+This is the most important rule. Output one item for every numbered row in the BOM — NO EXCEPTIONS. If a cell is hard to read, fill with the fallback below; do NOT omit the row.
 
-Row 1 of the SHOP section is almost always PIPE. If you cannot find a PIPE row but you see fittings (elbow, tee, flange, reducer, valve), look harder — you almost certainly missed it. Output the PIPE row.
+Fallback values when a cell is unreadable:
+- itemNo unreadable: copy the row's position (1, 2, 3...) anyway
+- qty unreadable on a PIPE row: output qty: "0'-0\"" (post-processing flags for review)
+- qty unreadable on a fitting/valve/bolt/gasket row: output qty: "1"
+- size unreadable: output size: ""
+- description unreadable: output description: "PIPE" (or appropriate category)
 
-=== STEP 2: FIELD EXTRACTION ===
-For every NO. value in the row census, output an item with itemNo, qty, size, description, section ("SHOP" or "FIELD"), clouded, cloudConfidence, and atContinuation.
+A row with one wrong field is FAR BETTER than a missing row.
 
-If any single cell is unreadable or empty, output the row anyway with that field as an empty string "".
+=== ROW CENSUS (do this BEFORE extracting fields) ===
+First, scan the NO. column of every visible BOM sub-table (SHOP and FIELD) and count the numbered rows. Your output "items" array length must equal this count.
 
-=== QTY RULES ===
-Copy the QTY value exactly as printed. Do not convert units, do not infer.
-- PIPE rows: a length like 16'-8", 22'-6", 0'-8". The apostrophe (') means feet, double-quote (") means inches.
-- FITTING / VALVE / BOLT / GASKET rows: a small integer (1, 2, 3, 4, 6, 8, etc.).
-- If the cell is unreadable, output qty: "".
+Row 1 of the SHOP section is ALMOST ALWAYS PIPE. If you see fittings but no PIPE row, look harder — you missed it. If you cannot read the PIPE row's QTY clearly, still output the row with qty: "0'-0\"" and the description you can read.
+
+=== FIELD EXTRACTION ===
+For every numbered row, output: itemNo (integer), qty (string), size (string), description (string), section ("SHOP" or "FIELD"), clouded (boolean), cloudConfidence (0-100), atContinuation (boolean).
+
+=== QTY COLUMN RULES ===
+1. PIPE rows: a length with feet/inch markers — like "16'-8\"", "40'-9\"", "3'-0\"", "22'-6\"". The apostrophe (') means feet, double-quote (") means inches. Copy EXACTLY.
+2. FITTING / VALVE / BOLT / GASKET rows: a small integer like 1, 2, 3, 4, 6, 8, 12.
+
+Do NOT copy the SIZE into the QTY for pipe rows:
+- For a 4" pipe row, qty is a LENGTH like "40'-9\"", NOT "4".
+- For an 8" pipe row, qty is a LENGTH like "6'-6\"", NOT "8".
+- If the QTY cell is unclear, output qty: "0'-0\"" — do NOT substitute the size, but do NOT drop the row.
 
 === SIZE RULES ===
 Valid NPS sizes only: 1/2", 3/4", 1", 1-1/4", 1-1/2", 2", 2-1/2", 3", 4", 6", 8", 10", 12", 14", 16", 18", 20", 24", 30", 36", 42", 48". Reducers: "6\"x4\"". Bolts: diameter x length like 5/8"x4".
 
 === SMALL-BORE COMPLETENESS ===
-Small-bore SW fittings (1", 3/4", 1/2") are commonly missed. Read every row. Drain/vent assemblies (sockolet + nipple + SW valve + cap) typically have QTY 4-8 each — read the QTY column carefully. Do not consolidate similar rows.
+Small-bore SW fittings (1", 3/4", 1/2") are commonly missed. Drain/vent assemblies (sockolet + nipple + SW valve + cap) typically have QTY 4-8 each — read the QTY column carefully. Do not consolidate similar rows.
 
 === WHAT TO SKIP / AVOID DOUBLE COUNTING ===
-- Extract from the BOM table only. Drawing graphics, callout bubbles, and match-line annotations are not BOM rows.
-- Callout numbers on the drawing reference BOM rows; do not multiply by their occurrence count.
-- For continuation callouts ("CONT'D FROM/TO DWG# ..."), only extract this sheet's portion. The fitting at the boundary appears in both BOMs — mark atContinuation:true so post-processing can dedup.
+- Extract from the BOM table only. Drawing graphics, callout bubbles, match-line annotations are not BOM rows.
+- Callout numbers reference BOM rows; do not multiply by their occurrence count.
+- For continuation callouts, only extract this sheet's portion. The fitting at the boundary should have atContinuation:true.
+
+=== REVISION CLOUDS ===
+Revision clouds are wavy/scalloped bubbles around changed parts of the drawing. For each BOM item, set clouded:true if its piping/fitting/BOM row is inside or touched by a revision cloud, else false.
+
+Provide cloudConfidence (0-100): 90+ clear, 70-89 likely, 50-69 ambiguous, <50 uncertain.
+If no clouds on the page, set clouded:false and cloudConfidence:100 for every item.
 
 === WELD COUNTING ===
-Count weld symbols on the FULL PAGE drawing (not the BOM crop): filled black dots = butt welds, open circles = socket welds, small triangles = field welds. Output as weldCount: {buttWelds, socketWelds, fieldWelds}.
+Count weld symbols on the FULL PAGE drawing: filled dots = butt welds, open circles = socket welds, triangles = field welds. Output as weldCount: {buttWelds, socketWelds, fieldWelds}.
 
 === TITLE BLOCK / DRAWING NUMBER ===
-Look in the bottom-right title block for a drawing number like "1\"-150E-080-WW-4805-600". Output as drawingNumber. If absent, set null.
+Look in the bottom-right title block for a drawing number. Output as drawingNumber, or null.
 
 === OUTPUT ===
 Return ONLY valid JSON (no markdown fences):
-{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "16'-8\\"", "size": "1\\"", "description": "PIPE, SMLS, BE, SCH 10S, ASME B36.19, SS ASTM A312", "section": "SHOP", "clouded": false, "cloudConfidence": 95, "atContinuation": false}]}]}
+{"pages": [{"pageNum": PAGE_NUMBER, "drawingNumber": "1\\"-150E-080-WW-4805-600", "weldCount": {"buttWelds": 12, "socketWelds": 3, "fieldWelds": 2}, "continuations": [{"direction": "to", "drawing": "P-1001-500", "sheet": 4}], "items": [{"itemNo": 1, "qty": "40'-9\\"", "size": "4\\"", "description": "PIPE, PE, SCH 40, ASTM A53, TYPE E, GRD B", "section": "SHOP", "clouded": false, "cloudConfidence": 100, "atContinuation": false}]}]}
 
-Final check before returning: count the integers in your row census from Step 1. The items array length must equal that count. If it doesn't, you missed a row — go back and find it.`;
+=== FINAL SELF-CHECK ===
+1. Did you count the visible numbered rows in the BOM?
+2. Does items.length equal that count?
+3. Is there a PIPE row in items? (If items has fittings but no pipe row, you missed it — add it with qty: "0'-0\"" if unreadable.)
+
+NEVER return a result with a missing numbered row.`;
 
 // ============================================================
 // MECHANICAL VERIFICATION PROMPT (Multi-Pass)
