@@ -1450,7 +1450,7 @@ function isTesseractAvailable(): boolean {
   return _tesseractAvailable;
 }
 
-async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "ocr-only"): Promise<void> {
+async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "ocr-only" | "fullpage"): Promise<void> {
   const files = fs.readdirSync(jobDir).filter(f => f.endsWith(".png") && !f.includes("_bom") && !f.includes("_full") && !f.includes("_ocr"));
   // Reduce concurrency to limit peak memory usage (ImageMagick is memory-hungry)
   const CONCURRENCY = 2;
@@ -1462,6 +1462,23 @@ async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "
       const imgPath = path.join(jobDir, imgFile);
       const basename = imgFile.replace(/\.png$/, "");
       try {
+        if (mode === "fullpage") {
+          // No-crop mode: rename original to *_bom.png so downstream lookups
+          // (which always look for `${basename}_bom.png`) just work. This is
+          // the recovery / re-extraction mode — the model gets the entire
+          // page image and locates the BOM itself. Used when the standard
+          // crop has clipped row 1 or another part of the table.
+          const bomPath = path.join(jobDir, `${basename}_bom.png`);
+          try { fs.renameSync(imgPath, bomPath); } catch (e) { console.warn("Suppressed error:", e); return; }
+          // Run OCR on the full page so isTitlePage() filtering still works
+          if (hasTesseract) {
+            const ocrBase = path.join(jobDir, `${basename}_ocr`);
+            try {
+              await execFileAsync("tesseract", [bomPath, ocrBase, "--psm", "4", "-l", "eng"], { timeout: 30000 });
+            } catch (e) { console.warn("Suppressed error:", e); }
+          }
+          return;
+        }
         if (mode === "bom" || mode === "bom+full") {
           // Get image dimensions
           let dims = "";
@@ -1474,9 +1491,16 @@ async function processRenderedPages(jobDir: string, mode: "bom" | "bom+full" | "
           const w = parseInt(dimsMatch[1], 10);
           const h = parseInt(dimsMatch[2], 10);
           if (w < 100 || h < 100) return;
-          const cx = Math.floor(w * 50 / 100);
+          // BOM crop — expanded for row-1 safety after May-8 council review.
+          // Old: right-50% × top-65%, starting at +0,+0 (clipped row 1 on ~30%
+          // of pages because the BOM header sat against the top edge).
+          // New: right-55% × top-80%, still starting at +0,+0 — wider on the
+          // left to capture the NO. column when the BOM sits slightly inset,
+          // and taller on the bottom so the full SHOP+FIELD tables fit even
+          // when the BOM is positioned mid-page.
+          const cx = Math.floor(w * 45 / 100);
           const cw = w - cx;
-          const ch = Math.floor(h * 65 / 100);
+          const ch = Math.floor(h * 80 / 100);
           
           // Crop BOM area
           const bomPath = path.join(jobDir, `${basename}_bom.png`);
@@ -2372,6 +2396,51 @@ function flagPotentialDuplicates(items: any[]): { flaggedCount: number; groups: 
 //
 // Different from pipeQtyBestGuessRetry (which only fixes existing items with
 // qty=0). This recovers ROWS THAT WERE NEVER EXTRACTED.
+//
+// SUPERSEDED (May 2026 council review): pipeRowRecovery is now a fallback. The
+// primary path is detectSuspectPages() + reExtractLowConfidencePages() with
+// renderMode="fullpage", which fixes the same row-1 misses upstream by re-
+// running the full extraction pipeline at 300 DPI on uncropped pages.
+// We keep pipeRowRecovery for safety as a final net but it should rarely fire
+// in practice once the BOM crop expansion + re-extract wiring is live.
+
+// Detects pages whose extracted items show signs of row-1 omission — namely:
+//   * No PIPE-category item on the page (very rare for a real ISO with fittings)
+//   * Or, the lowest-numbered item has itemNo > 1 (gap at the top of the BOM)
+//   * Or, page has fittings (elbow/tee/flange) but zero pipe items
+// Returns the list of suspect global page numbers.
+function detectSuspectPages(items: any[]): number[] {
+  const byPage: Record<number, any[]> = {};
+  for (const it of items) {
+    const p = it.sourcePage;
+    if (typeof p !== "number") continue;
+    if (!byPage[p]) byPage[p] = [];
+    byPage[p].push(it);
+  }
+  const suspect = new Set<number>();
+  for (const [pStr, pageItems] of Object.entries(byPage)) {
+    const p = parseInt(pStr);
+    if (pageItems.length === 0) continue;
+    const cats = pageItems.map(it => (it.category || "").toLowerCase());
+    const hasPipe = cats.includes("pipe");
+    const hasFittings = cats.some(c => ["elbow", "tee", "flange", "reducer", "cap", "valve"].includes(c));
+    // Strong signal: fittings present but no pipe row — row 1 was almost
+    // certainly skipped. Real fitting-only pages exist but are rare.
+    if (hasFittings && !hasPipe) {
+      suspect.add(p);
+      continue;
+    }
+    // Secondary signal: itemNo gap. Most BOMs start at NO. 1. If our lowest
+    // extracted itemNo is > 1, the rows above it were dropped. Skip if the
+    // AI did not return itemNo at all (older code path).
+    const itemNos = pageItems.map(it => it.itemNo).filter((n: any) => typeof n === "number");
+    if (itemNos.length > 0) {
+      const minItemNo = Math.min(...itemNos);
+      if (minItemNo > 1) suspect.add(p);
+    }
+  }
+  return Array.from(suspect).sort((a, b) => a - b);
+}
 
 async function pipeRowRecovery(items: any[], pdfPath: string, startPage: number): Promise<{ recoveredCount: number; pagesScanned: number }> {
   if (!fs.existsSync(pdfPath)) return { recoveredCount: 0, pagesScanned: 0 };
@@ -3166,6 +3235,7 @@ async function extractMechanicalChunk(
           rating: extractRating(entry.description) || undefined,
           notes: `Sheet ${page.globalPageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
+          itemNo: typeof entry.itemNo === "number" ? entry.itemNo : (parseInt(String(entry.itemNo || "")) || undefined),
           drawingNumber: pageDrawingNumber,
           revisionClouded: entry.clouded === true,
           cloudConfidence: entry.cloudConfidence ?? (entry.clouded === true ? 80 : 100),
@@ -3274,6 +3344,7 @@ async function extractMechanicalChunk(
           rating: extractRating(entry.description) || undefined,
           notes: `Sheet ${page.globalPageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""} (${entry.section || "SHOP"})${extraNotes}`,
           sourcePage: page.globalPageNum,
+          itemNo: typeof entry.itemNo === "number" ? entry.itemNo : (parseInt(String(entry.itemNo || "")) || undefined),
           drawingNumber: pageDrawingNumber,
           revisionClouded: entry.clouded === true,
           cloudConfidence: entry.cloudConfidence ?? (entry.clouded === true ? 80 : 100),
@@ -3359,9 +3430,13 @@ async function reExtractLowConfidencePages(
   items: any[],
   pdfPath: string,
   discipline: string,
-  startPage: number
+  startPage: number,
+  options?: { extraPages?: number[]; renderMode?: "bom" | "fullpage"; pageLimit?: number }
 ): Promise<{ reExtractedItems: any[]; reExtractedPages: number[]; warnings: string[] }> {
   const warnings: string[] = [];
+  const extraPages = options?.extraPages || [];
+  const renderMode = options?.renderMode || "bom";
+  const pageLimit = options?.pageLimit ?? 12;
 
   // Group items by page, calculate average confidence per page
   const pageConfidence: Record<number, { total: number; count: number }> = {};
@@ -3378,20 +3453,28 @@ async function reExtractLowConfidencePages(
     .map(([page]) => parseInt(page))
     .sort((a, b) => a - b);
 
-  if (lowConfPages.length === 0) return { reExtractedItems: items, reExtractedPages: [], warnings };
+  // Merge low-confidence pages with caller-supplied suspect pages (e.g. pages
+  // where row 1 is missing or non-PIPE). Dedup and sort.
+  const candidatePages = Array.from(new Set([...lowConfPages, ...extraPages])).sort((a, b) => a - b);
 
-  // Limit to 5 pages max for re-extraction (avoid excessive API cost)
-  const pagesToReExtract = lowConfPages.slice(0, 5);
+  if (candidatePages.length === 0) return { reExtractedItems: items, reExtractedPages: [], warnings };
+
+  // Limit how many pages we re-extract (avoid excessive API cost). Default 12,
+  // up from the old hard-coded 5 — row-1 misses on Area 300 hit ~30% of pages
+  // and a cap of 5 leaves most of them un-recovered.
+  const pagesToReExtract = candidatePages.slice(0, pageLimit);
 
   // Check that PDF still exists for re-rendering
   if (!fs.existsSync(pdfPath)) {
     for (const p of pagesToReExtract) {
-      warnings.push(`Page ${p}: Low avg confidence (${Math.round((pageConfidence[p].total / pageConfidence[p].count))}) — re-extraction skipped (PDF no longer available)`);
+      const conf = pageConfidence[p] ? Math.round(pageConfidence[p].total / pageConfidence[p].count) : null;
+      const reason = conf !== null ? `Low avg confidence (${conf})` : `Suspect page (row 1 missing or non-PIPE)`;
+      warnings.push(`Page ${p}: ${reason} \u2014 re-extraction skipped (PDF no longer available)`);
     }
     return { reExtractedItems: items, reExtractedPages: [], warnings };
   }
 
-  console.log(`  Re-extracting ${pagesToReExtract.length} low-confidence pages at 300 DPI: ${pagesToReExtract.join(", ")}`);
+  console.log(`  Re-extracting ${pagesToReExtract.length} suspect/low-confidence page(s) at 300 DPI (${renderMode}): ${pagesToReExtract.join(", ")}`);
 
   const jobDir = path.join(RENDER_DIR, `reextract_${Date.now()}`);
   fs.mkdirSync(jobDir, { recursive: true });
@@ -3422,8 +3505,10 @@ async function reExtractLowConfidencePages(
     return { reExtractedItems: items, reExtractedPages: [], warnings };
   }
 
-  // Crop BOM tables from the hi-res renders
-  await processRenderedPages(jobDir, "bom");
+  // Crop BOM tables from the hi-res renders. When renderMode is "fullpage"
+  // the model gets the entire page image (no crop) — use this when the
+  // standard crop has clipped row 1.
+  await processRenderedPages(jobDir, renderMode);
 
   // Build page images from cropped BOM files
   const pageImages: { pageNum: number; imagePath: string }[] = [];
@@ -3462,22 +3547,59 @@ async function reExtractLowConfidencePages(
       // Re-extraction got no items — keep originals
       const originals = items.filter(i => i.sourcePage === rp.pageNum);
       updatedItems.push(...originals);
-      warnings.push(`Page ${rp.pageNum}: 300 DPI re-extraction returned 0 items — keeping original extraction`);
+      warnings.push(`Page ${rp.pageNum}: 300 DPI re-extraction returned 0 items \u2014 keeping original extraction`);
       continue;
     }
 
     reExtractedPageSet.add(rp.pageNum);
-    // Build items from re-extracted data (simplified — use raw entries with a marker)
+    const pageDrawingNumber = pageData.drawingNumber || null;
+    // Build items from re-extracted data, fully normalized through the same
+    // pipeline as the primary extraction (category detect, qty parse, size
+    // validation, spec/material/schedule/rating extraction). This is what was
+    // missing before — raw entries were being pushed straight to allItems.
+    let pageRecoveredCount = 0;
     for (const entry of pageData.items) {
       if (!entry.description || entry.description.length < 3) continue;
-      updatedItems.push({
-        ...entry,
+      const rawQty = String(entry.qty || entry.quantity || "1").trim();
+      const category = discipline === "mechanical" ? detectMechanicalCategory(entry.description) : (entry.category || "other");
+      const isPipe = category === "pipe";
+      let parsedQty: number;
+      const qtyNotes: string[] = [];
+      if (isPipe && /['''\u2019""\u201D]/.test(rawQty)) {
+        parsedQty = parsePipeLength(rawQty).feet;
+      } else if (isPipe) {
+        parsedQty = parseFloat(rawQty) || 0;
+      } else {
+        parsedQty = Math.max(1, Math.round(parseFloat(rawQty) || 1));
+      }
+      if (isPipe) parsedQty = Math.round(Math.max(parsedQty, 0) * 100) / 100;
+      const validatedSize = discipline === "mechanical" ? validateSize(String(entry.size || "N/A"), category) : String(entry.size || "N/A");
+      const newItem: any = {
+        id: randomUUID(),
+        lineNumber: updatedItems.length + 1,
+        discipline,
+        category,
+        description: entry.description.substring(0, 250),
+        size: validatedSize,
+        quantity: parsedQty,
+        unit: isPipe ? "LF" : (/\bLF\b|\bFT\b/i.test(entry.description) ? "LF" : "EA"),
+        spec: extractSpec(entry.description) || undefined,
+        material: extractMaterial(entry.description) || undefined,
+        schedule: extractSchedule(entry.description) || undefined,
+        rating: extractRating(entry.description) || undefined,
+        notes: `Sheet ${rp.pageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""} (${entry.section || "SHOP"}) | Re-extracted at 300 DPI`,
         sourcePage: rp.pageNum,
+        itemNo: typeof entry.itemNo === "number" ? entry.itemNo : (parseInt(String(entry.itemNo || "")) || undefined),
+        drawingNumber: pageDrawingNumber,
+        installLocation: (entry.section || "SHOP").toUpperCase() === "FIELD" ? "field" as const : "shop" as const,
+        atContinuation: entry.atContinuation === true || entry.atContinuation === "true" || false,
         _reExtractedAt300DPI: true,
-        _reExtractNote: `Re-extracted at 300 DPI (was low confidence)`,
-      });
+        _reExtractNote: `Re-extracted at 300 DPI (suspect page or low confidence)`,
+      };
+      updatedItems.push(newItem);
+      pageRecoveredCount++;
     }
-    console.log(`  Page ${rp.pageNum}: Re-extracted ${pageData.items.length} items at 300 DPI (was ${pageConfidence[rp.pageNum]?.count || 0} items)`);
+    console.log(`  Page ${rp.pageNum}: Re-extracted ${pageRecoveredCount} items at 300 DPI (was ${pageConfidence[rp.pageNum]?.count || 0} items)`);
   }
 
   try { cleanupJobDir(jobDir); } catch (e) { /* ignore */ }
@@ -3775,18 +3897,45 @@ async function processUploadedPdf(
       allItems.length = 0;
       allItems.push(...dedupedItems);
 
-      // Missed pipe ROW recovery — scans every page's BOM looking for pipe rows
-      // that were skipped entirely during initial extraction. Adds them as new
-      // items with low confidence so qty retry below can fill in lengths.
-      // Must run BEFORE pipeQtyBestGuessRetry and BEFORE we clean up the PDF.
+      // Suspect-page re-extraction at 300 DPI / fullpage mode (PRIMARY recovery).
+      // Catches pages where row 1 (PIPE) was skipped during the initial extraction
+      // because the BOM crop clipped the top of the table, the pipe row's qty
+      // format confused the model, or the model otherwise dropped a row. Replaces
+      // the earlier pipeRowRecovery() band-aid as the primary recovery path —
+      // pipeRowRecovery is kept below as a final safety net.
+      if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+        try {
+          const suspectPages = detectSuspectPages(allItems);
+          if (suspectPages.length > 0) {
+            console.log(`  Detected ${suspectPages.length} suspect page(s) (row 1 likely missing): ${suspectPages.slice(0, 10).join(", ")}${suspectPages.length > 10 ? ", ..." : ""}`);
+          }
+          const reExtractResult = await reExtractLowConfidencePages(allItems, pdfPath, discipline, 1, {
+            extraPages: suspectPages,
+            renderMode: "fullpage",
+            pageLimit: 25,
+          });
+          if (reExtractResult.reExtractedPages.length > 0) {
+            allItems.length = 0;
+            allItems.push(...reExtractResult.reExtractedItems);
+            warnings.push(`Re-extracted ${reExtractResult.reExtractedPages.length} suspect/low-confidence page(s) at 300 DPI (uncropped).`);
+          }
+          if (reExtractResult.warnings.length > 0) warnings.push(...reExtractResult.warnings);
+        } catch (reExtractErr: any) {
+          console.warn(`  Re-extraction failed: ${reExtractErr.message?.substring(0, 100)}`);
+        }
+      }
+
+      // Missed pipe ROW recovery — SAFETY NET only. The primary fix for skipped
+      // pipe rows is the suspect-page re-extraction above. This pass remains as
+      // a backstop for cases the suspect detector missed.
       if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
         try {
           const recoveryResult = await pipeRowRecovery(allItems, pdfPath, 1);
           if (recoveryResult.recoveredCount > 0) {
-            warnings.push(`Missed pipe rows recovered: ${recoveryResult.recoveredCount} pipe row(s) found on second pass across ${recoveryResult.pagesScanned} page(s) (flagged low confidence \u2014 verify against drawings).`);
+            warnings.push(`Pipe row safety-net: ${recoveryResult.recoveredCount} additional pipe row(s) recovered after re-extraction (low confidence \u2014 verify against drawings).`);
           }
         } catch (recoveryErr: any) {
-          console.warn(`  Pipe-row recovery failed: ${recoveryErr.message?.substring(0, 100)}`);
+          console.warn(`  Pipe-row safety-net failed: ${recoveryErr.message?.substring(0, 100)}`);
         }
       }
 
@@ -4286,39 +4435,50 @@ async function processUploadedPdf(
     delete item._reExtractNote;
   });
 
-  // Step: Adaptive DPI re-extraction for low-confidence pages
+  // Step: Suspect-page re-extraction at 300 DPI / fullpage mode (PRIMARY recovery).
+  // Catches pages where row 1 (PIPE) was skipped during the initial extraction
+  // because the BOM crop clipped the top of the table, the pipe row's qty
+  // format confused the model, or the model otherwise dropped a row.
+  // ALSO catches the original "low-confidence pages" use case via the same
+  // function. Replaces the earlier pipeRowRecovery() band-aid as the primary
+  // recovery path; pipeRowRecovery is kept below as a final safety net.
   if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
     try {
       const startPage = chunks[0]?.startPage || 1;
-      const reExtractResult = await reExtractLowConfidencePages(allItems, pdfPath, discipline, startPage);
-      if (reExtractResult.reExtractedPages.length > 0) {
-        // Re-extracted pages returned raw AI entries — rebuild items through pipeline
-        // For now, just add warnings and mark pages as needing review
-        for (const pageNum of reExtractResult.reExtractedPages) {
-          console.log(`  Page ${pageNum}: Re-extracted at 300 DPI — comparing results`);
-        }
-        warnings.push(...reExtractResult.warnings);
-      } else if (reExtractResult.warnings.length > 0) {
-        warnings.push(...reExtractResult.warnings);
+      const suspectPages = detectSuspectPages(allItems);
+      if (suspectPages.length > 0) {
+        console.log(`  Detected ${suspectPages.length} suspect page(s) (row 1 likely missing): ${suspectPages.slice(0, 10).join(", ")}${suspectPages.length > 10 ? ", ..." : ""}`);
       }
+      const reExtractResult = await reExtractLowConfidencePages(allItems, pdfPath, discipline, startPage, {
+        extraPages: suspectPages,
+        renderMode: "fullpage",
+        pageLimit: 25,
+      });
+      if (reExtractResult.reExtractedPages.length > 0) {
+        // BUG FIX: actually use the result. Old code computed reExtractedItems
+        // and discarded it; this step was effectively a logging pass since launch.
+        allItems.length = 0;
+        allItems.push(...reExtractResult.reExtractedItems);
+        warnings.push(`Re-extracted ${reExtractResult.reExtractedPages.length} suspect/low-confidence page(s) at 300 DPI (uncropped).`);
+      }
+      if (reExtractResult.warnings.length > 0) warnings.push(...reExtractResult.warnings);
     } catch (reExtractErr: any) {
       console.warn(`  Adaptive DPI re-extraction failed: ${reExtractErr.message?.substring(0, 100)}`);
     }
   }
 
-  // Step: Missed pipe ROW recovery — scans every page's BOM for pipe rows that
-  // were skipped entirely during initial extraction (e.g. when the AI got the
-  // elbow/tee/flange but missed the PIPE row at the top of the BOM). Must run
-  // BEFORE pipeQtyBestGuessRetry so newly recovered rows can also get lengths.
+  // Step: Missed pipe ROW recovery -- SAFETY NET only. The primary fix for
+  // skipped pipe rows is the suspect-page re-extraction above. This pass
+  // remains as a backstop for cases the suspect detector missed.
   if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
     try {
       const startPage = chunks[0]?.startPage || 1;
       const recoveryResult = await pipeRowRecovery(allItems, pdfPath, startPage);
       if (recoveryResult.recoveredCount > 0) {
-        warnings.push(`Missed pipe rows recovered: ${recoveryResult.recoveredCount} pipe row(s) found on second pass across ${recoveryResult.pagesScanned} page(s) (flagged low confidence \u2014 verify against drawings).`);
+        warnings.push(`Pipe row safety-net: ${recoveryResult.recoveredCount} additional pipe row(s) recovered after re-extraction (low confidence \u2014 verify against drawings).`);
       }
     } catch (recoveryErr: any) {
-      console.warn(`  Pipe-row recovery failed: ${recoveryErr.message?.substring(0, 100)}`);
+      console.warn(`  Pipe-row safety-net failed: ${recoveryErr.message?.substring(0, 100)}`);
     }
   }
 
