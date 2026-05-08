@@ -1028,7 +1028,13 @@ async function extractWithVision(
   let client = getAnthropicClient();
   const results = new Map<number, { items: any[]; drawingNumber?: string | null; weldCount?: any; continuations?: any[] }>();
   let authFailures = 0;
-  const BATCH_SIZE = 2;
+  // BATCH_SIZE=1: send one page per Claude call. Was 2, but identified as a
+  // cross-page contamination bug on May 8 — when two visually-similar BOM
+  // images were batched (e.g. consecutive 4" detail spool sheets), Claude
+  // collapsed both pages to one BOM, copying the simpler page's quantities
+  // onto the more complex one. Single-page-per-call eliminates this entirely
+  // at the cost of ~2x calls. Worth it for accuracy.
+  const BATCH_SIZE = 1;
   const hasGemini = !!getUserGeminiKey();
   const hasClaude = !!getUserApiKey();
 
@@ -1169,7 +1175,13 @@ async function verifyExtractionPass(
   const client = getAnthropicClient();
   if (!client || !getUserApiKey()) return extractedItems;
 
-  const BATCH_SIZE = 2;
+  // BATCH_SIZE=1: send one page per Claude call. Was 2, but identified as a
+  // cross-page contamination bug on May 8 — when two visually-similar BOM
+  // images were batched (e.g. consecutive 4" detail spool sheets), Claude
+  // collapsed both pages to one BOM, copying the simpler page's quantities
+  // onto the more complex one. Single-page-per-call eliminates this entirely
+  // at the cost of ~2x calls. Worth it for accuracy.
+  const BATCH_SIZE = 1;
   const verified = new Map(extractedItems);
 
   for (let batchStart = 0; batchStart < pageImages.length; batchStart += BATCH_SIZE) {
