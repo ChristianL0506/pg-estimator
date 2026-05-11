@@ -5094,13 +5094,14 @@ function calculateBillLaborHours(
       const wpfBase = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
       const isThreadedFitting = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
       if (fittingWeldMode === "auto-welds") {
+        // Simple math: EI = welds_per_fitting × weld_EI. No handling adder.
+        // The other Bill multipliers (alloy, elev, weldLocation, fieldMhPerEi)
+        // still apply since they convert EI → MH and account for site conditions.
         const weldsCount = isThreadedFitting ? 0 : wpfBase;
-        const handlingFactor = 0.15;
-        const ei = weldsCount * baseEi + handlingFactor * baseEi;
+        const ei = weldsCount * baseEi;
         const mh = ei * fieldMhPerEi * alloyFactor * elevFactor * weldLocationFactor;
         const warn = sizeWarn(found, nps);
-        const breakdown = `${weldsCount} weld(s) × ${baseEi} + ${handlingFactor} handling × ${baseEi}`;
-        const basis = `Bill's EI: ${fittingType} ${found.key}\" ${schedKey} → ${breakdown} = ${ei.toFixed(1)} EI × ${fieldMhPerEi} MH/EI × ${elevFactor} (elev) × ${alloyFactor} (alloy) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`;
+        const basis = `Bill's EI: ${fittingType} ${found.key}\" ${schedKey} → ${weldsCount} weld(s) × ${baseEi} EI = ${ei.toFixed(1)} EI × ${fieldMhPerEi} MH/EI × ${elevFactor} (elev) × ${alloyFactor} (alloy) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`;
         return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "", connectionCount: weldsCount, connectionType: (isThreadedFitting ? "thread" : "weld") } as any;
       }
       const fittingEiMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
@@ -5346,18 +5347,29 @@ function calculateJustinLaborHours(
       // and only get a small handling allowance.
       // Handling base = 0.15 × weld_factor (matches the 'separate' mode's handling).
       if (fittingWeldMode === "auto-welds") {
+        // Simple, what-an-estimator-actually-reads math:
+        //   Hrs/Unit = welds_per_fitting × weld_factor
+        // No handling adder, no extra multipliers. The factor in the table is
+        // already "MH per single weld"; the connection count tells us how many
+        // of those welds a single unit of this fitting represents.
+        // Threaded fittings (NPT couplings, nipples) count 0 welds and instead
+        // use the threaded-connection factor from the threads table.
         const wpf = (justinData.welds_per_fitting || {}) as Record<string, number>;
         let weldsCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
         const isThreaded = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
         if (isThreaded) weldsCount = 0;
-        const handlingFactor = 0.15;
-        const weldMh = weldsCount * baseMH;
-        const handlingMh = baseMH * handlingFactor;
-        const mh = weldMh + handlingMh;
+        if (isThreaded) {
+          // Use the threads table for threaded fittings.
+          const threads = factors.threads || {};
+          let threadMh = 0; let threadSz = "";
+          if (nps <= 1) { threadMh = threads['1"']?.mh_per_connection || 0.5; threadSz = '1"'; }
+          else if (nps <= 2) { threadMh = threads['2"']?.mh_per_connection || 1.3; threadSz = '2"'; }
+          else { threadMh = threads['4"']?.mh_per_connection || 2.0; threadSz = '4"'; }
+          return { mh: threadMh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} (threaded) → ${threadMh} MH/connection (${threadSz} thread)`, sizeMatchExact: weldMatch.exact, connectionCount: 1, connectionType: "thread" };
+        }
+        const mh = weldsCount * baseMH;
         const warn = jSizeWarn(weldMatch);
-        const breakdown = `${weldsCount} weld(s) × ${baseMH.toFixed(2)} + ${handlingFactor} handling × ${baseMH.toFixed(2)}`;
-        const connType = isThreaded ? "thread" : "weld";
-        return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${breakdown} = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: weldsCount, connectionType: connType };
+        return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${weldsCount} weld(s) × ${baseMH.toFixed(2)} MH/weld = ${mh.toFixed(4)} MH/unit${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: weldsCount, connectionType: "weld" };
       }
       const effectiveMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
       const mh = baseMH * effectiveMult;
