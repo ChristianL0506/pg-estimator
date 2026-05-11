@@ -4836,7 +4836,13 @@ function calculateBillLaborHours(
   }
 
   // --- BUTT WELD: EI × MH/EI × alloy factor × elevation × weldLocationFactor ---
-  if (descLower.includes("butt weld") || descLower.includes("butt-weld") || descLower.includes("bw ") || (descLower.includes("weld") && !descLower.includes("socket") && !descLower.includes("fillet") && !descLower.includes("nozzle") && !descLower.includes("miter") && !descLower.includes("slip"))) {
+  // Only treat as an explicit weld row when category is 'weld' OR description
+  // unambiguously indicates a weld line. Fittings like '4" 90 ELL A234 BUTT
+  // WELD' have 'weld' in the description but are NOT weld rows — they must
+  // fall through to the fitting branch so they get per-fitting weld counts.
+  const isExplicitBillWeldRow = catLower === "weld" ||
+    /^(bw|fw|sw)\s|^(field\s+)?weld\b|weld\s+for\b|butt\s+weld\s+for\b/i.test(item.description || "");
+  if (isExplicitBillWeldRow) {
     const weldTable = lr.butt_welds_ei;
     const found = findClosestKey(weldTable, nps);
     if (found && weldTable[found.key]) {
@@ -4845,7 +4851,7 @@ function calculateBillLaborHours(
       const mh = ei * fieldMhPerEi * alloyFactor * elevFactor * weldLocationFactor;
       const warn = sizeWarn(found, nps);
       const basis = `Bill's EI: BW ${found.key}\" ${schedKey} → EI=${ei} × ${fieldMhPerEi} MH/EI (${material} field) × ${elevFactor} (${elevation}) × ${alloyFactor} (alloy ${material}) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH${warn}`;
-      return { laborHoursPerUnit: mh, materialUnitCostAdjust: ei * matCostPerEi, calcBasis: basis, sizeMatchExact, materialCostSource: "allowance" };
+      return { laborHoursPerUnit: mh, materialUnitCostAdjust: ei * matCostPerEi, calcBasis: basis, sizeMatchExact, materialCostSource: "allowance", connectionCount: 1, connectionType: "weld" } as any;
     }
   }
 
@@ -4958,7 +4964,8 @@ function calculateBillLaborHours(
       laborHoursPerUnit: 0, materialUnitCostAdjust: 0,
       calcBasis: "Bill's EI: Stud bolt/nut hardware → 0 MH (joint labor is on the flange line)",
       sizeMatchExact: true, materialCostSource: "",
-    };
+      connectionCount: 0, connectionType: "none",
+    } as any;
   }
 
   // --- FLANGED JOINT (one bolt-up per flange line) ---
@@ -4972,7 +4979,7 @@ function calculateBillLaborHours(
       const mh = baseMh * elevFactor;
       const warn = sizeWarn(found, nps);
       const basis = `Bill's EI: Flange bolt-up ${found.key}\" ${ratingKey}# → base=${baseMh} MH/joint × ${elevFactor} (${elevation}) = ${mh.toFixed(4)} MH${warn}`;
-      return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "" };
+      return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "", connectionCount: 1, connectionType: "bolt-up" } as any;
     }
   }
 
@@ -5082,18 +5089,19 @@ function calculateBillLaborHours(
       const schedKey = sched in weldTable[found.key] ? sched : ("STD" in weldTable[found.key] ? "STD" : Object.keys(weldTable[found.key])[0]);
       const baseEi = weldTable[found.key][schedKey] || 0;
       // Auto-welds: fitting EI = welds_per_fitting × weld_EI + handling.
+      // Pull per-fitting weld count for the Conn column (used in all modes).
+      const wpf = (billData.welds_per_fitting || {}) as Record<string, number>;
+      const wpfBase = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
+      const isThreadedFitting = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
       if (fittingWeldMode === "auto-welds") {
-        const wpf = (billData.welds_per_fitting || {}) as Record<string, number>;
-        let weldsCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
-        const isThreaded = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
-        if (isThreaded) weldsCount = 0;
+        const weldsCount = isThreadedFitting ? 0 : wpfBase;
         const handlingFactor = 0.15;
         const ei = weldsCount * baseEi + handlingFactor * baseEi;
         const mh = ei * fieldMhPerEi * alloyFactor * elevFactor * weldLocationFactor;
         const warn = sizeWarn(found, nps);
         const breakdown = `${weldsCount} weld(s) × ${baseEi} + ${handlingFactor} handling × ${baseEi}`;
         const basis = `Bill's EI: ${fittingType} ${found.key}\" ${schedKey} → ${breakdown} = ${ei.toFixed(1)} EI × ${fieldMhPerEi} MH/EI × ${elevFactor} (elev) × ${alloyFactor} (alloy) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`;
-        return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "" };
+        return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "", connectionCount: weldsCount, connectionType: (isThreadedFitting ? "thread" : "weld") } as any;
       }
       const fittingEiMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
       const ei = baseEi * fittingEiMult;
@@ -5101,7 +5109,7 @@ function calculateBillLaborHours(
       const warn = sizeWarn(found, nps);
       const modeNote = fittingWeldMode === "separate" ? "separate-welds: handling only" : `bundled ×${bundledMult} weld-ends`;
       const basis = `Bill's EI: ${fittingType} ${found.key}\" ${schedKey} → BW EI=${baseEi} × ${fittingEiMult} (${modeNote}) = ${ei.toFixed(1)} EI × ${fieldMhPerEi} MH/EI × ${elevFactor} (elev) × ${alloyFactor} (alloy) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH${warn}`;
-      return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "" };
+      return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "", connectionCount: (isThreadedFitting ? 0 : wpfBase), connectionType: (isThreadedFitting ? "thread" : "weld") } as any;
     }
   }
 
@@ -5162,7 +5170,14 @@ function calculateJustinLaborHours(
   }
 
   // --- WELD: STD, SCH 80, and SS columns ---
-  if (descLower.includes("weld") || descLower.includes("butt") || descLower.includes("bw")) {
+  // Only treat as an explicit weld row when the CATEGORY is 'weld' OR the
+  // description is unambiguously a weld line (starts with BW/FW/SW or contains
+  // ' weld for ' / ' butt weld for '). A row with category 'elbow' / 'tee' /
+  // 'flange' that just happens to have 'butt weld' in its description (e.g.
+  // '4" 90 ELL A234 BUTT WELD') is NOT a weld row — it's a fitting, and must
+  // fall through to the fitting branch so it gets the per-fitting weld count.
+  const isExplicitWeldRow = catLower === "weld" || /^(bw|fw|sw)\s|^(field\s+)?weld\b|weld\s+for\b|butt\s+weld\s+for\b/i.test(item.description || "");
+  if (isExplicitWeldRow) {
     const match = findBestMatch(factors.welds || {});
     if (match) {
       const schedNorm = normalizeSchedule(schedule);
