@@ -1496,29 +1496,50 @@ export default function EstimatingPage() {
                                     )}
                                   </td>
                                 ))}
-                                {/* Connection count + type — e.g. '2 welds' / '1 bolt-up' / '3 welds × qty'.
-                                    For per-unit-count types (fittings, flanges, threads) we show the
-                                    per-unit count. For pure weld rows the line's qty IS the weld count,
-                                    so we show 'N welds' using qty. Pipe rows show 'pipe'. Items with no
-                                    physical connection (gaskets, supports, pipe, hardware) show '—'. */}
-                                <td className="px-2 py-1.5 text-[11px] text-muted-foreground" title={(item as any).calculationBasis || ""}>
+                                {/* Connection count + type for the WHOLE line, not per-unit.
+                                    Shows total connections this line represents:
+                                    - Fitting line with qty=4 elbows → '8 welds' (4 elbows × 2 welds each)
+                                    - Fitting line with qty=2 tees   → '6 welds' (2 tees × 3 welds each)
+                                    - Flange line with qty=6 flanges → '6 bolt-ups'
+                                    - Explicit weld row qty=12       → '12 welds' (each unit IS one weld)
+                                    - Pipe row                       → 'pipe'
+                                    - Hardware / supports / no joint → '—'
+                                    For fittings the per-unit count includes both welds AND threads. We
+                                    show '4 elbows × 2 = 8 welds' in the tooltip for transparency. */}
+                                <td className="px-2 py-1.5 text-[11px] text-muted-foreground">
                                   {(() => {
-                                    const cnt = (item as any).connectionCount;
+                                    const cntPerUnit = (item as any).connectionCount;
                                     const typ = (item as any).connectionType as string | undefined;
-                                    if (typ === undefined || cnt === undefined) return <span className="text-muted-foreground/40">—</span>;
-                                    if (typ === "none" || cnt === 0) return <span className="text-muted-foreground/40">{typ === "pipe" ? "pipe" : "—"}</span>;
-                                    // For explicit weld rows, the line's qty IS the weld count.
-                                    const cat = (item.category || "").toLowerCase();
-                                    const isWeldRow = cat === "weld" || (item.description || "").toLowerCase().includes(" bw ") || (item.description || "").toLowerCase().startsWith("bw ");
-                                    if (isWeldRow && typ === "weld") {
-                                      return <span className="font-mono">{item.quantity} {item.quantity === 1 ? "weld" : "welds"}</span>;
+                                    const calcBasis = (item as any).calculationBasis || "";
+                                    if (typ === undefined || cntPerUnit === undefined) {
+                                      return <span className="text-muted-foreground/40" title={calcBasis}>—</span>;
                                     }
-                                    const label = typ === "weld" ? (cnt === 1 ? "weld" : "welds")
-                                      : typ === "bolt-up" ? (cnt === 1 ? "bolt-up" : "bolt-ups")
-                                      : typ === "thread" ? (cnt === 1 ? "thread" : "threads")
-                                      : typ === "socket-weld" ? (cnt === 1 ? "SW" : "SWs")
+                                    if (typ === "none" || cntPerUnit === 0) {
+                                      return <span className="text-muted-foreground/40" title={calcBasis}>{typ === "pipe" ? "pipe" : "—"}</span>;
+                                    }
+                                    // For explicit weld rows, the line's qty IS already the total
+                                    // weld count — don't multiply again. For everything else (fittings,
+                                    // flanges, threads), multiply qty × connections-per-unit.
+                                    const cat = (item.category || "").toLowerCase();
+                                    const desc = (item.description || "").toLowerCase();
+                                    const isExplicitWeldRow = cat === "weld" || desc.startsWith("bw ") || desc.includes(" bw ") || desc.startsWith("fw ") || desc.includes(" fw ") || desc.startsWith("sw ") || desc.includes(" sw ");
+                                    const totalCount = isExplicitWeldRow ? item.quantity : (item.quantity * cntPerUnit);
+                                    const plural = totalCount !== 1;
+                                    const label = typ === "weld" ? (plural ? "welds" : "weld")
+                                      : typ === "bolt-up" ? (plural ? "bolt-ups" : "bolt-up")
+                                      : typ === "thread" ? (plural ? "threads" : "thread")
+                                      : typ === "socket-weld" ? (plural ? "SWs" : "SW")
                                       : typ;
-                                    return <span className="font-mono">{cnt} {label}</span>;
+                                    // Friendly tooltip: show the multiplication for fittings/flanges so
+                                    // the user can verify '4 elbows × 2 welds/elbow = 8 welds'.
+                                    const tooltipDetail = !isExplicitWeldRow && cntPerUnit > 0
+                                      ? `${item.quantity} × ${cntPerUnit} ${cntPerUnit === 1 ? label.replace(/s$/, "") : label}/unit = ${totalCount} ${label}\n\n${calcBasis}`
+                                      : calcBasis;
+                                    return (
+                                      <span className="font-mono" title={tooltipDetail}>
+                                        {Number.isFinite(totalCount) ? totalCount.toLocaleString() : totalCount} {label}
+                                      </span>
+                                    );
                                   })()}
                                 </td>
                                 <td className="px-2 py-1.5 text-right font-mono text-blue-600 dark:text-blue-400">{fmt$(item.materialExtension || 0)}</td>
