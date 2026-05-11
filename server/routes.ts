@@ -84,6 +84,10 @@ const autoCalculateBodySchema = z.object({
   elevation: z.string().default("0-20ft"),
   alloyGroup: z.string().default("4"),
   rackFactor: z.number().min(1).max(5).default(1.3),
+  // How to treat fitting labor vs separate weld rows.
+  // "bundled" (default): fitting MH includes its weld labor via the weld-end multiplier.
+  // "separate": fitting MH is handling only; weld rows in the BOM carry the weld labor.
+  fittingWeldMode: z.enum(["bundled", "separate"]).default("bundled"),
 }).refine(data => data.overtimePercent + data.doubleTimePercent <= 100, {
   message: "overtimePercent + doubleTimePercent cannot exceed 100",
   path: ["overtimePercent"],
@@ -4740,7 +4744,8 @@ function calculateBillLaborHours(
   billData: any,
   pipeLocation: string,
   elevation: string,
-  alloyGroup: string
+  alloyGroup: string,
+  fittingWeldMode: "bundled" | "separate" = "bundled"
 ): { laborHoursPerUnit: number; materialUnitCostAdjust: number; calcBasis: string; sizeMatchExact: boolean; materialCostSource: string } {
   const nps = parseSizeNPS(item.size);
   const sched = normalizeSchedule(schedule);
@@ -5017,17 +5022,27 @@ function calculateBillLaborHours(
   }
 
   // --- GENERIC FITTING (elbow, tee, reducer, cap, coupling, union) ---
+  // Per-fitting weld-end multipliers come from billData.weld_end_multipliers,
+  // falling back to Bill's historical hardcoded values when no table exists.
+  // In "separate" weld mode the BOM already carries explicit weld rows for
+  // each weld end, so the fitting contributes only handling (~0.15 × weld EI);
+  // in "bundled" mode the fitting's labor includes its welds.
   if (catLower === "fitting" || catLower === "elbow" || catLower === "tee" || catLower === "reducer" || catLower === "cap" || catLower === "coupling" || catLower === "union") {
-    let fittingEiMult = 0.6;
+    const wem = billData.weld_end_multipliers || {};
+    let fittingKey = "fitting";
     let fittingType = "fitting";
-    if (descLower.includes("90") && descLower.includes("elbow") || (catLower === "elbow" && descLower.includes("90"))) { fittingEiMult = 1.0; fittingType = "90° Elbow"; }
-    else if (descLower.includes("45") && descLower.includes("elbow") || (catLower === "elbow" && descLower.includes("45"))) { fittingEiMult = 0.8; fittingType = "45° Elbow"; }
-    else if (catLower === "elbow" || descLower.includes("elbow") || descLower.includes("ell") || descLower.includes("return")) { fittingEiMult = 1.0; fittingType = "Elbow"; }
-    else if (catLower === "tee" || descLower.includes("tee")) { fittingEiMult = 1.3; fittingType = "Tee"; }
-    else if (catLower === "reducer" || descLower.includes("reducer") || descLower.includes("swage")) { fittingEiMult = 0.7; fittingType = "Reducer"; }
-    else if (catLower === "cap" || descLower.includes("cap")) { fittingEiMult = 0.5; fittingType = "Cap"; }
-    else if (catLower === "coupling" || descLower.includes("coupling") || descLower.includes("nipple")) { fittingEiMult = 0.6; fittingType = "Coupling"; }
-    else if (catLower === "union" || descLower.includes("union")) { fittingEiMult = 0.4; fittingType = "Union"; }
+    let legacyMult = 0.6;
+    if (descLower.includes("90") && descLower.includes("elbow") || (catLower === "elbow" && descLower.includes("90"))) { fittingKey = "elbow_90"; legacyMult = 1.0; fittingType = "90° Elbow"; }
+    else if (descLower.includes("45") && descLower.includes("elbow") || (catLower === "elbow" && descLower.includes("45"))) { fittingKey = "elbow_45"; legacyMult = 0.8; fittingType = "45° Elbow"; }
+    else if (catLower === "elbow" || descLower.includes("elbow") || descLower.includes("ell") || descLower.includes("return")) { fittingKey = "elbow"; legacyMult = 1.0; fittingType = "Elbow"; }
+    else if (catLower === "tee" || descLower.includes("tee")) { fittingKey = "tee"; legacyMult = 1.3; fittingType = "Tee"; }
+    else if (catLower === "reducer" || descLower.includes("reducer") || descLower.includes("swage")) { fittingKey = "reducer"; legacyMult = 0.7; fittingType = "Reducer"; }
+    else if (catLower === "cap" || descLower.includes("cap")) { fittingKey = "cap"; legacyMult = 0.5; fittingType = "Cap"; }
+    else if (catLower === "coupling" || descLower.includes("coupling") || descLower.includes("nipple")) { fittingKey = "coupling"; legacyMult = 0.6; fittingType = "Coupling"; }
+    else if (catLower === "union" || descLower.includes("union")) { fittingKey = "union"; legacyMult = 0.4; fittingType = "Union"; }
+
+    const bundledMult = (wem[fittingKey] !== undefined ? wem[fittingKey] : (wem["fitting"] !== undefined ? wem["fitting"] : legacyMult));
+    const fittingEiMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
 
     const weldTable = lr.butt_welds_ei;
     const found = findClosestKey(weldTable, nps);
@@ -5037,7 +5052,8 @@ function calculateBillLaborHours(
       const ei = baseEi * fittingEiMult;
       const mh = ei * fieldMhPerEi * alloyFactor * elevFactor * weldLocationFactor;
       const warn = sizeWarn(found, nps);
-      const basis = `Bill's EI: ${fittingType} ${found.key}\" ${schedKey} → BW EI=${baseEi} × ${fittingEiMult} = ${ei.toFixed(1)} EI × ${fieldMhPerEi} MH/EI × ${elevFactor} (elev) × ${alloyFactor} (alloy) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH${warn}`;
+      const modeNote = fittingWeldMode === "separate" ? "separate-welds: handling only" : `bundled ×${bundledMult} weld-ends`;
+      const basis = `Bill's EI: ${fittingType} ${found.key}\" ${schedKey} → BW EI=${baseEi} × ${fittingEiMult} (${modeNote}) = ${ei.toFixed(1)} EI × ${fieldMhPerEi} MH/EI × ${elevFactor} (elev) × ${alloyFactor} (alloy) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH${warn}`;
       return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "" };
     }
   }
@@ -5056,7 +5072,8 @@ function calculateJustinLaborHours(
   installType: "standard" | "rack",
   material: "CS" | "SS",
   schedule: string,
-  justinData: any
+  justinData: any,
+  fittingWeldMode: "bundled" | "separate" = "bundled"
 ): { mh: number; calcBasis: string; sizeMatchExact: boolean } {
   const nps = parseSizeNPS(item.size);
   const factors = justinData.labor_factors;
@@ -5192,15 +5209,38 @@ function calculateJustinLaborHours(
   // --- GASKET ---
   if (catLower === "gasket" || descLower.includes("gasket")) return { mh: 0.1, calcBasis: "Justin: Gasket → 0.10 MH (in bolt-up)", sizeMatchExact: true };
 
-  // --- FITTING ---
-  if (catLower === "fitting" || catLower === "elbow" || catLower === "tee" || catLower === "reducer" || catLower === "cap" || catLower === "coupling") {
+  // --- FITTING (tee / elbow / reducer / cap / coupling / union / generic) ---
+  // Per-category weld-end multipliers come from justinData.weld_end_multipliers,
+  // falling back to 0.5 (the legacy single-multiplier value) if no table exists.
+  // In "separate" mode the BOM is assumed to already have full-factor weld rows
+  // for every weld end, so the fitting itself contributes only handling labor
+  // (~0.15 × weld_factor); in "bundled" mode the fitting's labor includes its
+  // welds via the configured weld-end multiplier.
+  if (catLower === "fitting" || catLower === "elbow" || catLower === "tee" || catLower === "reducer" || catLower === "cap" || catLower === "coupling" || catLower === "union") {
     const weldMatch = findBestMatch(factors.welds || {});
     if (weldMatch) {
       const schedNorm = normalizeSchedule(schedule);
       const baseMH = material === "SS" ? (weldMatch.val.ss_mh_per_weld || 0) : (schedNorm === "80" ? (weldMatch.val.sch80_mh_per_weld || 0) : (weldMatch.val.std_mh_per_weld || 0));
-      const mh = baseMH * 0.5;
+
+      // Classify the fitting subtype so we can pick the right multiplier.
+      const wem = justinData.weld_end_multipliers || {};
+      let fittingKey = "fitting";
+      let fittingLabel = "Fitting";
+      if (descLower.includes("90") && (catLower === "elbow" || descLower.includes("elbow"))) { fittingKey = "elbow_90"; fittingLabel = "90° Elbow"; }
+      else if (descLower.includes("45") && (catLower === "elbow" || descLower.includes("elbow"))) { fittingKey = "elbow_45"; fittingLabel = "45° Elbow"; }
+      else if (catLower === "elbow" || descLower.includes("elbow") || descLower.includes("ell") || descLower.includes("return")) { fittingKey = "elbow"; fittingLabel = "Elbow"; }
+      else if (catLower === "tee" || descLower.includes("tee")) { fittingKey = "tee"; fittingLabel = "Tee"; }
+      else if (catLower === "reducer" || descLower.includes("reducer") || descLower.includes("swage")) { fittingKey = "reducer"; fittingLabel = "Reducer"; }
+      else if (catLower === "cap" || descLower.includes("cap")) { fittingKey = "cap"; fittingLabel = "Cap"; }
+      else if (catLower === "coupling" || descLower.includes("coupling") || descLower.includes("nipple")) { fittingKey = "coupling"; fittingLabel = "Coupling"; }
+      else if (catLower === "union" || descLower.includes("union")) { fittingKey = "union"; fittingLabel = "Union"; }
+
+      const bundledMult = (wem[fittingKey] !== undefined ? wem[fittingKey] : (wem["fitting"] !== undefined ? wem["fitting"] : 0.5));
+      const effectiveMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
+      const mh = baseMH * effectiveMult;
       const warn = jSizeWarn(weldMatch);
-      return { mh, calcBasis: `Justin: Fitting ${weldMatch.matchKey} → weld base=${baseMH.toFixed(2)} × 0.50 = ${mh.toFixed(4)} MH${warn}`, sizeMatchExact: weldMatch.exact };
+      const modeNote = fittingWeldMode === "separate" ? "separate-welds: handling only" : `bundled ×${bundledMult} weld-ends`;
+      return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → weld base=${baseMH.toFixed(2)} × ${effectiveMult} (${modeNote}) = ${mh.toFixed(4)} MH${warn}`, sizeMatchExact: weldMatch.exact };
     }
   }
 
@@ -5246,7 +5286,8 @@ function calculateIndustryLaborHours(
   installType: "standard" | "rack",
   material: "CS" | "SS",
   schedule: string,
-  industryData: any
+  industryData: any,
+  fittingWeldMode: "bundled" | "separate" = "bundled"
 ): { mh: number; calcBasis: string; sizeMatchExact: boolean } {
   // Defensive: if the Industry data block is missing or malformed, fail with
   // a clear message instead of a cryptic 'Cannot read properties of undefined'.
@@ -5263,7 +5304,7 @@ function calculateIndustryLaborHours(
   // Reuse the Justin calculator logic against the Industry data block.
   // The shapes match, so this works directly. We post-process calcBasis
   // to rename the prefix so the estimator can see the source clearly.
-  const result = calculateJustinLaborHours(item, installType, material, schedule, industryData);
+  const result = calculateJustinLaborHours(item, installType, material, schedule, industryData, fittingWeldMode);
   return {
     ...result,
     calcBasis: result.calcBasis.replace(/^Justin:/, "Industry (Page):"),
@@ -6098,7 +6139,12 @@ Picou Group Contractors`;
       elevation,
       alloyGroup,
       rackFactor,
+      fittingWeldMode,
     } = parsed.data;
+
+    // Persist this onto the project so subsequent reads (diagnose, compare,
+    // exports) reflect the same mode without the client having to resend it.
+    try { storage.updateEstimateProject(req.params.id, { fittingWeldMode } as any); } catch {}
 
     let estimatorData: any;
     try {
@@ -6173,7 +6219,7 @@ Picou Group Contractors`;
       let materialCostSource = (item as any).materialCostSource || "";
 
       if (method === "bill") {
-        const result = calculateBillLaborHours(item, itemMat, itemSched, estimatorData.bill, itemPipeLoc, itemElev, itemAlloy);
+        const result = calculateBillLaborHours(item, itemMat, itemSched, estimatorData.bill, itemPipeLoc, itemElev, itemAlloy, fittingWeldMode);
         laborHoursPerUnit = result.laborHoursPerUnit;
         materialUnitCostAdjust = result.materialUnitCostAdjust;
         calcBasis = result.calcBasis;
@@ -6188,7 +6234,7 @@ Picou Group Contractors`;
         // Industry method (Page's Estimator's Piping Man-Hour Manual)
         // Reuses Justin's calculator shape against the Industry data block.
         // Contingency comes from Industry cost_params (default 10% per Page guidance).
-        const iResult = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.industry);
+        const iResult = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.industry, fittingWeldMode);
         const baseMH = iResult.mh;
         sizeMatchExact = iResult.sizeMatchExact;
         const contingencyFactor = estimatorData.industry?.cost_params?.contingency_factor ?? 0.10;
@@ -6196,7 +6242,7 @@ Picou Group Contractors`;
         laborHoursPerUnit = baseMH * contingencyMult;
         calcBasis = `${iResult.calcBasis} × ${contingencyMult.toFixed(2)} (${(contingencyFactor * 100).toFixed(0)}% contingency) = ${laborHoursPerUnit.toFixed(4)} MH`;
       } else {
-        const jResult = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.justin);
+        const jResult = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.justin, fittingWeldMode);
         const baseMH = jResult.mh;
         sizeMatchExact = jResult.sizeMatchExact;
         // Apply contingency factor from Justin's data (default 15%)
@@ -6496,7 +6542,7 @@ Picou Group Contractors`;
         let calcBasis = "";
         let materialAdjust = 0;
         if (r.baseMethod === "bill") {
-          const result = calculateBillLaborHours(item, itemMat, itemSched, r.data, itemPipeLoc, itemElev, itemAlloy);
+          const result = calculateBillLaborHours(item, itemMat, itemSched, r.data, itemPipeLoc, itemElev, itemAlloy, settings.fittingWeldMode);
           mh = result.laborHoursPerUnit;
           calcBasis = result.calcBasis;
           materialAdjust = result.materialUnitCostAdjust;
@@ -6505,12 +6551,12 @@ Picou Group Contractors`;
             calcBasis += ` \u00d7 ${settings.rackFactor.toFixed(2)} (rack factor)`;
           }
         } else if (r.baseMethod === "industry") {
-          const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
           const contFactor = r.data?.cost_params?.contingency_factor ?? 0.10;
           mh = ir.mh * (1 + contFactor);
           calcBasis = `${ir.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${Math.round(contFactor*100)}% contingency)`;
         } else {
-          const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
           const contFactor = r.data?.cost_params?.contingency_factor ?? 0.15;
           mh = jr.mh * (1 + contFactor);
           calcBasis = `${jr.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${Math.round(contFactor*100)}% contingency)`;
@@ -6617,6 +6663,239 @@ Picou Group Contractors`;
     }
   });
 
+  // ===== DIAGNOSE ESTIMATE =====
+  // Re-runs the active estimating method over every BOM row and returns a
+  // detailed breakdown: which calculator branch matched, what inputs it used,
+  // the resulting MH/unit, and a list of project-level warnings (e.g. items
+  // with no matching factor, double-counted welds-and-fittings, large nearest-
+  // size matches). Pure read-only — the estimate is not mutated.
+  //
+  // Body: optional settings overrides. Defaults to the project's saved values.
+  app.post("/api/estimates/:id/diagnose", (req, res) => {
+    const project = storage.getEstimateProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Estimate not found" });
+
+    const diagSchema = z.object({
+      method: z.enum(["bill", "justin", "industry"]).default((project as any).estimateMethod && ["bill","justin","industry"].includes((project as any).estimateMethod) ? (project as any).estimateMethod : "justin"),
+      customMethodId: z.string().optional().default((project as any).customMethodId || ""),
+      material: z.enum(["CS", "SS"]).default("CS"),
+      schedule: z.string().default("STD"),
+      installType: z.enum(["standard", "rack"]).default("standard"),
+      pipeLocation: z.string().default("Open Rack"),
+      elevation: z.string().default("0-20ft"),
+      alloyGroup: z.string().default("4"),
+      rackFactor: z.number().default(1.3),
+      fittingWeldMode: z.enum(["bundled", "separate"]).default((project as any).fittingWeldMode || "bundled"),
+    });
+    const parsed = diagSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten().fieldErrors });
+    }
+    const cfg = parsed.data;
+
+    let estimatorData: any;
+    try { estimatorData = getEstimatorData(); } catch (err: any) {
+      return res.status(500).json({ message: `Failed to load estimator data: ${err.message}` });
+    }
+
+    // Resolve a custom profile if one is referenced.
+    let activeData: any;
+    let activeBase = cfg.method as "bill" | "justin" | "industry";
+    let customMethodName = "";
+    if (cfg.customMethodId) {
+      const cm = storage.getCustomMethod(cfg.customMethodId);
+      if (cm) {
+        activeBase = cm.baseMethod;
+        activeData = applyCustomOverrides(estimatorData[cm.baseMethod], cm.overrides || {});
+        customMethodName = cm.name;
+      } else {
+        activeData = estimatorData[activeBase];
+      }
+    } else {
+      activeData = estimatorData[activeBase];
+    }
+    if (!activeData) {
+      return res.status(500).json({ message: `No data available for method '${activeBase}'.` });
+    }
+
+    // Per-row breakdown.
+    type RowDiag = {
+      itemId: string;
+      lineNumber: number;
+      category: string;
+      description: string;
+      size: string;
+      quantity: number;
+      unit: string;
+      mhPerUnit: number;
+      totalMH: number;
+      calcBasis: string;
+      sizeMatchExact: boolean;
+      warnings: string[];
+    };
+    const rows: RowDiag[] = [];
+
+    for (const item of (project.items || [])) {
+      const itemMat = ((item as any).itemMaterial || cfg.material) as "CS" | "SS";
+      const itemSched = (item as any).itemSchedule || cfg.schedule;
+      const itemElev = (item as any).itemElevation || cfg.elevation;
+      const itemLoc = (item as any).itemPipeLocation || cfg.pipeLocation;
+      const itemAlloy = (item as any).itemAlloyGroup || cfg.alloyGroup;
+      const lineWorkType = ((item as any).workType || cfg.installType) as "standard" | "rack";
+
+      let mhPerUnit = 0;
+      let calcBasis = "";
+      let sizeMatchExact = true;
+      const warnings: string[] = [];
+
+      try {
+        if (activeBase === "bill") {
+          const r = calculateBillLaborHours(item, itemMat, itemSched, activeData, itemLoc, itemElev, itemAlloy, cfg.fittingWeldMode);
+          mhPerUnit = r.laborHoursPerUnit;
+          calcBasis = r.calcBasis;
+          sizeMatchExact = r.sizeMatchExact;
+        } else if (activeBase === "industry") {
+          const r = calculateIndustryLaborHours(item, lineWorkType, itemMat, itemSched, activeData, cfg.fittingWeldMode);
+          const cont = activeData.cost_params?.contingency_factor ?? 0.10;
+          mhPerUnit = r.mh * (1 + cont);
+          calcBasis = `${r.calcBasis} \u00d7 ${(1 + cont).toFixed(2)} (${Math.round(cont*100)}% contingency)`;
+          sizeMatchExact = r.sizeMatchExact;
+        } else {
+          const r = calculateJustinLaborHours(item, lineWorkType, itemMat, itemSched, activeData, cfg.fittingWeldMode);
+          const cont = activeData.cost_params?.contingency_factor ?? 0.15;
+          mhPerUnit = r.mh * (1 + cont);
+          calcBasis = `${r.calcBasis} \u00d7 ${(1 + cont).toFixed(2)} (${Math.round(cont*100)}% contingency)`;
+          sizeMatchExact = r.sizeMatchExact;
+        }
+      } catch (err: any) {
+        calcBasis = `\u26A0 calculator error: ${err?.message || String(err)}`;
+        warnings.push("calculator-error");
+      }
+
+      if (mhPerUnit === 0) warnings.push("no-matching-factor");
+      if (!sizeMatchExact) warnings.push("nearest-size-used");
+      if (calcBasis.includes("\u26A0")) warnings.push("flagged");
+
+      rows.push({
+        itemId: item.id,
+        lineNumber: item.lineNumber,
+        category: item.category,
+        description: item.description,
+        size: item.size,
+        quantity: item.quantity,
+        unit: item.unit,
+        mhPerUnit,
+        totalMH: mhPerUnit * (item.quantity || 0),
+        calcBasis,
+        sizeMatchExact,
+        warnings,
+      });
+    }
+
+    // ---- Project-level warnings ----
+    const projectWarnings: { code: string; severity: "info" | "warn" | "error"; title: string; detail: string; affectedItemIds?: string[] }[] = [];
+
+    // 1. Double-count detection: count fitting rows vs explicit weld rows by size.
+    //    In bundled mode every fitting carries its own welds, so seeing explicit
+    //    weld rows AT THE SAME SIZE as fittings usually means the welds are
+    //    double-counted. Flag the affected size buckets.
+    if (cfg.fittingWeldMode === "bundled") {
+      const fittingsBySize = new Map<string, string[]>();
+      const weldsBySize = new Map<string, string[]>();
+      for (const it of (project.items || [])) {
+        const cat = (it.category || "").toLowerCase();
+        const desc = (it.description || "").toLowerCase();
+        const isFitting = ["fitting","elbow","tee","reducer","cap","coupling","union"].includes(cat);
+        const isWeld = cat === "weld" || desc.includes("butt weld") || /\bbw\b/.test(desc);
+        const sizeKey = (it.size || "").trim();
+        if (!sizeKey) continue;
+        if (isFitting) {
+          if (!fittingsBySize.has(sizeKey)) fittingsBySize.set(sizeKey, []);
+          fittingsBySize.get(sizeKey)!.push(it.id);
+        } else if (isWeld) {
+          if (!weldsBySize.has(sizeKey)) weldsBySize.set(sizeKey, []);
+          weldsBySize.get(sizeKey)!.push(it.id);
+        }
+      }
+      const overlapSizes: string[] = [];
+      const overlapItemIds: string[] = [];
+      for (const [sz, fIds] of fittingsBySize) {
+        const wIds = weldsBySize.get(sz);
+        if (wIds && wIds.length > 0) {
+          overlapSizes.push(sz);
+          overlapItemIds.push(...fIds, ...wIds);
+        }
+      }
+      if (overlapSizes.length > 0) {
+        projectWarnings.push({
+          code: "double-count-welds-fittings",
+          severity: "warn",
+          title: `Possible double-counting at size${overlapSizes.length>1?"s":""} ${overlapSizes.join(", ")}`,
+          detail: `The BOM has BOTH fitting rows and explicit weld rows at the same size, while fitting-weld mode is "bundled" (fittings carry their own weld labor). Either switch to "separate" mode, or remove the explicit weld rows.`,
+          affectedItemIds: overlapItemIds,
+        });
+      }
+    } else {
+      // In "separate" mode the opposite warning: fittings present but no welds.
+      let fittingCount = 0; let weldCount = 0;
+      for (const it of (project.items || [])) {
+        const cat = (it.category || "").toLowerCase();
+        const desc = (it.description || "").toLowerCase();
+        if (["fitting","elbow","tee","reducer","cap","coupling","union"].includes(cat)) fittingCount++;
+        else if (cat === "weld" || desc.includes("butt weld") || /\bbw\b/.test(desc)) weldCount++;
+      }
+      if (fittingCount > 0 && weldCount === 0) {
+        projectWarnings.push({
+          code: "separate-no-welds",
+          severity: "warn",
+          title: `Mode is "separate" but no weld rows exist`,
+          detail: `In "separate" mode fittings only contribute handling labor (×0.15); the BOM needs explicit weld rows to capture the actual weld labor. Either switch back to "bundled" or add weld rows (try the "Infer Welds from Fittings" button).`,
+        });
+      }
+    }
+
+    // 2. Items with no matching factor.
+    const noMatch = rows.filter(r => r.warnings.includes("no-matching-factor"));
+    if (noMatch.length > 0) {
+      projectWarnings.push({
+        code: "no-matching-factor",
+        severity: "error",
+        title: `${noMatch.length} item${noMatch.length>1?"s have":" has"} no matching labor factor`,
+        detail: `These rows are contributing zero MH to the estimate. Likely cause: category not recognized, size out of table range, or item type (e.g. specialty) not modeled. Check the calcBasis column to see why.`,
+        affectedItemIds: noMatch.map(r => r.itemId),
+      });
+    }
+
+    // 3. Nearest-size fallback count.
+    const nearestUsed = rows.filter(r => r.warnings.includes("nearest-size-used"));
+    if (nearestUsed.length > 0) {
+      projectWarnings.push({
+        code: "nearest-size-fallback",
+        severity: "info",
+        title: `${nearestUsed.length} item${nearestUsed.length>1?"s":""} used a nearest-size factor`,
+        detail: `These rows fell back to the closest available size in the factor table. Verify the factor is appropriate, or add the missing size to the method's factor table.`,
+        affectedItemIds: nearestUsed.map(r => r.itemId),
+      });
+    }
+
+    // ---- Summary ----
+    const totalMH = rows.reduce((acc, r) => acc + r.totalMH, 0);
+    const itemsWithLabor = rows.filter(r => r.mhPerUnit > 0).length;
+    res.json({
+      estimateId: project.id,
+      estimateName: project.name,
+      method: activeBase,
+      customMethodId: cfg.customMethodId || undefined,
+      customMethodName: customMethodName || undefined,
+      fittingWeldMode: cfg.fittingWeldMode,
+      totalMH,
+      itemCount: rows.length,
+      itemsWithLabor,
+      rows,
+      warnings: projectWarnings,
+    });
+  });
+
   // Export a method's full factor tree to Excel. methodKey is one of
   // 'bill' / 'justin' / 'industry' (base method) or 'custom:<id>' (custom profile).
   // For custom profiles we apply overrides on top of the base before exporting,
@@ -6685,6 +6964,7 @@ Picou Group Contractors`;
       elevation: z.string().default("ground"),
       alloyGroup: z.string().default("CS"),
       rackFactor: z.number().default(1.3),
+      fittingWeldMode: z.enum(["bundled", "separate"]).default((project as any).fittingWeldMode || "bundled"),
     });
     const parsed = settingsSchema.safeParse(req.body || {});
     if (!parsed.success) {
@@ -6742,17 +7022,17 @@ Picou Group Contractors`;
       for (const r of runs) {
         let mh = 0; let calcBasis = ""; let materialAdjust = 0;
         if (r.baseMethod === "bill") {
-          const result = calculateBillLaborHours(item, itemMat, itemSched, r.data, itemPipeLoc, itemElev, itemAlloy);
+          const result = calculateBillLaborHours(item, itemMat, itemSched, r.data, itemPipeLoc, itemElev, itemAlloy, settings.fittingWeldMode);
           mh = result.laborHoursPerUnit;
           calcBasis = result.calcBasis;
           materialAdjust = result.materialUnitCostAdjust;
           if (lineWorkType === "rack" && settings.rackFactor > 1) mh *= settings.rackFactor;
         } else if (r.baseMethod === "industry") {
-          const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
           const cf = r.data?.cost_params?.contingency_factor ?? 0.10;
           mh = ir.mh * (1 + cf); calcBasis = ir.calcBasis;
         } else {
-          const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
           const cf = r.data?.cost_params?.contingency_factor ?? 0.15;
           mh = jr.mh * (1 + cf); calcBasis = jr.calcBasis;
         }

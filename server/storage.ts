@@ -294,6 +294,12 @@ try {
   db.exec(`ALTER TABLE estimate_projects ADD COLUMN customMethodId TEXT`);
 } catch (e: any) { /* Column already exists */ }
 
+// Add fittingWeldMode so each estimate can choose whether fitting MH includes
+// weld labor (bundled) or assumes weld rows already carry it (separate).
+try {
+  db.exec(`ALTER TABLE estimate_projects ADD COLUMN fittingWeldMode TEXT DEFAULT 'bundled'`);
+} catch (e: any) { /* Column already exists */ }
+
 // Add confidence column to takeoff_items if it doesn't exist
 try {
   db.exec(`ALTER TABLE takeoff_items ADD COLUMN confidence TEXT DEFAULT 'high'`);
@@ -697,6 +703,7 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
     doubleTimePercent: row.doubleTimePercent ?? 2,
     estimateMethod: row.estimateMethod || "manual",
     customMethodId: row.customMethodId || undefined,
+    fittingWeldMode: (row.fittingWeldMode === "separate" ? "separate" : "bundled") as "bundled" | "separate",
   };
 }
 
@@ -724,7 +731,7 @@ const stmts = {
   getEstimateProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM estimate_items GROUP BY projectId`),
   getEstimateProjectBySourceTakeoff: db.prepare(`SELECT * FROM estimate_projects WHERE sourceTakeoffId = ? LIMIT 1`),
   getEstimateItems: db.prepare(`SELECT * FROM estimate_items WHERE projectId = ? ORDER BY lineNumber`),
-  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, markups_json = ? WHERE id = ?`),
+  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, fittingWeldMode = ?, markups_json = ? WHERE id = ?`),
   deleteEstimateProject: db.prepare(`DELETE FROM estimate_projects WHERE id = ?`),
   deleteEstimateItems: db.prepare(`DELETE FROM estimate_items WHERE projectId = ?`),
 
@@ -1055,6 +1062,7 @@ class Storage {
       location: data.location || "", sourceTakeoffId: data.sourceTakeoffId, createdAt, items,
       markups, laborRate: 56, overtimeRate: 79, doubleTimeRate: 100, perDiem: 75,
       overtimePercent: 15, doubleTimePercent: 2, estimateMethod: "manual",
+      fittingWeldMode: "bundled",
     };
   }
 
@@ -1078,9 +1086,10 @@ class Storage {
     const estimateMethod = data.estimateMethod ?? row.estimateMethod ?? "manual";
     // customMethodId: caller may pass null to clear, undefined to leave, or a string to set
     const customMethodId = data.customMethodId !== undefined ? data.customMethodId : row.customMethodId ?? null;
+    const fittingWeldMode = (data as any).fittingWeldMode ?? row.fittingWeldMode ?? "bundled";
     const markups = data.markups ?? currentMarkups;
 
-    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, JSON.stringify(markups), id);
+    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, fittingWeldMode, JSON.stringify(markups), id);
 
     if (data.items) {
       replaceEstimateItemsTransaction(id, data.items);
@@ -1094,6 +1103,7 @@ class Storage {
       perDiem, overtimePercent, doubleTimePercent,
       customMethodId: customMethodId || undefined,
       estimateMethod: estimateMethod as "bill" | "justin" | "industry" | "manual",
+      fittingWeldMode: (fittingWeldMode === "separate" ? "separate" : "bundled") as "bundled" | "separate",
     };
   }
 

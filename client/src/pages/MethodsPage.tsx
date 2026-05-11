@@ -60,6 +60,7 @@ const SECTIONS_BY_METHOD: Record<string, SectionDef[]> = {
     { key: "flanged_joints",       label: "Flanged Joints (MH/joint)", pathFromRoot: ["labor_rates", "flanged_joints_mh_per_joint"] },
     { key: "manhours_per_eq_inch", label: "Manhours per Eq. Inch",     pathFromRoot: ["labor_rates", "manhours_per_eq_inch"] },
     { key: "pipe_handling",        label: "Pipe Handling (MH/LF)",     pathFromRoot: ["labor_rates", "pipe_handling_mh_per_lf"] },
+    { key: "weld_end_multipliers", label: "Fitting Weld-End Multipliers", pathFromRoot: ["weld_end_multipliers"] },
     { key: "material_factors",     label: "Material Factors",          pathFromRoot: ["material_factors"] },
     { key: "material_factor_groups", label: "Material Factor Groups",  pathFromRoot: ["material_factor_groups"] },
   ],
@@ -70,6 +71,7 @@ const SECTIONS_BY_METHOD: Record<string, SectionDef[]> = {
     { key: "bolts",       label: "Bolts (MH/set)",      pathFromRoot: ["labor_factors", "bolts"] },
     { key: "threads",     label: "Threads (MH/joint)",  pathFromRoot: ["labor_factors", "threads"] },
     { key: "other",       label: "Other Factors",       pathFromRoot: ["labor_factors", "other"] },
+    { key: "weld_end_multipliers", label: "Fitting Weld-End Multipliers", pathFromRoot: ["weld_end_multipliers"] },
     { key: "cost_params", label: "Cost Parameters",     pathFromRoot: ["cost_params"] },
   ],
   industry: [
@@ -79,6 +81,7 @@ const SECTIONS_BY_METHOD: Record<string, SectionDef[]> = {
     { key: "bolts",       label: "Bolts (MH/set)",      pathFromRoot: ["labor_factors", "bolts"] },
     { key: "threads",     label: "Threads (MH/joint)",  pathFromRoot: ["labor_factors", "threads"] },
     { key: "other",       label: "Other Factors",       pathFromRoot: ["labor_factors", "other"] },
+    { key: "weld_end_multipliers", label: "Fitting Weld-End Multipliers", pathFromRoot: ["weld_end_multipliers"] },
     { key: "cost_params", label: "Cost Parameters",     pathFromRoot: ["cost_params"] },
   ],
 };

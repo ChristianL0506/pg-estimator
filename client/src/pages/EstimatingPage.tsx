@@ -1,6 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart } from "lucide-react";
+import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart, AlertCircle, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,6 +64,10 @@ export default function EstimatingPage() {
   const [estElevation, setEstElevation] = useState("0-20ft");
   const [estAlloyGroup, setEstAlloyGroup] = useState("4");
   const [estRackFactor, setEstRackFactor] = useState(1.3);
+  // Fitting-weld mode: "bundled" = fitting MH includes weld labor (legacy default);
+  // "separate" = fitting MH is handling only, separate weld rows carry weld labor.
+  const [estFittingWeldMode, setEstFittingWeldMode] = useState<"bundled" | "separate">("bundled");
+  const [showDiagnoseDialog, setShowDiagnoseDialog] = useState(false);
 
   // Version history state
   const [showVersions, setShowVersions] = useState(false);
@@ -193,9 +197,31 @@ export default function EstimatingPage() {
         elevation: estElevation,
         alloyGroup: estAlloyGroup,
         rackFactor: estRackFactor,
+        fittingWeldMode: estFittingWeldMode,
       }).then(r => r.json()),
     onError: (err: any) => {
       toast({ title: "Compare failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // Diagnose: re-runs the active method over the BOM and returns per-row
+  // formula breakdown + project-level warnings (double-counts, missing factors, etc.)
+  const diagnoseMutation = useMutation({
+    mutationFn: (id: string) =>
+      apiRequest("POST", `/api/estimates/${id}/diagnose`, {
+        method: estMethod,
+        customMethodId: estCustomMethodId || undefined,
+        material: estMaterial,
+        schedule: estSchedule,
+        installType: estInstallType,
+        pipeLocation: estPipeLocation,
+        elevation: estElevation,
+        alloyGroup: estAlloyGroup,
+        rackFactor: estRackFactor,
+        fittingWeldMode: estFittingWeldMode,
+      }).then(r => r.json()),
+    onError: (err: any) => {
+      toast({ title: "Diagnose failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -217,6 +243,7 @@ export default function EstimatingPage() {
         elevation: estElevation,
         alloyGroup: estAlloyGroup,
         rackFactor: estRackFactor,
+        fittingWeldMode: estFittingWeldMode,
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/estimates", selectedId] });
@@ -873,6 +900,34 @@ export default function EstimatingPage() {
                               </div>
                             </>
                           )}
+
+                          {/* Fitting/weld accounting mode — applies to every method */}
+                          <div>
+                            <label className="text-[10px] text-muted-foreground block mb-1" title="Decides whether a fitting's labor includes its weld ends (bundled) or whether weld rows in the BOM carry the weld labor (separate).">Fitting Welds</label>
+                            <select
+                              className="text-xs border border-input rounded px-2 py-1 bg-background h-7"
+                              value={estFittingWeldMode}
+                              onChange={e => setEstFittingWeldMode(e.target.value as "bundled" | "separate")}
+                              data-testid="select-fitting-weld-mode"
+                            >
+                              <option value="bundled">Bundled in fitting</option>
+                              <option value="separate">Separate weld rows</option>
+                            </select>
+                          </div>
+
+                          {/* Diagnose button */}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs"
+                            onClick={() => { setSelectedId(p.id); setShowDiagnoseDialog(true); diagnoseMutation.mutate(p.id); }}
+                            disabled={p.items.length === 0}
+                            data-testid="btn-diagnose"
+                            title="Show formula breakdown for every row + double-count warnings"
+                          >
+                            <Info size={12} className="mr-1.5" />
+                            Diagnose
+                          </Button>
 
                           {/* Calculate button */}
                           <Button
@@ -1585,6 +1640,7 @@ export default function EstimatingPage() {
                         elevation: estElevation,
                         alloyGroup: estAlloyGroup,
                         rackFactor: estRackFactor,
+                        fittingWeldMode: estFittingWeldMode,
                       });
                       const blob = await res.blob();
                       const url = URL.createObjectURL(blob);
@@ -1687,6 +1743,95 @@ export default function EstimatingPage() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowCompareDialog(false)} data-testid="btn-close-compare">Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Diagnose dialog — per-row formula breakdown + project warnings */}
+      <Dialog open={showDiagnoseDialog} onOpenChange={setShowDiagnoseDialog}>
+        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Diagnose Estimate</DialogTitle>
+          </DialogHeader>
+          {diagnoseMutation.isPending && (
+            <div className="text-sm text-muted-foreground py-8 text-center">Running diagnostic…</div>
+          )}
+          {diagnoseMutation.data && (
+            <div className="space-y-4">
+              {/* Summary header */}
+              <div className="flex items-center gap-4 flex-wrap text-xs">
+                <span><span className="text-muted-foreground">Method:</span> <strong>{diagnoseMutation.data.method}{diagnoseMutation.data.customMethodName ? ` (${diagnoseMutation.data.customMethodName})` : ""}</strong></span>
+                <span><span className="text-muted-foreground">Fitting welds:</span> <strong>{diagnoseMutation.data.fittingWeldMode === "separate" ? "Separate weld rows" : "Bundled in fitting"}</strong></span>
+                <span><span className="text-muted-foreground">Total MH:</span> <strong className="tabular-nums">{Math.round(diagnoseMutation.data.totalMH).toLocaleString()}</strong></span>
+                <span><span className="text-muted-foreground">Items:</span> <strong>{diagnoseMutation.data.itemsWithLabor} of {diagnoseMutation.data.itemCount} have labor</strong></span>
+              </div>
+
+              {/* Project-level warnings */}
+              {diagnoseMutation.data.warnings && diagnoseMutation.data.warnings.length > 0 && (
+                <div className="space-y-2">
+                  {diagnoseMutation.data.warnings.map((w: any) => {
+                    const tone = w.severity === "error"
+                      ? "bg-destructive/10 border-destructive/40 text-destructive"
+                      : w.severity === "warn"
+                        ? "bg-amber-500/10 border-amber-500/40"
+                        : "bg-blue-500/10 border-blue-500/30";
+                    return (
+                      <div key={w.code} className={`border rounded p-3 ${tone}`}>
+                        <div className="text-xs font-semibold flex items-center gap-2">
+                          <AlertCircle size={13} /> {w.title}
+                        </div>
+                        <div className="text-[11px] mt-1 leading-relaxed">{w.detail}</div>
+                        {w.affectedItemIds && w.affectedItemIds.length > 0 && (
+                          <div className="text-[10px] text-muted-foreground mt-1">Affects {w.affectedItemIds.length} item{w.affectedItemIds.length === 1 ? "" : "s"}.</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {diagnoseMutation.data.warnings && diagnoseMutation.data.warnings.length === 0 && (
+                <div className="text-xs bg-emerald-500/10 border border-emerald-500/30 rounded p-2 flex items-center gap-2">
+                  <CheckCircle2 size={13} className="text-emerald-600" /> No issues detected. Every row mapped to a labor factor and no double-counting was found.
+                </div>
+              )}
+
+              {/* Per-row breakdown */}
+              <div className="text-xs font-semibold pt-2">Per-row formula breakdown</div>
+              <div className="border rounded overflow-x-auto">
+                <table className="text-xs w-full">
+                  <thead className="bg-muted/40 sticky top-0">
+                    <tr>
+                      <th className="text-left px-2 py-1">#</th>
+                      <th className="text-left px-2 py-1 min-w-[180px]">Description</th>
+                      <th className="text-left px-2 py-1">Size</th>
+                      <th className="text-right px-2 py-1">Qty</th>
+                      <th className="text-right px-2 py-1">MH/unit</th>
+                      <th className="text-right px-2 py-1">Total MH</th>
+                      <th className="text-left px-2 py-1 min-w-[300px]">Formula</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {diagnoseMutation.data.rows.map((r: any) => {
+                      const flagged = r.warnings && r.warnings.length > 0;
+                      return (
+                        <tr key={r.itemId} className={`border-t hover:bg-muted/20 ${flagged ? "bg-amber-500/5" : ""}`}>
+                          <td className="px-2 py-1 tabular-nums">{r.lineNumber}</td>
+                          <td className="px-2 py-1 truncate max-w-[260px]" title={r.description}>{r.description}</td>
+                          <td className="px-2 py-1">{r.size}</td>
+                          <td className="px-2 py-1 text-right tabular-nums">{r.quantity} {r.unit}</td>
+                          <td className="px-2 py-1 text-right tabular-nums">{r.mhPerUnit.toFixed(3)}</td>
+                          <td className="px-2 py-1 text-right tabular-nums font-semibold">{r.totalMH.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-[10px] text-muted-foreground" title={r.calcBasis}>{r.calcBasis}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDiagnoseDialog(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

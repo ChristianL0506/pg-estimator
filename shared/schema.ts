@@ -125,6 +125,13 @@ export const estimateProjectSchema = z.object({
   // should be "bill" / "justin" / "industry" indicating the base; customMethodId
   // points at the override profile to layer on top.
   customMethodId: z.string().optional(),
+  // How to handle fitting labor relative to weld rows in the BOM:
+  //   "bundled"  — fitting MH = weld_factor × weld_end_multiplier (default; legacy behavior).
+  //                Assumes the BOM does NOT carry separate weld rows for the welds at
+  //                that fitting's ends.
+  //   "separate" — fitting MH = weld_factor × 0.15 (handling only). Use when the BOM
+  //                already has explicit weld rows counted at full weld factor.
+  fittingWeldMode: z.enum(["bundled", "separate"]).default("bundled"),
 });
 export type EstimateProject = z.infer<typeof estimateProjectSchema>;
 
