@@ -534,21 +534,25 @@ export default function EstimatingPage() {
   // ID tags, supervision etc. that don't show up on the BOM. We compute a
   // blended labor rate (incl. per diem) from the project's stored rate inputs
   // so adders contribute realistic labor cost even before auto-calculate runs.
-  const scopeAdders = ((p as any)?.scopeAdders as Array<{ id: string; label: string; hours: number; ratePerHour?: number; note?: string }> | undefined) || [];
+  const scopeAdders = ((p as any)?.scopeAdders as Array<{ id: string; label: string; mode?: "hours" | "cost"; hours: number; ratePerHour?: number; flatCost?: number; note?: string }> | undefined) || [];
   const stPercent = p ? Math.max(0, (100 - p.overtimePercent - p.doubleTimePercent) / 100) : 0.83;
   const otPercent = p ? p.overtimePercent / 100 : 0.15;
   const dtPercent = p ? p.doubleTimePercent / 100 : 0.02;
   const blendedRate = p ? (p.laborRate * stPercent + p.overtimeRate * otPercent + p.doubleTimeRate * dtPercent) : 56;
   const perDiemPerHour = p ? p.perDiem / 10 : 7.5;
   const effectiveRate = blendedRate + perDiemPerHour;
-  const adderHours = scopeAdders.reduce((s, a) => s + (a.hours || 0), 0);
-  const adderLabor = scopeAdders.reduce((s, a) => s + (a.hours || 0) * (a.ratePerHour ?? effectiveRate), 0);
+  // Split adders by mode. "hours" rows feed labor; "cost" rows feed a separate
+  // direct-cost line that joins the subtotal (so overhead/profit/bond apply,
+  // but tax doesn't — tax is material-only).
+  const adderHours = scopeAdders.reduce((s, a) => s + ((a.mode ?? "hours") === "hours" ? (a.hours || 0) : 0), 0);
+  const adderLabor = scopeAdders.reduce((s, a) => s + ((a.mode ?? "hours") === "hours" ? (a.hours || 0) * (a.ratePerHour ?? effectiveRate) : 0), 0);
+  const adderFlatCost = scopeAdders.reduce((s, a) => s + (a.mode === "cost" ? (a.flatCost || 0) : 0), 0);
 
   // Totals roll BOM + scope adders together so markups and grand total
   // reflect both. Display tables still separate them for transparency.
   const totalLabor = bomLabor + adderLabor;
   const totalHours = bomHours + adderHours;
-  const subtotal = totalMaterial + totalLabor;
+  const subtotal = totalMaterial + totalLabor + adderFlatCost;
   const overheadAmt = p ? subtotal * (p.markups.overhead / 100) : 0;
   const profitAmt = p ? (subtotal + overheadAmt) * (p.markups.profit / 100) : 0;
   const taxAmt = p ? totalMaterial * (p.markups.tax / 100) : 0;
@@ -1631,6 +1635,7 @@ export default function EstimatingPage() {
                             ...(adderLabor > 0 ? [{ label: "Labor (scope adders)", val: adderLabor, faint: true }] : []),
                             { label: "Labor (total)", val: totalLabor },
                             { label: `Labor Hours`, val: null, text: `${totalHours.toFixed(1)} hrs${adderHours > 0 ? ` (BOM ${bomHours.toFixed(1)} + adders ${adderHours.toFixed(1)})` : ""}` },
+                            ...(adderFlatCost > 0 ? [{ label: "Other costs (scope adders)", val: adderFlatCost }] : []),
                             { label: "Subtotal", val: subtotal, bold: true },
                             { label: `Overhead (${p.markups.overhead}%)`, val: overheadAmt },
                             { label: `Profit (${p.markups.profit}%)`, val: profitAmt },
@@ -2150,10 +2155,16 @@ function DbRow({ entry, onDelete }: { entry: CostDatabaseEntry; onDelete: () => 
 // Each row's MH flows into the project total at the effective blended labor
 // rate (or per-row override). Add/remove/edit auto-saves through the parent's
 // patchMutation via the onChange callback.
-type ScopeAdder = { id: string; label: string; hours: number; ratePerHour?: number; note?: string };
+type ScopeAdder = { id: string; label: string; mode?: "hours" | "cost"; hours: number; ratePerHour?: number; flatCost?: number; note?: string };
 function ScopeAddersPanel({ adders, effectiveRate, onChange }: { adders: ScopeAdder[]; effectiveRate: number; onChange: (next: ScopeAdder[]) => void }) {
-  const totalHours = adders.reduce((s, a) => s + (a.hours || 0), 0);
-  const totalCost = adders.reduce((s, a) => s + (a.hours || 0) * (a.ratePerHour ?? effectiveRate), 0);
+  // Two modes per row:
+  //   "hours" — hours × rate flows into labor (gets full markup including tax? no, tax is material-only)
+  //   "cost"  — flat dollar amount flows directly into subtotal (overhead/profit/bond apply, tax does not)
+  // Totals split so the user can see both buckets at a glance.
+  const totalHours = adders.reduce((s, a) => s + ((a.mode ?? "hours") === "hours" ? (a.hours || 0) : 0), 0);
+  const totalLaborCost = adders.reduce((s, a) => s + ((a.mode ?? "hours") === "hours" ? (a.hours || 0) * (a.ratePerHour ?? effectiveRate) : 0), 0);
+  const totalFlatCost = adders.reduce((s, a) => s + (a.mode === "cost" ? (a.flatCost || 0) : 0), 0);
+  const totalCost = totalLaborCost + totalFlatCost;
 
   function update(id: string, patch: Partial<ScopeAdder>) {
     onChange(adders.map(a => a.id === id ? { ...a, ...patch } : a));
@@ -2161,9 +2172,9 @@ function ScopeAddersPanel({ adders, effectiveRate, onChange }: { adders: ScopeAd
   function remove(id: string) {
     onChange(adders.filter(a => a.id !== id));
   }
-  function addNew() {
+  function addNew(mode: "hours" | "cost" = "hours") {
     const id = (window.crypto?.randomUUID?.() ?? `adder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-    onChange([...adders, { id, label: "New scope", hours: 0 }]);
+    onChange([...adders, { id, label: mode === "cost" ? "New cost item" : "New scope", mode, hours: 0, flatCost: 0 }]);
   }
 
   return (
@@ -2173,22 +2184,28 @@ function ScopeAddersPanel({ adders, effectiveRate, onChange }: { adders: ScopeAd
           <div>
             <CardTitle className="text-sm">Scope Adders</CardTitle>
             <p className="text-[10px] text-muted-foreground mt-0.5">
-              Hand-entered labor for scope that isn't on the BOM (hydro, demo, supports, supervision…). Hours flow into the project total at the blended labor rate ({fmt$(effectiveRate)}/hr including per diem) unless you override per row.
+              Hand-entered scope that isn't on the BOM. Hours rows flow into labor at the blended rate ({fmt$(effectiveRate)}/hr incl. per diem, override per row). Flat $ rows add direct cost (e.g. "MISC Supports $750") — marked up by overhead/profit/bond, not tax.
             </p>
           </div>
-          <Button size="sm" variant="outline" onClick={addNew} className="h-7 text-xs shrink-0" data-testid="btn-add-adder">
-            <Plus size={12} className="mr-1" /> Add row
-          </Button>
+          <div className="flex items-center gap-1 shrink-0">
+            <Button size="sm" variant="outline" onClick={() => addNew("hours")} className="h-7 text-xs" data-testid="btn-add-adder-hours">
+              <Plus size={12} className="mr-1" /> Hours row
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => addNew("cost")} className="h-7 text-xs" data-testid="btn-add-adder-cost">
+              <Plus size={12} className="mr-1" /> $ row
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="p-4 pt-0">
         {adders.length === 0 ? (
-          <p className="text-xs text-muted-foreground py-2">No scope adders. Click "Add row" to capture hydro, demo, supervision, or any other labor scope not on the BOM.</p>
+          <p className="text-xs text-muted-foreground py-2">No scope adders. Add an Hours row for hydro/demo/supervision, or a $ row for a flat cost like "MISC Supports $750".</p>
         ) : (
           <table className="w-full text-xs">
             <thead>
               <tr className="text-[10px] text-muted-foreground uppercase tracking-wide">
                 <th className="text-left py-1 pr-2">Label</th>
+                <th className="text-left py-1 px-2 w-20">Mode</th>
                 <th className="text-right py-1 px-2 w-20">Hours</th>
                 <th className="text-right py-1 px-2 w-24">Rate $/hr</th>
                 <th className="text-right py-1 px-2 w-24">Cost</th>
@@ -2197,8 +2214,10 @@ function ScopeAddersPanel({ adders, effectiveRate, onChange }: { adders: ScopeAd
             </thead>
             <tbody>
               {adders.map(a => {
+                const mode = a.mode ?? "hours";
                 const rate = a.ratePerHour ?? effectiveRate;
-                const cost = (a.hours || 0) * rate;
+                const cost = mode === "hours" ? (a.hours || 0) * rate : (a.flatCost || 0);
+                const dimmed = "text-muted-foreground/40";
                 return (
                   <tr key={a.id} className="border-t border-border">
                     <td className="py-1 pr-2">
@@ -2207,21 +2226,33 @@ function ScopeAddersPanel({ adders, effectiveRate, onChange }: { adders: ScopeAd
                         defaultValue={a.label}
                         onBlur={e => { if (e.target.value !== a.label) update(a.id, { label: e.target.value }); }}
                         className="w-full bg-transparent border-0 border-b border-transparent hover:border-border focus:border-primary outline-none px-1"
-                        placeholder="Hydro test, Demo, Supervision…"
+                        placeholder={mode === "cost" ? "MISC Supports, Subcontract…" : "Hydro test, Demo, Supervision…"}
                         data-testid={`input-adder-label-${a.id}`}
                       />
                       {a.note && <p className="text-[9px] text-muted-foreground pl-1 mt-0.5">{a.note}</p>}
+                    </td>
+                    <td className="py-1 px-2">
+                      <select
+                        value={mode}
+                        onChange={e => update(a.id, { mode: e.target.value as "hours" | "cost" })}
+                        className="w-full bg-transparent border border-transparent hover:border-border focus:border-primary outline-none px-1 py-0.5 rounded text-[11px]"
+                        data-testid={`select-adder-mode-${a.id}`}
+                      >
+                        <option value="hours">Hours</option>
+                        <option value="cost">Flat $</option>
+                      </select>
                     </td>
                     <td className="py-1 px-2 text-right">
                       <input
                         type="number"
                         step="0.5"
                         defaultValue={a.hours}
+                        disabled={mode === "cost"}
                         onBlur={e => {
                           const v = parseFloat(e.target.value) || 0;
                           if (v !== a.hours) update(a.id, { hours: v });
                         }}
-                        className="w-full text-right bg-transparent font-mono border-0 border-b border-transparent hover:border-border focus:border-primary outline-none px-1"
+                        className={`w-full text-right bg-transparent font-mono border-0 border-b border-transparent hover:border-border focus:border-primary outline-none px-1 ${mode === "cost" ? dimmed : ""}`}
                         data-testid={`input-adder-hours-${a.id}`}
                       />
                     </td>
@@ -2231,16 +2262,33 @@ function ScopeAddersPanel({ adders, effectiveRate, onChange }: { adders: ScopeAd
                         step="0.5"
                         defaultValue={a.ratePerHour ?? ""}
                         placeholder={effectiveRate.toFixed(2)}
+                        disabled={mode === "cost"}
                         onBlur={e => {
                           const raw = e.target.value.trim();
                           const v = raw === "" ? undefined : (parseFloat(raw) || 0);
                           if (v !== a.ratePerHour) update(a.id, { ratePerHour: v });
                         }}
-                        className="w-full text-right bg-transparent font-mono border-0 border-b border-transparent hover:border-border focus:border-primary outline-none px-1 text-muted-foreground"
+                        className={`w-full text-right bg-transparent font-mono border-0 border-b border-transparent hover:border-border focus:border-primary outline-none px-1 ${mode === "cost" ? dimmed : "text-muted-foreground"}`}
                         data-testid={`input-adder-rate-${a.id}`}
                       />
                     </td>
-                    <td className="py-1 px-2 text-right font-mono">{fmt$(cost)}</td>
+                    <td className="py-1 px-2 text-right">
+                      {mode === "cost" ? (
+                        <input
+                          type="number"
+                          step="50"
+                          defaultValue={a.flatCost ?? 0}
+                          onBlur={e => {
+                            const v = parseFloat(e.target.value) || 0;
+                            if (v !== a.flatCost) update(a.id, { flatCost: v });
+                          }}
+                          className="w-full text-right bg-transparent font-mono border-0 border-b border-transparent hover:border-border focus:border-primary outline-none px-1"
+                          data-testid={`input-adder-flatcost-${a.id}`}
+                        />
+                      ) : (
+                        <span className="font-mono">{fmt$(cost)}</span>
+                      )}
+                    </td>
                     <td className="py-1">
                       <button
                         className="text-muted-foreground hover:text-destructive"
@@ -2256,8 +2304,9 @@ function ScopeAddersPanel({ adders, effectiveRate, onChange }: { adders: ScopeAd
               })}
               <tr className="border-t border-border bg-muted/30 font-semibold">
                 <td className="py-1.5 pr-2">Totals</td>
-                <td className="py-1.5 px-2 text-right font-mono">{totalHours.toFixed(1)}</td>
                 <td className="py-1.5 px-2"></td>
+                <td className="py-1.5 px-2 text-right font-mono">{totalHours.toFixed(1)}</td>
+                <td className="py-1.5 px-2 text-right text-[10px] text-muted-foreground">{totalFlatCost > 0 ? `+${fmt$(totalFlatCost)} flat` : ""}</td>
                 <td className="py-1.5 px-2 text-right font-mono text-primary">{fmt$(totalCost)}</td>
                 <td></td>
               </tr>

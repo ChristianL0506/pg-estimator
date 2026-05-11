@@ -144,17 +144,25 @@ export const estimateProjectSchema = z.object({
   //   "separate" — fitting MH = weld_factor × 0.15 (handling only). Use when the BOM
   //                already has explicit weld rows counted at full weld factor.
   fittingWeldMode: z.enum(["bundled", "separate"]).default("bundled"),
-  // Project-level "scope adders" — hand-entered MH for work that isn't on the
-  // BOM but the estimator needs to capture: hydro testing, demo, supports,
-  // ID tags, supervision, etc. Each adder is { label, hours, ratePerHour? }.
-  // Hours flow into total labor MH; cost uses the project's blended labor rate
-  // unless the adder overrides via ratePerHour. Default seed below comes from
-  // analyzing Justin's worksheet — the user can edit/remove/add freely.
+  // Project-level "scope adders" — hand-entered scope that isn't on the BOM:
+  // hydro testing, demo, supports, ID tags, supervision, misc subcontract, etc.
+  // Two modes:
+  //   mode="hours": hours × (ratePerHour ?? blended effective rate) → flows
+  //                 into labor cost and labor hours. Marked up like BOM labor.
+  //   mode="cost":  flatCost in dollars → flows into subtotal as a direct cost
+  //                 line (no labor hours). Overhead/profit/bond apply; tax
+  //                 does not (tax is material-only). Use this for things like
+  //                 "MISC Supports $750" or subcontract work where you have a
+  //                 number from a vendor and don't want to derive it from MH.
+  // Default seed below comes from analyzing Justin's worksheet — the user can
+  // edit/remove/add freely, and flip individual rows between modes.
   scopeAdders: z.array(z.object({
     id: z.string(),
     label: z.string(),
+    mode: z.enum(["hours", "cost"]).default("hours"),
     hours: z.number().default(0),
     ratePerHour: z.number().optional(),
+    flatCost: z.number().default(0),
     note: z.string().optional(),
   })).default([]),
 });

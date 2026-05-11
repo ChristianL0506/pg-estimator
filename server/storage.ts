@@ -1098,11 +1098,12 @@ class Storage {
     // each row freely; values default to 0 so they only contribute MH if the
     // estimator chooses to fill them in.
     const seedAdders = [
-      { id: randomUUID(), label: "Hydro Test", hours: 0, note: "Pressure test labor (Justin uses 20 MH typical)" },
-      { id: randomUUID(), label: "Demolition", hours: 0, note: "Tie-in demo / removal labor" },
-      { id: randomUUID(), label: "Supports", hours: 0, note: "Field-installed support labor (Justin uses 2 MH/support)" },
-      { id: randomUUID(), label: "ID Tags", hours: 0, note: "Tag fabrication and install (Justin uses 1 MH/tag)" },
-      { id: randomUUID(), label: "Supervision", hours: 0, note: "Project supervision hours (Justin uses 60 MH/week)" },
+      { id: randomUUID(), label: "Hydro Test", mode: "hours", hours: 0, flatCost: 0, note: "Pressure test labor (Justin uses 20 MH typical)" },
+      { id: randomUUID(), label: "Demolition", mode: "hours", hours: 0, flatCost: 0, note: "Tie-in demo / removal labor" },
+      { id: randomUUID(), label: "Supports", mode: "hours", hours: 0, flatCost: 0, note: "Field-installed support labor (Justin uses 2 MH/support)" },
+      { id: randomUUID(), label: "ID Tags", mode: "hours", hours: 0, flatCost: 0, note: "Tag fabrication and install (Justin uses 1 MH/tag)" },
+      { id: randomUUID(), label: "Supervision", mode: "hours", hours: 0, flatCost: 0, note: "Project supervision hours (Justin uses 60 MH/week)" },
+      { id: randomUUID(), label: "MISC Supports", mode: "cost", hours: 0, flatCost: 0, note: "Flat-cost example — enter vendor/subcontract dollars directly" },
     ];
     stmts.insertEstimateProject.run(id, data.name, data.projectNumber || "", data.client || "", data.location || "", data.sourceTakeoffId || null, createdAt, 56, 79, 100, 75, 15, 2, "manual", "separate", JSON.stringify(markups), JSON.stringify(seedAdders));
     if (items.length > 0) {
