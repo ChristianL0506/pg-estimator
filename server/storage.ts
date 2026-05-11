@@ -743,7 +743,8 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
     doubleTimePercent: row.doubleTimePercent ?? 2,
     estimateMethod: row.estimateMethod || "manual",
     customMethodId: row.customMethodId || undefined,
-    fittingWeldMode: (row.fittingWeldMode === "separate" ? "separate" : "bundled") as "bundled" | "separate",
+    // Accept all three modes; coerce anything unknown back to 'bundled' for safety.
+    fittingWeldMode: ((row.fittingWeldMode === "separate" || row.fittingWeldMode === "auto-welds") ? row.fittingWeldMode : "bundled") as "bundled" | "separate" | "auto-welds",
     contingencyOverride: row.contingencyOverride === null || row.contingencyOverride === undefined ? undefined : Number(row.contingencyOverride),
     scopeAdders,
   } as any;
