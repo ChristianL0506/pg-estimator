@@ -978,6 +978,28 @@ export default function EstimatingPage() {
                       <Button
                         variant="outline"
                         size="sm"
+                        className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                        onClick={async () => {
+                          try {
+                            const res = await apiRequest("GET", `/api/estimates/${p.id}/export-industry`);
+                            const blob = await res.blob();
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `${p.name} - Industry Standard.xlsx`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                            toast({ title: "Downloaded Industry Standard workbook" });
+                          } catch { toast({ title: "Export failed", variant: "destructive" }); }
+                        }}
+                        data-testid="btn-export-industry"
+                      >
+                        <FileSpreadsheet size={13} className="mr-1.5" />
+                        Export Industry (Page)
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         onClick={() => inferWeldsMutation.mutate(p.id)}
                         disabled={inferWeldsMutation.isPending || p.items.length === 0}
                         data-testid="btn-infer-welds"

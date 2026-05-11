@@ -6597,6 +6597,26 @@ Picou Group Contractors`;
     }
   });
 
+  // Industry (Page) uses the same calculator output shape as Justin
+  // (labor_factors / cost_params), so the Justin workbook layout is
+  // a perfect fit — we just relabel the filename. The item rows already
+  // carry the Industry man-hour factors because the estimate was run
+  // through the Industry calculator.
+  app.get("/api/estimates/:id/export-industry", async (req, res) => {
+    const project = storage.getEstimateProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Estimate not found" });
+    try {
+      const wb = await generateJustinsWorkbook(project);
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${project.name.replace(/[^a-zA-Z0-9 _-]/g, "")} - Industry Standard.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Excel export error:", err);
+      res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
   // Export a method's full factor tree to Excel. methodKey is one of
   // 'bill' / 'justin' / 'industry' (base method) or 'custom:<id>' (custom profile).
   // For custom profiles we apply overrides on top of the base before exporting,
