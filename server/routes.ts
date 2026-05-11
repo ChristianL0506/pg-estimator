@@ -2397,10 +2397,15 @@ function flagPotentialDuplicates(items: any[]): { flaggedCount: number; groups: 
 // We keep pipeRowRecovery for safety as a final net but it should rarely fire
 // in practice once the BOM crop expansion + re-extract wiring is live.
 
-// Detects pages whose extracted items show signs of row-1 omission — namely:
-//   * No PIPE-category item on the page (very rare for a real ISO with fittings)
-//   * Or, the lowest-numbered item has itemNo > 1 (gap at the top of the BOM)
-//   * Or, page has fittings (elbow/tee/flange) but zero pipe items
+// Detects pages whose extracted items show signs of an extraction failure:
+//   * Total failure: a page-number GAP in the extracted set (e.g., we got
+//     items for pages 1,2,3,4,6,7,... — page 5 returned zero items so it's
+//     missing from the set entirely). The model occasionally returns an
+//     empty items array for a perfectly valid BOM page — these need
+//     re-extraction at full-page DPI.
+//   * Row-1 miss: fittings present (elbow/tee/flange) but no PIPE row
+//   * Gap at top: lowest-numbered itemNo > 1 (rows above were dropped)
+//
 // Returns the list of suspect global page numbers.
 function detectSuspectPages(items: any[]): number[] {
   const byPage: Record<number, any[]> = {};
@@ -2411,6 +2416,24 @@ function detectSuspectPages(items: any[]): number[] {
     byPage[p].push(it);
   }
   const suspect = new Set<number>();
+
+  // Total-failure detection via page-number gaps.
+  // Find the min and max source page across all items. Any integer in that
+  // range that has zero items is a missing page — almost certainly an empty
+  // extraction (the model returned items: []). Title pages won't be in the
+  // range because they were never sent to extraction in the first place
+  // (filtered upstream by isTitlePage).
+  const pagesWithItems = Object.keys(byPage).map(p => parseInt(p)).filter(p => byPage[p].length > 0);
+  if (pagesWithItems.length >= 2) {
+    const minPage = Math.min(...pagesWithItems);
+    const maxPage = Math.max(...pagesWithItems);
+    for (let p = minPage + 1; p < maxPage; p++) {
+      if (!byPage[p] || byPage[p].length === 0) {
+        suspect.add(p);
+      }
+    }
+  }
+
   for (const [pStr, pageItems] of Object.entries(byPage)) {
     const p = parseInt(pStr);
     if (pageItems.length === 0) continue;
