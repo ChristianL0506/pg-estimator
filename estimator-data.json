@@ -829,6 +829,18 @@
       "union": 0.4,
       "flange": 1.0,
       "fitting": 0.6
+    },
+    "welds_per_fitting": {
+      "elbow_90": 2,
+      "elbow_45": 2,
+      "elbow": 2,
+      "tee": 3,
+      "reducer": 2,
+      "cap": 1,
+      "coupling": 2,
+      "union": 0,
+      "flange": 1,
+      "fitting": 2
     }
   },
   "justin": {
@@ -1167,6 +1179,18 @@
       "union": 0.5,
       "flange": 0.5,
       "fitting": 0.5
+    },
+    "welds_per_fitting": {
+      "elbow_90": 2,
+      "elbow_45": 2,
+      "elbow": 2,
+      "tee": 3,
+      "reducer": 2,
+      "cap": 1,
+      "coupling": 2,
+      "union": 0,
+      "flange": 1,
+      "fitting": 2
     }
   },
   "industry": {
@@ -1547,6 +1571,18 @@
       "union": 0.5,
       "flange": 0.5,
       "fitting": 0.5
+    },
+    "welds_per_fitting": {
+      "elbow_90": 2,
+      "elbow_45": 2,
+      "elbow": 2,
+      "tee": 3,
+      "reducer": 2,
+      "cap": 1,
+      "coupling": 2,
+      "union": 0,
+      "flange": 1,
+      "fitting": 2
     }
   }
 }

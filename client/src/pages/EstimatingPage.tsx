@@ -79,8 +79,8 @@ function getRowConfidence(item: EstimateItem): RowConfidence {
 // logic so we can show a persistent banner without an extra roundtrip.
 function detectModeMismatch(
   items: EstimateItem[],
-  mode: "bundled" | "separate"
-): { kind: "double-count" | "missing-welds"; sizes?: string[]; suggestion: "separate" | "bundled" } | null {
+  mode: "bundled" | "separate" | "auto-welds"
+): { kind: "double-count" | "missing-welds"; sizes?: string[]; suggestion: "separate" | "bundled" | "auto-welds" } | null {
   const fittingsBySize = new Map<string, number>();
   const weldsBySize = new Map<string, number>();
   for (const it of items) {
@@ -93,7 +93,11 @@ function detectModeMismatch(
     if (isFitting) fittingsBySize.set(sz, (fittingsBySize.get(sz) || 0) + 1);
     else if (isWeld) weldsBySize.set(sz, (weldsBySize.get(sz) || 0) + 1);
   }
-  if (mode === "bundled") {
+  if (mode === "bundled" || mode === "auto-welds") {
+    // In both modes the fitting line carries its own weld labor, so any
+    // explicit weld rows at the same size are a double-count. Recommend
+    // 'separate' if the user actually wants the BOM-driven weld rows to
+    // carry the labor.
     const overlap: string[] = [];
     for (const sz of fittingsBySize.keys()) {
       if ((weldsBySize.get(sz) || 0) > 0) overlap.push(sz);
@@ -105,7 +109,7 @@ function detectModeMismatch(
   let fittingCount = 0; let weldCount = 0;
   for (const v of fittingsBySize.values()) fittingCount += v;
   for (const v of weldsBySize.values()) weldCount += v;
-  if (fittingCount > 0 && weldCount === 0) return { kind: "missing-welds", suggestion: "bundled" };
+  if (fittingCount > 0 && weldCount === 0) return { kind: "missing-welds", suggestion: "auto-welds" };
   return null;
 }
 
@@ -141,11 +145,15 @@ export default function EstimatingPage() {
   const [estElevation, setEstElevation] = useState("0-20ft");
   const [estAlloyGroup, setEstAlloyGroup] = useState("4");
   const [estRackFactor, setEstRackFactor] = useState(1.3);
-  // Fitting-weld mode: "bundled" = fitting MH includes weld labor (legacy default);
-  // "separate" = fitting MH is handling only, separate weld rows carry weld labor.
-  // Default is "separate" because the BOM extractor and "Infer Welds from Fittings"
-  // both produce explicit weld rows, and bundled mode would double-count them.
-  const [estFittingWeldMode, setEstFittingWeldMode] = useState<"bundled" | "separate">("separate");
+  // Fitting-weld mode — three options:
+  //   "bundled":    fitting MH = weld_factor × weld_end_multiplier (legacy multipliers).
+  //   "separate":   fitting MH = weld_factor × 0.15 (handling only); BOM carries weld rows.
+  //                 Default because BOM extractor + Infer Welds produce explicit weld rows.
+  //   "auto-welds": fitting MH = welds_per_fitting × weld_factor + handling.
+  //                 The fitting line itself counts as N welds (elbow=2, tee=3, etc.).
+  //                 In this mode you should NOT run Infer Welds — each fitting carries
+  //                 its own welds inline. This is what most estimators visualize.
+  const [estFittingWeldMode, setEstFittingWeldMode] = useState<"bundled" | "separate" | "auto-welds">("separate");
   const [showDiagnoseDialog, setShowDiagnoseDialog] = useState(false);
 
   // Version history state
@@ -1034,17 +1042,22 @@ export default function EstimatingPage() {
                             </>
                           )}
 
-                          {/* Fitting/weld accounting mode — applies to every method */}
+                          {/* Fitting/weld accounting mode — applies to every method.
+                              Three options trade off how welds get counted:
+                              - Bundled:   legacy multiplier on fitting (under-counts welds)
+                              - Separate:  weld rows in BOM + handling on fitting
+                              - Auto-welds: each fitting counts as N welds inline (no row needed) */}
                           <div>
-                            <label className="text-[10px] text-muted-foreground block mb-1" title="Decides whether a fitting's labor includes its weld ends (bundled) or whether weld rows in the BOM carry the weld labor (separate).">Fitting Welds</label>
+                            <label className="text-[10px] text-muted-foreground block mb-1" title="Bundled: legacy multiplier on fitting. Separate: weld rows in BOM + fitting handling only. Auto-welds: fitting line counts as its N welds (elbow=2, tee=3, etc.) inline — do NOT run Infer Welds in this mode.">Fitting Welds</label>
                             <select
                               className="text-xs border border-input rounded px-2 py-1 bg-background h-7"
                               value={estFittingWeldMode}
-                              onChange={e => setEstFittingWeldMode(e.target.value as "bundled" | "separate")}
+                              onChange={e => setEstFittingWeldMode(e.target.value as "bundled" | "separate" | "auto-welds")}
                               data-testid="select-fitting-weld-mode"
                             >
-                              <option value="bundled">Bundled in fitting</option>
+                              <option value="bundled">Bundled (legacy multipliers)</option>
                               <option value="separate">Separate weld rows</option>
+                              <option value="auto-welds">Auto-welds (welds in fitting)</option>
                             </select>
                           </div>
 

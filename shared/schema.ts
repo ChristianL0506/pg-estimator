@@ -138,12 +138,19 @@ export const estimateProjectSchema = z.object({
   // points at the override profile to layer on top.
   customMethodId: z.string().optional(),
   // How to handle fitting labor relative to weld rows in the BOM:
-  //   "bundled"  — fitting MH = weld_factor × weld_end_multiplier (default; legacy behavior).
-  //                Assumes the BOM does NOT carry separate weld rows for the welds at
-  //                that fitting's ends.
-  //   "separate" — fitting MH = weld_factor × 0.15 (handling only). Use when the BOM
-  //                already has explicit weld rows counted at full weld factor.
-  fittingWeldMode: z.enum(["bundled", "separate"]).default("bundled"),
+  //   "bundled"     — fitting MH = weld_factor × weld_end_multiplier (legacy).
+  //                   Multiplier from the method's weld_end_multipliers table.
+  //                   Assumes BOM has no separate weld rows for the fitting's ends.
+  //   "separate"    — fitting MH = weld_factor × 0.15 (handling only). Use when
+  //                   the BOM already carries explicit weld rows at full factor.
+  //   "auto-welds"  — fitting MH = welds_per_fitting × weld_factor + handling.
+  //                   The fitting line itself counts as N welds (elbow=2, tee=3,
+  //                   reducer=2, cap=1, etc.) plus 0.15 handling overhead. NO
+  //                   separate weld inference should run in this mode — each
+  //                   fitting carries its own welds inline. This is the cleanest
+  //                   real-world reading: "an elbow IS two welds, multiplied by
+  //                   the weld factor, multiplied by the blended rate."
+  fittingWeldMode: z.enum(["bundled", "separate", "auto-welds"]).default("bundled"),
   // Project-level contingency override (percent). When set, replaces the default
   // contingency factor baked into estimator-data.json for the active method:
   //   Industry: default 10%  (Page guidance)

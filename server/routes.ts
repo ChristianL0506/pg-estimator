@@ -85,9 +85,11 @@ const autoCalculateBodySchema = z.object({
   alloyGroup: z.string().default("4"),
   rackFactor: z.number().min(1).max(5).default(1.3),
   // How to treat fitting labor vs separate weld rows.
-  // "bundled" (default): fitting MH includes its weld labor via the weld-end multiplier.
-  // "separate": fitting MH is handling only; weld rows in the BOM carry the weld labor.
-  fittingWeldMode: z.enum(["bundled", "separate"]).default("bundled"),
+  // "bundled":    fitting MH = weld_factor × weld_end_multiplier (legacy multipliers).
+  // "separate":   fitting MH = weld_factor × 0.15 (handling only); BOM carries weld rows.
+  // "auto-welds": fitting MH = welds_per_fitting × weld_factor + handling. The fitting
+  //               line counts as N welds inline (elbow=2, tee=3, etc.).
+  fittingWeldMode: z.enum(["bundled", "separate", "auto-welds"]).default("bundled"),
 }).refine(data => data.overtimePercent + data.doubleTimePercent <= 100, {
   message: "overtimePercent + doubleTimePercent cannot exceed 100",
   path: ["overtimePercent"],
@@ -108,7 +110,7 @@ const patchEstimateSchema = z.object({
   doubleTimePercent: z.number().optional(),
   estimateMethod: z.enum(["bill", "justin", "industry", "manual"]).optional(),
   customMethodId: z.string().optional(),
-  fittingWeldMode: z.enum(["bundled", "separate"]).optional(),
+  fittingWeldMode: z.enum(["bundled", "separate", "auto-welds"]).optional(),
   // Pass a number to override, null to clear, undefined to leave unchanged.
   // Percentage value (e.g. 15 = 15%). Bill method ignores this.
   contingencyOverride: z.number().nullable().optional(),
@@ -4758,7 +4760,7 @@ function calculateBillLaborHours(
   pipeLocation: string,
   elevation: string,
   alloyGroup: string,
-  fittingWeldMode: "bundled" | "separate" = "bundled"
+  fittingWeldMode: "bundled" | "separate" | "auto-welds" = "bundled"
 ): { laborHoursPerUnit: number; materialUnitCostAdjust: number; calcBasis: string; sizeMatchExact: boolean; materialCostSource: string } {
   const nps = parseSizeNPS(item.size);
   const sched = normalizeSchedule(schedule);
@@ -4940,8 +4942,27 @@ function calculateBillLaborHours(
     }
   }
 
-  // --- FLANGED JOINT / BOLT-UP ---
-  if (descLower.includes("flange") || descLower.includes("bolt") || descLower.includes("stud") || catLower === "bolt" || catLower === "flange") {
+  // --- BOLT-UP HARDWARE: stud bolts / nuts as separate line items ---
+  // The flanged-joints table below is labor PER JOINT (one bolt-up). Counting
+  // it again on each individual stud-bolt or nut line would massively
+  // over-inflate the labor. Stud bolt / nut hardware contributes 0 MH; the
+  // joint labor lives on the flange row.
+  const isBillStudBolt = (
+    catLower === "bolt" ||
+    /\b(stud\s*bolt|hex\s*bolt|machine\s*bolt|cap\s*screw|heavy\s*hex\s*nut|hex\s*nut)\b/i.test(descLower) ||
+    (descLower.includes("bolt") && !descLower.includes("bolt-up") && !descLower.includes("bolted") && catLower !== "flange") ||
+    (descLower.includes("stud") && !descLower.includes("bolt-up") && !descLower.includes("bolted") && catLower !== "flange")
+  );
+  if (isBillStudBolt) {
+    return {
+      laborHoursPerUnit: 0, materialUnitCostAdjust: 0,
+      calcBasis: "Bill's EI: Stud bolt/nut hardware → 0 MH (joint labor is on the flange line)",
+      sizeMatchExact: true, materialCostSource: "",
+    };
+  }
+
+  // --- FLANGED JOINT (one bolt-up per flange line) ---
+  if (catLower === "flange" || descLower.includes("flange") || descLower.includes("bolt-up") || descLower.includes("bolted joint") || descLower.includes("flange pair")) {
     const flangeTable = lr.flanged_joints_mh_per_joint;
     const found = findClosestKey(flangeTable, nps);
     if (found && flangeTable[found.key]) {
@@ -4950,7 +4971,7 @@ function calculateBillLaborHours(
       const baseMh = flangeTable[found.key][ratingKey] || 0;
       const mh = baseMh * elevFactor;
       const warn = sizeWarn(found, nps);
-      const basis = `Bill's EI: Flange/Bolt ${found.key}\" ${ratingKey}# → base=${baseMh} MH × ${elevFactor} (${elevation}) = ${mh.toFixed(4)} MH${warn}`;
+      const basis = `Bill's EI: Flange bolt-up ${found.key}\" ${ratingKey}# → base=${baseMh} MH/joint × ${elevFactor} (${elevation}) = ${mh.toFixed(4)} MH${warn}`;
       return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "" };
     }
   }
@@ -5055,13 +5076,26 @@ function calculateBillLaborHours(
     else if (catLower === "union" || descLower.includes("union")) { fittingKey = "union"; legacyMult = 0.4; fittingType = "Union"; }
 
     const bundledMult = (wem[fittingKey] !== undefined ? wem[fittingKey] : (wem["fitting"] !== undefined ? wem["fitting"] : legacyMult));
-    const fittingEiMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
-
     const weldTable = lr.butt_welds_ei;
     const found = findClosestKey(weldTable, nps);
     if (found && weldTable[found.key]) {
       const schedKey = sched in weldTable[found.key] ? sched : ("STD" in weldTable[found.key] ? "STD" : Object.keys(weldTable[found.key])[0]);
       const baseEi = weldTable[found.key][schedKey] || 0;
+      // Auto-welds: fitting EI = welds_per_fitting × weld_EI + handling.
+      if (fittingWeldMode === "auto-welds") {
+        const wpf = (billData.welds_per_fitting || {}) as Record<string, number>;
+        let weldsCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
+        const isThreaded = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
+        if (isThreaded) weldsCount = 0;
+        const handlingFactor = 0.15;
+        const ei = weldsCount * baseEi + handlingFactor * baseEi;
+        const mh = ei * fieldMhPerEi * alloyFactor * elevFactor * weldLocationFactor;
+        const warn = sizeWarn(found, nps);
+        const breakdown = `${weldsCount} weld(s) × ${baseEi} + ${handlingFactor} handling × ${baseEi}`;
+        const basis = `Bill's EI: ${fittingType} ${found.key}\" ${schedKey} → ${breakdown} = ${ei.toFixed(1)} EI × ${fieldMhPerEi} MH/EI × ${elevFactor} (elev) × ${alloyFactor} (alloy) × ${weldLocationFactor} (${pipeLocation} weld) = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`;
+        return { laborHoursPerUnit: mh, materialUnitCostAdjust: 0, calcBasis: basis, sizeMatchExact, materialCostSource: "" };
+      }
+      const fittingEiMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
       const ei = baseEi * fittingEiMult;
       const mh = ei * fieldMhPerEi * alloyFactor * elevFactor * weldLocationFactor;
       const warn = sizeWarn(found, nps);
@@ -5086,7 +5120,7 @@ function calculateJustinLaborHours(
   material: "CS" | "SS",
   schedule: string,
   justinData: any,
-  fittingWeldMode: "bundled" | "separate" = "bundled"
+  fittingWeldMode: "bundled" | "separate" | "auto-welds" = "bundled"
 ): { mh: number; calcBasis: string; sizeMatchExact: boolean } {
   const nps = parseSizeNPS(item.size);
   const factors = justinData.labor_factors;
@@ -5163,18 +5197,53 @@ function calculateJustinLaborHours(
     return { mh, calcBasis: `Justin: Thread ${sz} → ${mh} MH/connection`, sizeMatchExact: true };
   }
 
-  // --- BOLT-UP / FLANGE ---
-  if (descLower.includes("bolt") || descLower.includes("stud") || catLower === "bolt" || (descLower.includes("flange") && !descLower.includes("weld"))) {
+  // --- BOLT-UP (FLANGE JOINTS) ---
+  // Justin's "Bolts" table is labor MH per FLANGE BOLT-UP SET (one complete
+  // bolted joint: set gasket, stab studs, run nuts to spec). It is NOT labor
+  // per individual stud bolt or per nut.
+  //
+  // Classification:
+  //   1. Stud-bolt / nut line items  → 0 MH. The stud bolts are the hardware
+  //      that the flange's bolt-up labor already covers. Counting MH on the
+  //      stud-bolt line would double-count (e.g. 48 studs × 1.6 MH each =
+  //      77 MH instead of the real ~1.6 MH for the single joint).
+  //   2. Flange line items (WN, SO, BL, RFSO, etc.) → 1 bolt-up per flange.
+  //      Charge MH/set from factors.bolts sized by the flange. The weld on
+  //      a weld-neck flange is counted separately as a BW row.
+  //   3. Explicit "BOLT-UP" / "BOLTED JOINT" / "FLANGE PAIR" items → charge
+  //      MH/set (one joint).
+  const isStudBoltItem = (
+    catLower === "bolt" ||
+    /\b(stud\s*bolt|hex\s*bolt|machine\s*bolt|cap\s*screw|heavy\s*hex\s*nut|hex\s*nut)\b/i.test(descLower) ||
+    (descLower.includes("bolt") && !descLower.includes("bolt-up") && !descLower.includes("bolted")) ||
+    (descLower.includes("stud") && !descLower.includes("bolt-up") && !descLower.includes("bolted"))
+  );
+  if (isStudBoltItem) {
+    // Stud bolt / nut hardware item — labor is captured on the flange's bolt-up.
+    return {
+      mh: 0,
+      calcBasis: `Justin: Stud bolt/nut hardware → 0 MH (bolt-up labor is on the flange line)`,
+      sizeMatchExact: true,
+    };
+  }
+  const isFlangeJoint = (
+    catLower === "flange" ||
+    descLower.includes("flange") ||
+    descLower.includes("bolt-up") ||
+    descLower.includes("bolted joint") ||
+    descLower.includes("flange pair")
+  );
+  if (isFlangeJoint) {
     const match = findBestMatch(factors.bolts || {});
     if (match) {
       const rating = normalizeRating(item.rating || "150");
       const mh = Number(rating) >= 300 ? (match.val["300_mh_per_set"] || 0) : (match.val["150_mh_per_set"] || 0);
       const warn = jSizeWarn(match);
-      // Calibration: shop bolt-ups have MH included in shop fab
+      // Calibration: shop bolt-ups have MH included in shop fab.
       if (item.installLocation === "shop") {
-        return { mh: 0, calcBasis: `Justin: Bolt ${match.matchKey} (${rating}#) shop bolt-up (MH included in shop fab)${warn}`, sizeMatchExact: match.exact };
+        return { mh: 0, calcBasis: `Justin: Flange ${match.matchKey} (${rating}#) shop bolt-up (MH included in shop fab)${warn}`, sizeMatchExact: match.exact };
       }
-      return { mh, calcBasis: `Justin: Bolt ${match.matchKey} (${rating}#) → ${mh} MH/set${warn}`, sizeMatchExact: match.exact };
+      return { mh, calcBasis: `Justin: Flange bolt-up ${match.matchKey} (${rating}#) → ${mh} MH/set${warn}`, sizeMatchExact: match.exact };
     }
   }
 
@@ -5249,6 +5318,23 @@ function calculateJustinLaborHours(
       else if (catLower === "union" || descLower.includes("union")) { fittingKey = "union"; fittingLabel = "Union"; }
 
       const bundledMult = (wem[fittingKey] !== undefined ? wem[fittingKey] : (wem["fitting"] !== undefined ? wem["fitting"] : 0.5));
+      // Auto-welds mode: fitting MH = welds_per_fitting × weld_factor + handling.
+      // Threaded fittings (descLower includes 'thread' or 'screw') count 0 welds
+      // and only get a small handling allowance.
+      // Handling base = 0.15 × weld_factor (matches the 'separate' mode's handling).
+      if (fittingWeldMode === "auto-welds") {
+        const wpf = (justinData.welds_per_fitting || {}) as Record<string, number>;
+        let weldsCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
+        const isThreaded = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
+        if (isThreaded) weldsCount = 0;
+        const handlingFactor = 0.15;
+        const weldMh = weldsCount * baseMH;
+        const handlingMh = baseMH * handlingFactor;
+        const mh = weldMh + handlingMh;
+        const warn = jSizeWarn(weldMatch);
+        const breakdown = `${weldsCount} weld(s) × ${baseMH.toFixed(2)} + ${handlingFactor} handling × ${baseMH.toFixed(2)}`;
+        return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${breakdown} = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`, sizeMatchExact: weldMatch.exact };
+      }
       const effectiveMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
       const mh = baseMH * effectiveMult;
       const warn = jSizeWarn(weldMatch);
@@ -5300,7 +5386,7 @@ function calculateIndustryLaborHours(
   material: "CS" | "SS",
   schedule: string,
   industryData: any,
-  fittingWeldMode: "bundled" | "separate" = "bundled"
+  fittingWeldMode: "bundled" | "separate" | "auto-welds" = "bundled"
 ): { mh: number; calcBasis: string; sizeMatchExact: boolean } {
   // Defensive: if the Industry data block is missing or malformed, fail with
   // a clear message instead of a cryptic 'Cannot read properties of undefined'.
@@ -6867,7 +6953,7 @@ Picou Group Contractors`;
       elevation: z.string().default("0-20ft"),
       alloyGroup: z.string().default("4"),
       rackFactor: z.number().default(1.3),
-      fittingWeldMode: z.enum(["bundled", "separate"]).default((project as any).fittingWeldMode || "bundled"),
+      fittingWeldMode: z.enum(["bundled", "separate", "auto-welds"]).default((project as any).fittingWeldMode || "bundled"),
     });
     const parsed = diagSchema.safeParse(req.body || {});
     if (!parsed.success) {
@@ -7152,7 +7238,7 @@ Picou Group Contractors`;
       elevation: z.string().default("ground"),
       alloyGroup: z.string().default("CS"),
       rackFactor: z.number().default(1.3),
-      fittingWeldMode: z.enum(["bundled", "separate"]).default((project as any).fittingWeldMode || "bundled"),
+      fittingWeldMode: z.enum(["bundled", "separate", "auto-welds"]).default((project as any).fittingWeldMode || "bundled"),
     });
     const parsed = settingsSchema.safeParse(req.body || {});
     if (!parsed.success) {
