@@ -108,6 +108,14 @@ const patchEstimateSchema = z.object({
   doubleTimePercent: z.number().optional(),
   estimateMethod: z.enum(["bill", "justin", "industry", "manual"]).optional(),
   customMethodId: z.string().optional(),
+  fittingWeldMode: z.enum(["bundled", "separate"]).optional(),
+  scopeAdders: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    hours: z.number().default(0),
+    ratePerHour: z.number().optional(),
+    note: z.string().optional(),
+  })).optional(),
 });
 import { generateBillsWorkbook, generateJustinsWorkbook } from "./excelExport";
 import { generateMethodFactorsWorkbook, generateCompareWorkbook } from "./methodExports";
@@ -5409,6 +5417,37 @@ function mapTakeoffToEstimateCategory(discipline: string, category: string): str
 function inferWeldsFromFittings(items: any[]): any[] {
   const welds: any[] = [];
 
+  // Detect material and schedule from a source item so inferred welds inherit
+  // them. Without this, an SS-pipe fitting would produce a weld row that the
+  // calculator runs as CS (default), pulling std_mh_per_weld instead of the
+  // correct ss_mh_per_weld. Same idea for SCH 80 / SCH 10S detection.
+  function detectItemMaterial(it: any): "CS" | "SS" | undefined {
+    if (it.itemMaterial) return it.itemMaterial as "CS" | "SS";
+    const blob = `${it.description || ""} ${it.material || ""} ${it.spec || ""}`.toUpperCase();
+    if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403|A240|F304|F316)\b/.test(blob)) return "SS";
+    return undefined;
+  }
+  function detectItemSchedule(it: any): string | undefined {
+    if (it.itemSchedule) return it.itemSchedule as string;
+    const blob = `${it.description || ""} ${it.schedule || ""} ${it.spec || ""}`.toUpperCase();
+    if (/\bSCH\s*80\b|\bXH\b|\bXS\b/.test(blob)) return "80";
+    if (/\bSCH\s*160\b|\bXXH\b/.test(blob)) return "160/XXH";
+    if (/\bSCH\s*40\b/.test(blob)) return "40";
+    if (/\bSCH\s*10S?\b/.test(blob)) return "10";
+    if (/\bSTD\b/.test(blob)) return "STD";
+    return undefined;
+  }
+  // Helper to merge detected metadata into the inferred weld so the downstream
+  // calculator picks the right column (std / sch80 / ss) per the source's actual
+  // material and schedule.
+  function withInheritedMeta(source: any, weld: any): any {
+    const mat = detectItemMaterial(source);
+    const sch = detectItemSchedule(source);
+    if (mat) weld.itemMaterial = mat;
+    if (sch) weld.itemSchedule = sch;
+    return weld;
+  }
+
   // === PIPE LENGTH WELDS ===
   // Pipe is purchased in 40' standard lengths. Every 40' of pipe run requires
   // a field weld where lengths are joined together.
@@ -5426,7 +5465,7 @@ function inferWeldsFromFittings(items: any[]): any[] {
     const pipeJointWelds = Math.floor(lengthLF / 40);
     if (pipeJointWelds === 0) continue;
     const size = item.size || "";
-    welds.push(computeEstimateItem({
+    welds.push(computeEstimateItem(withInheritedMeta(item, {
       id: randomUUID(), lineNumber: 0, category: "weld" as any,
       description: `FW (Field) for ${size} PIPE joints (40' lengths, auto-inferred)`,
       size, quantity: pipeJointWelds, unit: "EA",
@@ -5435,7 +5474,7 @@ function inferWeldsFromFittings(items: any[]): any[] {
       notes: `Auto-inferred: ${pipeJointWelds} FIELD pipe joint weld(s) for ${lengthLF.toFixed(1)} LF (1 weld per 40 ft of run)`, fromDatabase: false,
       weldAssumption: `${pipeJointWelds} field BW per ${lengthLF.toFixed(1)} LF run (40' standard lengths)`,
       installLocation: "field" as const,
-    }));
+    })));
   }
 
   // === FITTING WELDS ===
@@ -5450,7 +5489,7 @@ function inferWeldsFromFittings(items: any[]): any[] {
     // We do NOT skip them here — every fitting has welds that must be counted.
 
     if (cat === "elbow" || desc.includes("elbow") || desc.includes("ell")) {
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `BW for ${size} ELBOW (auto-inferred)`,
         size, quantity: qty * 2, unit: "EA",
@@ -5458,9 +5497,9 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 2 butt welds per elbow", fromDatabase: false,
         weldAssumption: "2 butt welds per elbow (auto-inferred)",
-      }));
+      })));
     } else if (cat === "tee" || desc.includes("tee")) {
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `BW for ${size} TEE (auto-inferred)`,
         size, quantity: qty * 3, unit: "EA",
@@ -5468,9 +5507,9 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 3 butt welds per tee", fromDatabase: false,
         weldAssumption: "3 butt welds per tee (auto-inferred)",
-      }));
+      })));
     } else if (cat === "reducer" || desc.includes("reducer") || desc.includes("swage")) {
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `BW for ${size} REDUCER (auto-inferred)`,
         size, quantity: qty * 2, unit: "EA",
@@ -5478,9 +5517,9 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 2 butt welds per reducer (larger size)", fromDatabase: false,
         weldAssumption: "2 butt welds per reducer at larger size (auto-inferred)",
-      }));
+      })));
     } else if (cat === "cap" || (desc.includes("cap") && !desc.includes("screw"))) {
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `BW for ${size} CAP (auto-inferred)`,
         size, quantity: qty * 1, unit: "EA",
@@ -5488,12 +5527,12 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 1 butt weld per cap", fromDatabase: false,
         weldAssumption: "1 butt weld per cap (auto-inferred)",
-      }));
+      })));
     } else if (cat === "coupling" || desc.includes("coupling")) {
       // Threaded couplings: 0 welds. Socket weld couplings: 2 SW.
       const isThreadedConn = desc.includes("threaded") || desc.includes("npt") || desc.includes("screw");
       if (!isThreadedConn) {
-        welds.push(computeEstimateItem({
+        welds.push(computeEstimateItem(withInheritedMeta(item, {
           id: randomUUID(), lineNumber: 0, category: "weld" as any,
           description: `SW for ${size} COUPLING (auto-inferred)`,
           size, quantity: qty * 2, unit: "EA",
@@ -5501,12 +5540,12 @@ function inferWeldsFromFittings(items: any[]): any[] {
           materialExtension: 0, laborExtension: 0, totalCost: 0,
           notes: "Auto-inferred: 2 socket welds per coupling", fromDatabase: false,
           weldAssumption: "2 socket welds per coupling (auto-inferred)",
-        }));
+        })));
       }
     } else if (cat === "flange" || desc.includes("flange")) {
       // Weld-neck (WN) flanges get butt welds, slip-on (SO) flanges get fillet welds
       const isWeldNeck = desc.includes("weld neck") || desc.includes("wn ") || desc.includes(",wn,") || /\bwn\b/i.test(desc);
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `${isWeldNeck ? "BW" : "SO weld"} for ${size} FLANGE (auto-inferred)`,
         size, quantity: qty * 1, unit: "EA",
@@ -5514,8 +5553,8 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: `Auto-inferred: 1 ${isWeldNeck ? "butt weld" : "slip-on weld"} per flange`, fromDatabase: false,
         weldAssumption: `1 ${isWeldNeck ? "butt weld (WN)" : "slip-on weld (SO)"} per flange (auto-inferred)`,
-      }));
-      welds.push(computeEstimateItem({
+      })));
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "bolt" as any,
         description: `Bolt-up for ${size} FLANGE (auto-inferred)`,
         size, quantity: qty * 1, unit: "EA",
@@ -5523,14 +5562,14 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 1 bolt-up per flange", fromDatabase: false,
         weldAssumption: "1 bolt-up per flange (auto-inferred)",
-      }));
+      })));
     } else if (cat === "valve" || desc.includes("valve")) {
       // ONLY socket-weld valves generate welds. All other valve types (flanged,
       // threaded, butt-weld end, butterfly, etc.) connect via bolt-up or threads,
       // not welds.
       const isSocketWeldValve = desc.includes("socket") || desc.includes(" sw ") || desc.includes(",sw,") || /\bsw\b/i.test(desc);
       if (isSocketWeldValve) {
-        welds.push(computeEstimateItem({
+        welds.push(computeEstimateItem(withInheritedMeta(item, {
           id: randomUUID(), lineNumber: 0, category: "weld" as any,
           description: `SW for ${size} VALVE (auto-inferred)`,
           size, quantity: qty * 2, unit: "EA",
@@ -5538,13 +5577,12 @@ function inferWeldsFromFittings(items: any[]): any[] {
           materialExtension: 0, laborExtension: 0, totalCost: 0,
           notes: "Auto-inferred: 2 socket welds per SW valve", fromDatabase: false,
           weldAssumption: "2 socket welds per socket-weld valve (auto-inferred)",
-        }));
+        })));
       }
       // Flanged, threaded, butterfly, butt-weld end valves: no welds inferred.
       // Their connections come from the flanges/joints around them.
     } else if (desc.includes("sockolet")) {
-      // Sockolet: 2 socket welds (1 to header bore + 1 to branch pipe)
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `SW for ${size} SOCKOLET (auto-inferred)`,
         size, quantity: qty * 2, unit: "EA",
@@ -5552,10 +5590,9 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 2 socket welds per sockolet (header bore + branch)", fromDatabase: false,
         weldAssumption: "2 socket welds per sockolet (auto-inferred)",
-      }));
+      })));
     } else if (desc.includes("weldolet")) {
-      // Weldolet: 1 butt weld to header
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `BW for ${size} WELDOLET (auto-inferred)`,
         size, quantity: qty * 1, unit: "EA",
@@ -5563,10 +5600,9 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 1 butt weld per weldolet to header", fromDatabase: false,
         weldAssumption: "1 butt weld per weldolet (auto-inferred)",
-      }));
+      })));
     } else if (desc.includes("threadolet")) {
-      // Threadolet: 1 weld to header (threaded on branch side)
-      welds.push(computeEstimateItem({
+      welds.push(computeEstimateItem(withInheritedMeta(item, {
         id: randomUUID(), lineNumber: 0, category: "weld" as any,
         description: `Weld for ${size} THREADOLET (auto-inferred)`,
         size, quantity: qty * 1, unit: "EA",
@@ -5574,7 +5610,7 @@ function inferWeldsFromFittings(items: any[]): any[] {
         materialExtension: 0, laborExtension: 0, totalCost: 0,
         notes: "Auto-inferred: 1 weld per threadolet to header", fromDatabase: false,
         weldAssumption: "1 weld per threadolet (auto-inferred)",
-      }));
+      })));
     }
   }
   return welds;
@@ -5912,10 +5948,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // with rev N changes — the resulting estimate is its own project that can
   // be priced, exported, and audit-trailed independently.
   app.post("/api/takeoff/import-revision-to-estimate", async (req, res) => {
-    const { takeoffProjectId, revisionLabel } = req.body || {};
+    const { takeoffProjectId, revisionLabel, inferWelds } = req.body || {};
     if (!takeoffProjectId || typeof takeoffProjectId !== "string") {
       return res.status(400).json({ error: "takeoffProjectId is required and must be a string" });
     }
+    // Default: infer welds on revision estimates too. Justin's comparison
+    // showed he counts pipe-joint and fitting welds on revisions, so the
+    // earlier choice to suppress them was undercounting labor by ~half.
+    const shouldInferWelds = inferWelds !== false;
     const takeoffProject = await storage.getTakeoffProject(takeoffProjectId);
     if (!takeoffProject) return res.status(404).json({ error: "Takeoff project not found" });
 
@@ -5968,17 +6008,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return computeEstimateItem(estimateItem);
     });
 
-    // Don't auto-infer welds for revision estimates — the user should opt in
-    // explicitly. Revisions are deltas; bundled fittings already carry their
-    // welds and explicit weld rows might inflate the change order.
+    // Infer welds (fitting welds + pipe-joint welds for 40' runs) so the
+    // revision estimate matches how Justin actually prices change orders.
+    // The caller can disable this by passing { inferWelds: false } in the body.
+    let finalItems = estimateItems;
+    if (shouldInferWelds) {
+      const inferredWelds = inferWeldsFromFittings(estimateItems);
+      finalItems = [...estimateItems, ...inferredWelds].map((item, idx) => ({ ...item, lineNumber: idx + 1 }));
+    }
 
     const revLabel = (revisionLabel && typeof revisionLabel === "string") ? revisionLabel.trim() : (takeoffProject.revision || "Revision");
     const estimateProject = storage.createEstimateProject({
       name: `${takeoffProject.name} — ${revLabel} (clouded only)`,
       sourceTakeoffId: takeoffProjectId,
-      items: estimateItems,
+      items: finalItems,
     });
-    res.status(201).json({ ...estimateProject, revisionItemCount: estimateItems.length });
+    res.status(201).json({ ...estimateProject, revisionItemCount: estimateItems.length, inferredWeldCount: finalItems.length - estimateItems.length });
   });
 
   // ===== ESTIMATE PROJECTS =====

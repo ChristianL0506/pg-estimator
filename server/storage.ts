@@ -421,6 +421,12 @@ for (const tbl of ["takeoff_items", "estimate_items"]) {
   }
 }
 
+// Project-level scope adders — hand-entered labor for scope that isn't on the
+// BOM (hydro test, demo, supervision, etc.). Stored as JSON for flexibility.
+try {
+  db.exec(`ALTER TABLE estimate_projects ADD COLUMN scope_adders_json TEXT DEFAULT '[]'`);
+} catch (e: any) { /* Column already exists */ }
+
 // Create corrections table for tracking human edits
 db.exec(`
   CREATE TABLE IF NOT EXISTS corrections (
@@ -708,6 +714,11 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
   try {
     if (row.markups_json) markups = JSON.parse(row.markups_json);
   } catch {}
+  let scopeAdders: any[] = [];
+  try {
+    if (row.scope_adders_json) scopeAdders = JSON.parse(row.scope_adders_json);
+    if (!Array.isArray(scopeAdders)) scopeAdders = [];
+  } catch {}
   return {
     id: row.id,
     name: row.name,
@@ -727,7 +738,8 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
     estimateMethod: row.estimateMethod || "manual",
     customMethodId: row.customMethodId || undefined,
     fittingWeldMode: (row.fittingWeldMode === "separate" ? "separate" : "bundled") as "bundled" | "separate",
-  };
+    scopeAdders,
+  } as any;
 }
 
 // ============================================================
@@ -747,14 +759,14 @@ const stmts = {
   deleteTakeoffProject: db.prepare(`DELETE FROM takeoff_projects WHERE id = ?`),
   deleteTakeoffItems: db.prepare(`DELETE FROM takeoff_items WHERE projectId = ?`),
 
-  insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, fittingWeldMode, markups_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, fittingWeldMode, markups_json, scope_adders_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertEstimateItem: db.prepare(`INSERT INTO estimate_items (id, projectId, lineNumber, category, description, size, quantity, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit, materialExtension, laborExtension, totalCost, notes, fromDatabase, itemMaterial, itemSchedule, itemElevation, itemPipeLocation, itemAlloyGroup, calculationBasis, sizeMatchExact, materialCostSource, workType, revisionClouded, weldAssumption, includeInBom, includeInTakeoff, includeInEstimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getEstimateProjects: db.prepare(`SELECT * FROM estimate_projects ORDER BY createdAt DESC`),
   getEstimateProject: db.prepare(`SELECT * FROM estimate_projects WHERE id = ?`),
   getEstimateProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM estimate_items GROUP BY projectId`),
   getEstimateProjectBySourceTakeoff: db.prepare(`SELECT * FROM estimate_projects WHERE sourceTakeoffId = ? LIMIT 1`),
   getEstimateItems: db.prepare(`SELECT * FROM estimate_items WHERE projectId = ? ORDER BY lineNumber`),
-  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, fittingWeldMode = ?, markups_json = ? WHERE id = ?`),
+  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, fittingWeldMode = ?, markups_json = ?, scope_adders_json = ? WHERE id = ?`),
   deleteEstimateProject: db.prepare(`DELETE FROM estimate_projects WHERE id = ?`),
   deleteEstimateItems: db.prepare(`DELETE FROM estimate_items WHERE projectId = ?`),
 
@@ -1081,7 +1093,18 @@ class Storage {
       lineNumber: item.lineNumber || idx + 1,
     }));
 
-    stmts.insertEstimateProject.run(id, data.name, data.projectNumber || "", data.client || "", data.location || "", data.sourceTakeoffId || null, createdAt, 56, 79, 100, 75, 15, 2, "manual", "separate", JSON.stringify(markups));
+    // Seed scope adders from the labor-scope items Justin always includes
+    // (hydro, demo, supports, ID tags, supervision). User can edit or remove
+    // each row freely; values default to 0 so they only contribute MH if the
+    // estimator chooses to fill them in.
+    const seedAdders = [
+      { id: randomUUID(), label: "Hydro Test", hours: 0, note: "Pressure test labor (Justin uses 20 MH typical)" },
+      { id: randomUUID(), label: "Demolition", hours: 0, note: "Tie-in demo / removal labor" },
+      { id: randomUUID(), label: "Supports", hours: 0, note: "Field-installed support labor (Justin uses 2 MH/support)" },
+      { id: randomUUID(), label: "ID Tags", hours: 0, note: "Tag fabrication and install (Justin uses 1 MH/tag)" },
+      { id: randomUUID(), label: "Supervision", hours: 0, note: "Project supervision hours (Justin uses 60 MH/week)" },
+    ];
+    stmts.insertEstimateProject.run(id, data.name, data.projectNumber || "", data.client || "", data.location || "", data.sourceTakeoffId || null, createdAt, 56, 79, 100, 75, 15, 2, "manual", "separate", JSON.stringify(markups), JSON.stringify(seedAdders));
     if (items.length > 0) {
       insertEstimateItemsTransaction(id, items);
     }
@@ -1092,7 +1115,8 @@ class Storage {
       markups, laborRate: 56, overtimeRate: 79, doubleTimeRate: 100, perDiem: 75,
       overtimePercent: 15, doubleTimePercent: 2, estimateMethod: "manual",
       fittingWeldMode: "separate",
-    };
+      scopeAdders: seedAdders,
+    } as any;
   }
 
   updateEstimateProject(id: string, data: Partial<EstimateProject>): EstimateProject | undefined {
@@ -1117,8 +1141,12 @@ class Storage {
     const customMethodId = data.customMethodId !== undefined ? data.customMethodId : row.customMethodId ?? null;
     const fittingWeldMode = (data as any).fittingWeldMode ?? row.fittingWeldMode ?? "bundled";
     const markups = data.markups ?? currentMarkups;
+    // Scope adders: passed array replaces stored, undefined keeps existing.
+    let currentScopeAdders: any[] = [];
+    try { if (row.scope_adders_json) currentScopeAdders = JSON.parse(row.scope_adders_json) || []; } catch {}
+    const scopeAdders = (data as any).scopeAdders ?? currentScopeAdders;
 
-    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, fittingWeldMode, JSON.stringify(markups), id);
+    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, fittingWeldMode, JSON.stringify(markups), JSON.stringify(scopeAdders), id);
 
     if (data.items) {
       replaceEstimateItemsTransaction(id, data.items);
@@ -1133,7 +1161,8 @@ class Storage {
       customMethodId: customMethodId || undefined,
       estimateMethod: estimateMethod as "bill" | "justin" | "industry" | "manual",
       fittingWeldMode: (fittingWeldMode === "separate" ? "separate" : "bundled") as "bundled" | "separate",
-    };
+      scopeAdders,
+    } as any;
   }
 
   deleteEstimateProject(id: string): boolean {
@@ -1662,7 +1691,7 @@ class Storage {
         for (const project of data.estimateProjects) {
           const existing = stmts.getEstimateProject.get(project.id);
           if (!existing) {
-            stmts.insertEstimateProject.run(project.id, project.name, project.projectNumber || "", project.client || "", project.location || "", project.sourceTakeoffId || null, project.createdAt, project.laborRate || 56, project.overtimeRate || 79, project.doubleTimeRate || 100, project.perDiem || 75, project.overtimePercent || 15, project.doubleTimePercent || 2, project.estimateMethod || "manual", (project as any).fittingWeldMode || "separate", JSON.stringify(project.markups || { overhead: 10, profit: 10, tax: 8.25, bond: 2 }));
+            stmts.insertEstimateProject.run(project.id, project.name, project.projectNumber || "", project.client || "", project.location || "", project.sourceTakeoffId || null, project.createdAt, project.laborRate || 56, project.overtimeRate || 79, project.doubleTimeRate || 100, project.perDiem || 75, project.overtimePercent || 15, project.doubleTimePercent || 2, project.estimateMethod || "manual", (project as any).fittingWeldMode || "separate", JSON.stringify(project.markups || { overhead: 10, profit: 10, tax: 8.25, bond: 2 }), JSON.stringify((project as any).scopeAdders || []));
             if (project.items && project.items.length > 0) {
               insertEstimateItemsTransaction(project.id, project.items);
             }

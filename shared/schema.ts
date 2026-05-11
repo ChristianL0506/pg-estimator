@@ -144,6 +144,19 @@ export const estimateProjectSchema = z.object({
   //   "separate" — fitting MH = weld_factor × 0.15 (handling only). Use when the BOM
   //                already has explicit weld rows counted at full weld factor.
   fittingWeldMode: z.enum(["bundled", "separate"]).default("bundled"),
+  // Project-level "scope adders" — hand-entered MH for work that isn't on the
+  // BOM but the estimator needs to capture: hydro testing, demo, supports,
+  // ID tags, supervision, etc. Each adder is { label, hours, ratePerHour? }.
+  // Hours flow into total labor MH; cost uses the project's blended labor rate
+  // unless the adder overrides via ratePerHour. Default seed below comes from
+  // analyzing Justin's worksheet — the user can edit/remove/add freely.
+  scopeAdders: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    hours: z.number().default(0),
+    ratePerHour: z.number().optional(),
+    note: z.string().optional(),
+  })).default([]),
 });
 export type EstimateProject = z.infer<typeof estimateProjectSchema>;
 
