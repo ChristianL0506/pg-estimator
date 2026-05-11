@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo, useCallback } from "react";
+import React, { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart, AlertCircle, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -66,7 +66,9 @@ export default function EstimatingPage() {
   const [estRackFactor, setEstRackFactor] = useState(1.3);
   // Fitting-weld mode: "bundled" = fitting MH includes weld labor (legacy default);
   // "separate" = fitting MH is handling only, separate weld rows carry weld labor.
-  const [estFittingWeldMode, setEstFittingWeldMode] = useState<"bundled" | "separate">("bundled");
+  // Default is "separate" because the BOM extractor and "Infer Welds from Fittings"
+  // both produce explicit weld rows, and bundled mode would double-count them.
+  const [estFittingWeldMode, setEstFittingWeldMode] = useState<"bundled" | "separate">("separate");
   const [showDiagnoseDialog, setShowDiagnoseDialog] = useState(false);
 
   // Version history state
@@ -96,6 +98,16 @@ export default function EstimatingPage() {
     },
     enabled: !!selectedId,
   });
+
+  // When a project loads (or is switched), pick up its saved fittingWeldMode
+  // so editing legacy bundled estimates still computes consistently with how
+  // they were last saved. Brand-new projects default to "separate" server-side;
+  // we never silently flip a saved estimate's mode here.
+  useEffect(() => {
+    if (selectedProject && (selectedProject as any).fittingWeldMode) {
+      setEstFittingWeldMode((selectedProject as any).fittingWeldMode);
+    }
+  }, [selectedProject?.id]);
 
   const { data: costDb = [] } = useQuery<CostDatabaseEntry[]>({
     queryKey: ["/api/cost-database"],
@@ -274,6 +286,20 @@ export default function EstimatingPage() {
       toast({ title: `Inferred ${data.added || 0} weld/bolt items` });
     },
     onError: (err: any) => { toast({ title: "Weld inference failed", description: err.message, variant: "destructive" }); },
+  });
+
+  // Inverse of infer-welds: removes every row whose notes contain "auto-inferred".
+  // Lets the user flip a bundled-mode estimate clean in one click after they've
+  // run the inferrer earlier (or imported an estimate that had them).
+  const stripInferredWeldsMutation = useMutation({
+    mutationFn: (id: string) => apiRequest("POST", `/api/estimates/${id}/strip-inferred-welds`).then(r => r.json()),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/estimates", selectedId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/estimates"] });
+      if (data.removed > 0) toast({ title: `Removed ${data.removed} auto-inferred row${data.removed === 1 ? "" : "s"}` });
+      else toast({ title: "No auto-inferred rows to remove" });
+    },
+    onError: (err: any) => { toast({ title: "Strip failed", description: err.message, variant: "destructive" }); },
   });
 
   // Feature 3: Version history query
@@ -1061,6 +1087,17 @@ export default function EstimatingPage() {
                       >
                         <Wand2 size={13} className="mr-1.5" />
                         {inferWeldsMutation.isPending ? "Inferring..." : "Infer Welds from Fittings"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => stripInferredWeldsMutation.mutate(p.id)}
+                        disabled={stripInferredWeldsMutation.isPending || p.items.length === 0}
+                        data-testid="btn-strip-inferred-welds"
+                        title="Remove every row tagged 'auto-inferred' \u2014 useful if you're in Bundled mode and the BOM has been over-counted"
+                      >
+                        <Trash2 size={13} className="mr-1.5" />
+                        {stripInferredWeldsMutation.isPending ? "Stripping..." : "Strip Auto-Inferred Welds"}
                       </Button>
                       <Button
                         variant="outline"

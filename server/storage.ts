@@ -296,8 +296,13 @@ try {
 
 // Add fittingWeldMode so each estimate can choose whether fitting MH includes
 // weld labor (bundled) or assumes weld rows already carry it (separate).
+// New estimates default to 'separate' because the BOM extractor and
+// "Infer Welds from Fittings" feature both produce explicit weld rows;
+// bundled mode would double-count them. Existing rows keep whatever's saved
+// (NULL on legacy rows is normalized to 'bundled' by the row mapper to
+// preserve historical math).
 try {
-  db.exec(`ALTER TABLE estimate_projects ADD COLUMN fittingWeldMode TEXT DEFAULT 'bundled'`);
+  db.exec(`ALTER TABLE estimate_projects ADD COLUMN fittingWeldMode TEXT DEFAULT 'separate'`);
 } catch (e: any) { /* Column already exists */ }
 
 // Add confidence column to takeoff_items if it doesn't exist
@@ -724,7 +729,7 @@ const stmts = {
   deleteTakeoffProject: db.prepare(`DELETE FROM takeoff_projects WHERE id = ?`),
   deleteTakeoffItems: db.prepare(`DELETE FROM takeoff_items WHERE projectId = ?`),
 
-  insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, markups_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, fittingWeldMode, markups_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertEstimateItem: db.prepare(`INSERT INTO estimate_items (id, projectId, lineNumber, category, description, size, quantity, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit, materialExtension, laborExtension, totalCost, notes, fromDatabase, itemMaterial, itemSchedule, itemElevation, itemPipeLocation, itemAlloyGroup, calculationBasis, sizeMatchExact, materialCostSource, workType, revisionClouded, weldAssumption) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getEstimateProjects: db.prepare(`SELECT * FROM estimate_projects ORDER BY createdAt DESC`),
   getEstimateProject: db.prepare(`SELECT * FROM estimate_projects WHERE id = ?`),
@@ -1052,7 +1057,7 @@ class Storage {
       lineNumber: item.lineNumber || idx + 1,
     }));
 
-    stmts.insertEstimateProject.run(id, data.name, data.projectNumber || "", data.client || "", data.location || "", data.sourceTakeoffId || null, createdAt, 56, 79, 100, 75, 15, 2, "manual", JSON.stringify(markups));
+    stmts.insertEstimateProject.run(id, data.name, data.projectNumber || "", data.client || "", data.location || "", data.sourceTakeoffId || null, createdAt, 56, 79, 100, 75, 15, 2, "manual", "separate", JSON.stringify(markups));
     if (items.length > 0) {
       insertEstimateItemsTransaction(id, items);
     }
@@ -1062,7 +1067,7 @@ class Storage {
       location: data.location || "", sourceTakeoffId: data.sourceTakeoffId, createdAt, items,
       markups, laborRate: 56, overtimeRate: 79, doubleTimeRate: 100, perDiem: 75,
       overtimePercent: 15, doubleTimePercent: 2, estimateMethod: "manual",
-      fittingWeldMode: "bundled",
+      fittingWeldMode: "separate",
     };
   }
 
@@ -1633,7 +1638,7 @@ class Storage {
         for (const project of data.estimateProjects) {
           const existing = stmts.getEstimateProject.get(project.id);
           if (!existing) {
-            stmts.insertEstimateProject.run(project.id, project.name, project.projectNumber || "", project.client || "", project.location || "", project.sourceTakeoffId || null, project.createdAt, project.laborRate || 56, project.overtimeRate || 79, project.doubleTimeRate || 100, project.perDiem || 75, project.overtimePercent || 15, project.doubleTimePercent || 2, project.estimateMethod || "manual", JSON.stringify(project.markups || { overhead: 10, profit: 10, tax: 8.25, bond: 2 }));
+            stmts.insertEstimateProject.run(project.id, project.name, project.projectNumber || "", project.client || "", project.location || "", project.sourceTakeoffId || null, project.createdAt, project.laborRate || 56, project.overtimeRate || 79, project.doubleTimeRate || 100, project.perDiem || 75, project.overtimePercent || 15, project.doubleTimePercent || 2, project.estimateMethod || "manual", (project as any).fittingWeldMode || "separate", JSON.stringify(project.markups || { overhead: 10, profit: 10, tax: 8.25, bond: 2 }));
             if (project.items && project.items.length > 0) {
               insertEstimateItemsTransaction(project.id, project.items);
             }

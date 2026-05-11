@@ -6831,7 +6831,7 @@ Picou Group Contractors`;
           code: "double-count-welds-fittings",
           severity: "warn",
           title: `Possible double-counting at size${overlapSizes.length>1?"s":""} ${overlapSizes.join(", ")}`,
-          detail: `The BOM has BOTH fitting rows and explicit weld rows at the same size, while fitting-weld mode is "bundled" (fittings carry their own weld labor). Either switch to "separate" mode, or remove the explicit weld rows.`,
+          detail: `The BOM has BOTH fitting rows and explicit weld rows at the same size, while fitting-weld mode is "bundled" (fittings carry their own weld labor). Recommended fix: switch to "Separate weld rows" mode since your BOM already has weld rows — the math will count each weld once at the proper factor. Alternative: click "Strip Auto-Inferred Welds" to remove the inferred rows and keep bundled mode.`,
           affectedItemIds: overlapItemIds,
         });
       }
@@ -7362,6 +7362,30 @@ Picou Group Contractors`;
     const allItems = [...(project.items || []), ...inferredWelds].map((item, idx) => ({ ...item, lineNumber: idx + 1 }));
     const updated = storage.updateEstimateProject(req.params.id, { items: allItems });
     res.json({ message: `Inferred ${inferredWelds.length} weld/bolt items`, added: inferredWelds.length, project: updated });
+  });
+
+  // Remove every BOM row produced by the auto-infer feature. These are tagged
+  // in their `notes` field with the string "auto-inferred" so we can identify
+  // and delete them safely without touching hand-entered items. Used when the
+  // user is in bundled fitting-weld mode and wants to eliminate double-counting
+  // by removing the inferred weld rows.
+  app.post("/api/estimates/:id/strip-inferred-welds", (req, res) => {
+    const project = storage.getEstimateProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Estimate not found" });
+
+    const before = (project.items || []).length;
+    const keep = (project.items || []).filter((it: any) => {
+      const notes = (it.notes || "").toLowerCase();
+      return !notes.includes("auto-inferred");
+    });
+    const removed = before - keep.length;
+    if (removed === 0) {
+      return res.json({ message: "No auto-inferred rows to remove", removed: 0 });
+    }
+    // Renumber lineNumbers so the remaining rows stay sequential.
+    const relabeled = keep.map((item: any, idx: number) => ({ ...item, lineNumber: idx + 1 }));
+    const updated = storage.updateEstimateProject(req.params.id, { items: relabeled });
+    res.json({ message: `Removed ${removed} auto-inferred row${removed === 1 ? "" : "s"}`, removed, project: updated });
   });
 
   // === API KEY SETTINGS ===
