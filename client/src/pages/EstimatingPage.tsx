@@ -1545,6 +1545,11 @@ export default function EstimatingPage() {
           )}
           {compareMutation.data && (
             <div className="space-y-4">
+              {compareMutation.data.skippedMethods && compareMutation.data.skippedMethods.length > 0 && (
+                <div className="text-xs bg-amber-500/10 border border-amber-500/30 rounded p-2">
+                  <span className="font-semibold">Some methods skipped:</span> {compareMutation.data.skippedMethods.join(", ")}. The data block for these methods is missing from this deploy. Redeploy the latest main to enable them.
+                </div>
+              )}
               {/* Summary cards */}
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                 {compareMutation.data.summary.map((s: any) => (

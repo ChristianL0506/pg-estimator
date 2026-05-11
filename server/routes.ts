@@ -5247,6 +5247,18 @@ function calculateIndustryLaborHours(
   schedule: string,
   industryData: any
 ): { mh: number; calcBasis: string; sizeMatchExact: boolean } {
+  // Defensive: if the Industry data block is missing or malformed, fail with
+  // a clear message instead of a cryptic 'Cannot read properties of undefined'.
+  // This can happen if estimator-data.json wasn't bundled into dist/, or if
+  // a deploy is using an older build that predates the Industry method.
+  if (!industryData || typeof industryData !== "object" || !industryData.labor_factors) {
+    throw new Error(
+      "Industry method data is unavailable on this server. " +
+      "This usually means the deployed build is missing server/estimator-data.json " +
+      "or predates commit e262014. Try redeploying the latest from main, or fall back " +
+      "to Bill's or Justin's method."
+    );
+  }
   // Reuse the Justin calculator logic against the Industry data block.
   // The shapes match, so this works directly. We post-process calcBasis
   // to rename the prefix so the estimator can see the source clearly.
@@ -6087,6 +6099,21 @@ Picou Group Contractors`;
       estimatorData = { ...estimatorData, [base]: overridden };
     }
 
+    // Pre-flight: verify the requested method's data block actually exists in
+    // the loaded estimator-data.json. Return a clean error rather than letting
+    // the per-item calculator throw an opaque 'undefined' error.
+    if (method === "industry" && !estimatorData.industry) {
+      return res.status(500).json({
+        message: "Industry method data is unavailable on this server. The deployed build is missing 'industry' in estimator-data.json. Redeploy the latest main, or pick Bill's or Justin's method.",
+      });
+    }
+    if (method === "justin" && !estimatorData.justin) {
+      return res.status(500).json({ message: "Justin method data missing on the server." });
+    }
+    if (method === "bill" && !estimatorData.bill) {
+      return res.status(500).json({ message: "Bill method data missing on the server." });
+    }
+
     // Compute blended rate from ST/OT/DT percentages
     const stPercent = Math.max(0, (100 - overtimePercent - doubleTimePercent) / 100);
     const otPercent = overtimePercent / 100;
@@ -6384,17 +6411,27 @@ Picou Group Contractors`;
     }
 
     // Build the list of methods to run: 3 base methods + any requested customs.
+    // Methods whose data block is missing from estimator-data.json are skipped
+    // gracefully so the comparison still works for methods that ARE available.
     type RunSpec = { key: string; label: string; baseMethod: "bill" | "justin" | "industry"; data: any; customMethodId?: string };
-    const runs: RunSpec[] = [
-      { key: "bill",     label: "Bill",            baseMethod: "bill",     data: estimatorData.bill },
-      { key: "justin",   label: "Justin",          baseMethod: "justin",   data: estimatorData.justin },
-      { key: "industry", label: "Industry (Page)", baseMethod: "industry", data: estimatorData.industry },
-    ];
+    const runs: RunSpec[] = [];
+    const skippedMethods: string[] = [];
+    if (estimatorData.bill?.labor_rates)      runs.push({ key: "bill",     label: "Bill",            baseMethod: "bill",     data: estimatorData.bill });
+    else                                       skippedMethods.push("Bill");
+    if (estimatorData.justin?.labor_factors)  runs.push({ key: "justin",   label: "Justin",          baseMethod: "justin",   data: estimatorData.justin });
+    else                                       skippedMethods.push("Justin");
+    if (estimatorData.industry?.labor_factors) runs.push({ key: "industry", label: "Industry (Page)", baseMethod: "industry", data: estimatorData.industry });
+    else                                       skippedMethods.push("Industry (Page)");
     for (const cmId of settings.customMethodIds) {
       const cm = storage.getCustomMethod(cmId);
       if (!cm) continue;
-      const overridden = applyCustomOverrides(estimatorData[cm.baseMethod], cm.overrides || {});
+      const baseBlock = estimatorData[cm.baseMethod];
+      if (!baseBlock) { skippedMethods.push(`${cm.name} (base ${cm.baseMethod} missing)`); continue; }
+      const overridden = applyCustomOverrides(baseBlock, cm.overrides || {});
       runs.push({ key: `custom:${cm.id}`, label: cm.name, baseMethod: cm.baseMethod, data: overridden, customMethodId: cm.id });
+    }
+    if (runs.length === 0) {
+      return res.status(500).json({ message: `No estimator methods available. Missing: ${skippedMethods.join(", ")}` });
     }
 
     // Blended labor rate (same logic as auto-calculate).
@@ -6500,6 +6537,7 @@ Picou Group Contractors`;
       effectiveLaborRate: effectiveRate,
       summary,
       lineItems,
+      skippedMethods,
     });
   });
 

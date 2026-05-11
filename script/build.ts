@@ -1,6 +1,7 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile } from "fs/promises";
+import { rm, readFile, copyFile, mkdir } from "fs/promises";
+import { existsSync } from "fs";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -57,6 +58,24 @@ async function buildAll() {
     external: externals,
     logLevel: "info",
   });
+
+  // Copy runtime data files that the server reads via fs.readFileSync.
+  // These must live next to dist/index.cjs because the server uses
+  // path.join(__dirname, "<file>") to find them — and __dirname resolves
+  // to dist/ at runtime. Without this copy step, calls to getEstimatorData()
+  // fall through to a CWD-based fallback that breaks if Node is launched
+  // from anywhere except the repo root.
+  const runtimeFiles = [
+    { from: "server/estimator-data.json", to: "dist/estimator-data.json" },
+  ];
+  for (const f of runtimeFiles) {
+    if (existsSync(f.from)) {
+      await copyFile(f.from, f.to);
+      console.log(`copied ${f.from} → ${f.to}`);
+    } else {
+      console.warn(`runtime file not found: ${f.from} — skipping`);
+    }
+  }
 }
 
 buildAll().catch((err) => {
