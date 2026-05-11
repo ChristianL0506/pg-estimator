@@ -6478,6 +6478,23 @@ Picou Group Contractors`;
       if ((item as any).includeInEstimate === false) {
         return item;
       }
+      // In auto-welds mode, the fitting line itself carries the weld math
+      // (welds_per_fitting × weld_factor). Any auto-inferred weld rows in the
+      // BOM would double-count, so zero them out and flag the basis. The user
+      // can also Strip them via the toolbar button — this is the safety net.
+      const isAutoInferred = typeof (item as any).weldAssumption === "string" &&
+        ((item as any).weldAssumption as string).includes("auto-inferred");
+      if (fittingWeldMode === "auto-welds" && isAutoInferred) {
+        return computeEstimateItem({
+          ...item,
+          laborHoursPerUnit: 0,
+          laborUnitCost: 0,
+          calculationBasis: `Auto-welds mode: this auto-inferred weld is already counted on the parent fitting line. 0 MH to avoid double-count. (Click 'Strip Auto-Inferred Welds' to remove these rows entirely.)`,
+          sizeMatchExact: true,
+          connectionCount: 0,
+          connectionType: "none",
+        });
+      }
       // Use per-item overrides if present, otherwise fall back to global settings
       // Auto-detect SS from description if itemMaterial not set (Calibration Item 2)
       let detectedMat: "CS" | "SS" = material;
