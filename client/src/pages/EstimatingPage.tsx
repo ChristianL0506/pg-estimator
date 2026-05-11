@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useCallback } from "react";
+import React, { useState, useRef, useMemo, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -45,7 +45,12 @@ export default function EstimatingPage() {
   const [dbSearch, setDbSearch] = useState("");
 
   // Estimating method state
-  const [estMethod, setEstMethod] = useState<"bill" | "justin">("justin");
+  const [estMethod, setEstMethod] = useState<"bill" | "justin" | "industry">("justin");
+  const [estCustomMethodId, setEstCustomMethodId] = useState<string>("");
+  const [showCompareDialog, setShowCompareDialog] = useState(false);
+  const [showSaveCustomDialog, setShowSaveCustomDialog] = useState(false);
+  const [newCustomMethodName, setNewCustomMethodName] = useState("");
+  const [newCustomMethodDescription, setNewCustomMethodDescription] = useState("");
   const [estLaborRate, setEstLaborRate] = useState(56);
   const [estOvertimeRate, setEstOvertimeRate] = useState(79);
   const [estDoubleTimeRate, setEstDoubleTimeRate] = useState(100);
@@ -137,10 +142,68 @@ export default function EstimatingPage() {
     },
   });
 
+  // Custom methods list (saved estimator profiles)
+  const customMethodsQuery = useQuery<any[]>({
+    queryKey: ["/api/custom-methods"],
+    queryFn: () => apiRequest("GET", "/api/custom-methods").then(r => r.json()),
+  });
+  const customMethods = customMethodsQuery.data || [];
+
+  // Save a new custom method (clone of currently selected base method, no overrides yet)
+  const saveCustomMutation = useMutation({
+    mutationFn: (data: { name: string; baseMethod: string; description?: string }) =>
+      apiRequest("POST", "/api/custom-methods", data).then(r => r.json()),
+    onSuccess: (created: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/custom-methods"] });
+      setEstCustomMethodId(created.id);
+      setShowSaveCustomDialog(false);
+      setNewCustomMethodName("");
+      setNewCustomMethodDescription("");
+      toast({ title: `Custom method '${created.name}' saved` });
+    },
+    onError: (err: any) => {
+      toast({ title: "Save failed", description: err.message, variant: "destructive" });
+    },
+  });
+  const deleteCustomMutation = useMutation({
+    mutationFn: (id: string) => apiRequest("DELETE", `/api/custom-methods/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/custom-methods"] });
+      setEstCustomMethodId("");
+      toast({ title: "Custom method deleted" });
+    },
+  });
+
+  // Compare-methods runner — returns summary + per-line drill-down across all base
+  // methods (Bill, Justin, Industry) and any selected custom profiles.
+  const compareMutation = useMutation({
+    mutationFn: (id: string) =>
+      apiRequest("POST", `/api/estimates/${id}/compare-methods`, {
+        customMethodIds: customMethods.map(m => m.id),
+        laborRate: estLaborRate,
+        overtimeRate: estOvertimeRate,
+        doubleTimeRate: estDoubleTimeRate,
+        perDiem: estPerDiem,
+        overtimePercent: estOvertimePercent,
+        doubleTimePercent: estDoubleTimePercent,
+        material: estMaterial,
+        schedule: estSchedule,
+        installType: estInstallType,
+        pipeLocation: estPipeLocation,
+        elevation: estElevation,
+        alloyGroup: estAlloyGroup,
+        rackFactor: estRackFactor,
+      }).then(r => r.json()),
+    onError: (err: any) => {
+      toast({ title: "Compare failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const autoCalculateMutation = useMutation({
     mutationFn: (id: string) =>
       apiRequest("POST", `/api/estimates/${id}/auto-calculate`, {
         method: estMethod,
+        customMethodId: estCustomMethodId || undefined,
         laborRate: estLaborRate,
         overtimeRate: estOvertimeRate,
         doubleTimeRate: estDoubleTimeRate,
@@ -157,7 +220,9 @@ export default function EstimatingPage() {
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/estimates", selectedId] });
-      toast({ title: `Labor hours calculated using ${estMethod === "bill" ? "Bill's EI" : "Justin's Factor"} method` });
+      const baseLabel = estMethod === "bill" ? "Bill's EI" : estMethod === "industry" ? "Industry Standard (Page)" : "Justin's Factor";
+      const customLabel = estCustomMethodId ? ` (custom: ${customMethods.find(m => m.id === estCustomMethodId)?.name || ""})` : "";
+      toast({ title: `Labor hours calculated using ${baseLabel}${customLabel} method` });
     },
     onError: (err: any) => {
       toast({ title: "Calculation failed", description: err.message, variant: "destructive" });
@@ -498,34 +563,96 @@ export default function EstimatingPage() {
                           {p.estimateMethod && p.estimateMethod !== "manual" && (
                             <Badge variant="outline" className="ml-auto text-[9px] px-1.5 py-0 text-primary border-primary/30">
                               <Zap size={9} className="mr-1" />
-                              Using {p.estimateMethod === "bill" ? "Bill's EI Method" : "Justin's Factor Method"}
+                              Using {p.estimateMethod === "bill" ? "Bill's EI Method" : p.estimateMethod === "industry" ? "Industry Standard (Page)" : "Justin's Factor Method"}
+                              {p.customMethodId && customMethods.length > 0 && (() => {
+                                const cm = customMethods.find(m => m.id === p.customMethodId);
+                                return cm ? ` · ${cm.name}` : "";
+                              })()}
                             </Badge>
                           )}
                         </div>
 
-                        {/* Method selector */}
-                        <div className="flex gap-2 mb-3">
+                        {/* Method selector — base methods */}
+                        <div className="grid grid-cols-3 gap-2 mb-2">
                           <button
                             onClick={() => setEstMethod("bill")}
                             data-testid="btn-method-bill"
-                            className={`flex-1 text-xs px-3 py-1.5 rounded border transition-colors ${
+                            className={`text-xs px-2 py-1.5 rounded border transition-colors ${
                               estMethod === "bill"
                                 ? "bg-primary text-primary-foreground border-primary"
                                 : "border-input hover:bg-accent"
                             }`}
                           >
-                            Bill's Method (EI-Based)
+                            Bill's (EI)
                           </button>
                           <button
                             onClick={() => setEstMethod("justin")}
                             data-testid="btn-method-justin"
-                            className={`flex-1 text-xs px-3 py-1.5 rounded border transition-colors ${
+                            className={`text-xs px-2 py-1.5 rounded border transition-colors ${
                               estMethod === "justin"
                                 ? "bg-primary text-primary-foreground border-primary"
                                 : "border-input hover:bg-accent"
                             }`}
                           >
-                            Justin's Method (Factor-Based)
+                            Justin's (Factor)
+                          </button>
+                          <button
+                            onClick={() => setEstMethod("industry")}
+                            data-testid="btn-method-industry"
+                            className={`text-xs px-2 py-1.5 rounded border transition-colors ${
+                              estMethod === "industry"
+                                ? "bg-primary text-primary-foreground border-primary"
+                                : "border-input hover:bg-accent"
+                            }`}
+                            title="Industry Standard — Page's Estimator's Piping Man-Hour Manual"
+                          >
+                            Industry (Page)
+                          </button>
+                        </div>
+
+                        {/* Custom-method profile selector + Save As + Compare buttons */}
+                        <div className="flex items-center gap-2 mb-3">
+                          <select
+                            className="flex-1 text-xs border border-input rounded px-2 py-1 bg-background"
+                            value={estCustomMethodId}
+                            onChange={e => setEstCustomMethodId(e.target.value)}
+                            data-testid="select-custom-method"
+                          >
+                            <option value="">No custom profile (use base method as-published)</option>
+                            {customMethods.map(m => (
+                              <option key={m.id} value={m.id}>
+                                {m.name} · base: {m.baseMethod}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => { setNewCustomMethodName(""); setNewCustomMethodDescription(""); setShowSaveCustomDialog(true); }}
+                            data-testid="btn-save-custom-method"
+                            className="text-xs px-2 py-1 rounded border border-input hover:bg-accent"
+                            title="Save the currently selected base method as a custom profile you can edit"
+                          >
+                            Save As…
+                          </button>
+                          {estCustomMethodId && (
+                            <button
+                              onClick={() => {
+                                if (confirm(`Delete custom method '${customMethods.find(m => m.id === estCustomMethodId)?.name}'?`)) {
+                                  deleteCustomMutation.mutate(estCustomMethodId);
+                                }
+                              }}
+                              data-testid="btn-delete-custom-method"
+                              className="text-xs px-2 py-1 rounded border border-input hover:bg-destructive hover:text-destructive-foreground"
+                            >
+                              Delete
+                            </button>
+                          )}
+                          <button
+                            onClick={() => { setShowCompareDialog(true); compareMutation.mutate(p.id); }}
+                            data-testid="btn-compare-methods"
+                            className="text-xs px-2 py-1 rounded border border-primary text-primary hover:bg-primary/10"
+                            title="Run this estimate through all methods side-by-side"
+                          >
+                            Compare All…
                           </button>
                         </div>
 
@@ -1356,6 +1483,139 @@ export default function EstimatingPage() {
             >
               Create
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Save-as-Custom dialog */}
+      <Dialog open={showSaveCustomDialog} onOpenChange={setShowSaveCustomDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Save as Custom Method</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Profile name</label>
+              <Input
+                value={newCustomMethodName}
+                onChange={e => setNewCustomMethodName(e.target.value)}
+                placeholder={`My ${estMethod} profile`}
+                data-testid="input-custom-method-name"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Description (optional)</label>
+              <Input
+                value={newCustomMethodDescription}
+                onChange={e => setNewCustomMethodDescription(e.target.value)}
+                placeholder="e.g. Calibrated to our 2026 industrial crew productivity"
+                data-testid="input-custom-method-description"
+              />
+            </div>
+            <div className="text-xs text-muted-foreground bg-muted/40 rounded p-2">
+              <div>Base method: <span className="font-semibold">{estMethod === "bill" ? "Bill's EI" : estMethod === "industry" ? "Industry Standard (Page)" : "Justin's Factor"}</span></div>
+              <div className="mt-1">The new profile starts as an exact clone of the base method. You can edit any factor later — future overrides will only differ from the base where you explicitly change them.</div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowSaveCustomDialog(false)} data-testid="btn-cancel-custom-save">Cancel</Button>
+            <Button
+              disabled={!newCustomMethodName.trim() || saveCustomMutation.isPending}
+              onClick={() => saveCustomMutation.mutate({
+                name: newCustomMethodName.trim(),
+                baseMethod: estMethod,
+                description: newCustomMethodDescription.trim(),
+              })}
+              data-testid="btn-confirm-custom-save"
+            >
+              Save Profile
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Compare-Methods dialog */}
+      <Dialog open={showCompareDialog} onOpenChange={setShowCompareDialog}>
+        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Compare All Estimating Methods</DialogTitle>
+          </DialogHeader>
+          {compareMutation.isPending && (
+            <div className="text-sm text-muted-foreground py-8 text-center">Running estimate through all methods…</div>
+          )}
+          {compareMutation.data && (
+            <div className="space-y-4">
+              {/* Summary cards */}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                {compareMutation.data.summary.map((s: any) => (
+                  <div key={s.key} className="border rounded p-3 bg-card">
+                    <div className="text-xs font-semibold text-muted-foreground">{s.label}</div>
+                    <div className="text-2xl font-bold tabular-nums mt-1">${Math.round(s.totalCost).toLocaleString()}</div>
+                    <div className="text-[10px] text-muted-foreground mt-1 space-y-0.5">
+                      <div>{Math.round(s.totalMH).toLocaleString()} MH</div>
+                      <div>${Math.round(s.totalLaborCost).toLocaleString()} labor</div>
+                      {s.totalMaterialCost > 0 && <div>${Math.round(s.totalMaterialCost).toLocaleString()} material</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Per-line drill-down table */}
+              <div className="text-xs font-semibold pt-2">Per-line breakdown ({compareMutation.data.itemCount} items)</div>
+              <div className="border rounded overflow-x-auto">
+                <table className="text-xs w-full">
+                  <thead className="bg-muted/40">
+                    <tr>
+                      <th className="text-left px-2 py-1 sticky left-0 bg-muted/40 z-10">#</th>
+                      <th className="text-left px-2 py-1 min-w-[200px]">Description</th>
+                      <th className="text-left px-2 py-1">Size</th>
+                      <th className="text-right px-2 py-1">Qty</th>
+                      {compareMutation.data.summary.map((s: any) => (
+                        <th key={s.key} className="text-right px-2 py-1" colSpan={2}>{s.label}</th>
+                      ))}
+                    </tr>
+                    <tr className="bg-muted/20 text-[10px] text-muted-foreground">
+                      <th></th><th></th><th></th><th></th>
+                      {compareMutation.data.summary.map((s: any) => (
+                        <React.Fragment key={s.key}>
+                          <th className="text-right px-2 py-1">MH</th>
+                          <th className="text-right px-2 py-1">$ Cost</th>
+                        </React.Fragment>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {compareMutation.data.lineItems.map((li: any) => (
+                      <tr key={li.itemId} className="border-t hover:bg-muted/20">
+                        <td className="px-2 py-1 sticky left-0 bg-card">{li.lineNumber}</td>
+                        <td className="px-2 py-1">{li.description}</td>
+                        <td className="px-2 py-1">{li.size}</td>
+                        <td className="px-2 py-1 text-right tabular-nums">{li.quantity}</td>
+                        {compareMutation.data.summary.map((s: any) => {
+                          const bm = li.byMethod[s.key];
+                          return (
+                            <React.Fragment key={s.key}>
+                              <td className="px-2 py-1 text-right tabular-nums" title={bm?.calcBasis || ""}>
+                                {bm ? bm.totalMH.toFixed(2) : "—"}
+                              </td>
+                              <td className="px-2 py-1 text-right tabular-nums">
+                                {bm ? `$${Math.round(bm.totalCost).toLocaleString()}` : "—"}
+                              </td>
+                            </React.Fragment>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="text-[10px] text-muted-foreground">
+                Effective labor rate used: ${compareMutation.data.effectiveLaborRate?.toFixed(2)}/hr (ST/OT/DT blended + per-diem). This view is read-only — changing the selected method here doesn't modify your estimate. Use Auto-Calculate to commit.
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowCompareDialog(false)} data-testid="btn-close-compare">Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

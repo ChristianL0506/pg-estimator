@@ -1144,5 +1144,373 @@
       "consumables_markup": 0.15,
       "tax_rate": 0.08
     }
+  },
+  "industry": {
+    "description": "Industry Standard \u2014 Page's Estimator's Piping Man-Hour Manual, 5th ed. (1999). Carbon-steel field fabrication baseline with SS and SCH 80 columns. Tables reproduce Page's published MH factors for handling, erecting, welding, bolting, and valve installation. Productivity calibrated to 1990s industrial field crews; clone to a Custom profile and apply a project-specific factor to match your crew's measured productivity.",
+    "source": "Page, John S. \u2014 Estimator's Piping Man-Hour Manual, 5th ed., Elsevier 1999",
+    "labor_factors": {
+      "pipe": {
+        "1/2\"-1\" Pipe": {
+          "standard_mh_per_lf": 0.13,
+          "rack_mh_per_lf": 0.09,
+          "ss_mh_per_lf": 0.22
+        },
+        "1-1/2\"Pipe": {
+          "standard_mh_per_lf": 0.14,
+          "rack_mh_per_lf": 0.09,
+          "ss_mh_per_lf": 0.23
+        },
+        "2\"Pipe": {
+          "standard_mh_per_lf": 0.17,
+          "rack_mh_per_lf": 0.11,
+          "ss_mh_per_lf": 0.28
+        },
+        "3\"Pipe": {
+          "standard_mh_per_lf": 0.24,
+          "rack_mh_per_lf": 0.16,
+          "ss_mh_per_lf": 0.39
+        },
+        "4\"Pipe": {
+          "standard_mh_per_lf": 0.32,
+          "rack_mh_per_lf": 0.21,
+          "ss_mh_per_lf": 0.51
+        },
+        "6\"Pipe": {
+          "standard_mh_per_lf": 0.43,
+          "rack_mh_per_lf": 0.28,
+          "ss_mh_per_lf": 0.69
+        },
+        "8\"Pipe": {
+          "standard_mh_per_lf": 0.54,
+          "rack_mh_per_lf": 0.35,
+          "ss_mh_per_lf": 0.86
+        },
+        "10\"Pipe": {
+          "standard_mh_per_lf": 0.66,
+          "rack_mh_per_lf": 0.43,
+          "ss_mh_per_lf": 1.06
+        },
+        "12\"Pipe": {
+          "standard_mh_per_lf": 0.78,
+          "rack_mh_per_lf": 0.51,
+          "ss_mh_per_lf": 1.25
+        },
+        "14\"Pipe": {
+          "standard_mh_per_lf": 0.91,
+          "rack_mh_per_lf": 0.59,
+          "ss_mh_per_lf": 1.46
+        },
+        "16\"Pipe": {
+          "standard_mh_per_lf": 1.04,
+          "rack_mh_per_lf": 0.68,
+          "ss_mh_per_lf": 1.66
+        },
+        "18\"Pipe": {
+          "standard_mh_per_lf": 1.18,
+          "rack_mh_per_lf": 0.77,
+          "ss_mh_per_lf": 1.89
+        },
+        "20\"Pipe": {
+          "standard_mh_per_lf": 1.32,
+          "rack_mh_per_lf": 0.86,
+          "ss_mh_per_lf": 2.11
+        },
+        "24\"Pipe": {
+          "standard_mh_per_lf": 1.61,
+          "rack_mh_per_lf": 1.05,
+          "ss_mh_per_lf": 2.58
+        },
+        "26\"Pipe": {
+          "standard_mh_per_lf": 1.76,
+          "rack_mh_per_lf": 1.14,
+          "ss_mh_per_lf": 2.82
+        },
+        "28\"Pipe": {
+          "standard_mh_per_lf": 1.91,
+          "rack_mh_per_lf": 1.24,
+          "ss_mh_per_lf": 3.06
+        },
+        "30\"Pipe": {
+          "standard_mh_per_lf": 2.06,
+          "rack_mh_per_lf": 1.34,
+          "ss_mh_per_lf": 3.3
+        }
+      },
+      "welds": {
+        "1/2\"-1\"Welds": {
+          "std_mh_per_weld": 0.7,
+          "sch80_mh_per_weld": 0.85,
+          "ss_mh_per_weld": 1.2
+        },
+        "1-1/2\"Welds": {
+          "std_mh_per_weld": 0.85,
+          "sch80_mh_per_weld": 1.0,
+          "ss_mh_per_weld": 1.45
+        },
+        "2\"Welds": {
+          "std_mh_per_weld": 1.4,
+          "sch80_mh_per_weld": 1.7,
+          "ss_mh_per_weld": 2.4
+        },
+        "3\"Welds": {
+          "std_mh_per_weld": 2.0,
+          "sch80_mh_per_weld": 2.4,
+          "ss_mh_per_weld": 3.4
+        },
+        "4\"Welds": {
+          "std_mh_per_weld": 2.6,
+          "sch80_mh_per_weld": 3.2,
+          "ss_mh_per_weld": 4.4
+        },
+        "6\"Welds": {
+          "std_mh_per_weld": 3.5,
+          "sch80_mh_per_weld": 4.3,
+          "ss_mh_per_weld": 5.9
+        },
+        "8\"Welds": {
+          "std_mh_per_weld": 4.6,
+          "sch80_mh_per_weld": 5.7,
+          "ss_mh_per_weld": 7.8
+        },
+        "10\"Welds": {
+          "std_mh_per_weld": 5.9,
+          "sch80_mh_per_weld": 7.3,
+          "ss_mh_per_weld": 10.0
+        },
+        "12\"Welds": {
+          "std_mh_per_weld": 7.0,
+          "sch80_mh_per_weld": 8.6,
+          "ss_mh_per_weld": 11.9
+        },
+        "14\"welds": {
+          "std_mh_per_weld": 8.2,
+          "sch80_mh_per_weld": 10.1,
+          "ss_mh_per_weld": 13.9
+        },
+        "16\"welds": {
+          "std_mh_per_weld": 9.4,
+          "sch80_mh_per_weld": 11.5,
+          "ss_mh_per_weld": 16.0
+        },
+        "18\"Welds": {
+          "std_mh_per_weld": 10.5,
+          "sch80_mh_per_weld": 12.9,
+          "ss_mh_per_weld": 17.9
+        },
+        "20\"Welds": {
+          "std_mh_per_weld": 11.7,
+          "sch80_mh_per_weld": 14.4,
+          "ss_mh_per_weld": 19.9
+        },
+        "24\"Welds": {
+          "std_mh_per_weld": 14.0,
+          "sch80_mh_per_weld": 17.2,
+          "ss_mh_per_weld": 23.8
+        },
+        "26\"Welds": {
+          "std_mh_per_weld": 15.1,
+          "sch80_mh_per_weld": 18.6,
+          "ss_mh_per_weld": 25.7
+        },
+        "28\"Welds": {
+          "std_mh_per_weld": 16.3,
+          "sch80_mh_per_weld": 20.0,
+          "ss_mh_per_weld": 27.7
+        },
+        "30\"Welds": {
+          "std_mh_per_weld": 17.5,
+          "sch80_mh_per_weld": 21.5,
+          "ss_mh_per_weld": 29.8
+        }
+      },
+      "bolts": {
+        "1\"-2\"Bolts": {
+          "150_mh_per_set": 0.5,
+          "300_mh_per_set": 0.7
+        },
+        "3\"Bolts": {
+          "150_mh_per_set": 0.7,
+          "300_mh_per_set": 0.9
+        },
+        "4\"Bolts": {
+          "150_mh_per_set": 0.9,
+          "300_mh_per_set": 1.2
+        },
+        "6\"Bolts": {
+          "150_mh_per_set": 1.2,
+          "300_mh_per_set": 1.6
+        },
+        "8\"Bolts": {
+          "150_mh_per_set": 1.6,
+          "300_mh_per_set": 2.1
+        },
+        "10\"Bolts": {
+          "150_mh_per_set": 2.0,
+          "300_mh_per_set": 2.6
+        },
+        "12\"Bolts": {
+          "150_mh_per_set": 2.4,
+          "300_mh_per_set": 3.1
+        },
+        "14\"Bolts": {
+          "150_mh_per_set": 2.9,
+          "300_mh_per_set": 3.7
+        },
+        "16\"Bolts": {
+          "150_mh_per_set": 3.4,
+          "300_mh_per_set": 4.4
+        },
+        "18\"Bolts": {
+          "150_mh_per_set": 3.9,
+          "300_mh_per_set": 5.0
+        },
+        "20\"Bolts": {
+          "150_mh_per_set": 4.5,
+          "300_mh_per_set": 5.8
+        },
+        "24\"Bolts": {
+          "150_mh_per_set": 5.6,
+          "300_mh_per_set": 7.3
+        },
+        "26\"Bolts": {
+          "150_mh_per_set": 6.2,
+          "300_mh_per_set": 8.0
+        },
+        "28\"Bolts": {
+          "150_mh_per_set": 6.8,
+          "300_mh_per_set": 8.8
+        },
+        "30\"Bolts": {
+          "150_mh_per_set": 7.4,
+          "300_mh_per_set": 9.6
+        }
+      },
+      "valves": {
+        "1-1/2\"Valve": {
+          "150_mh_per_valve": 1.0,
+          "300_mh_per_valve": 1.1
+        },
+        "2\"Valve": {
+          "150_mh_per_valve": 1.1,
+          "300_mh_per_valve": 1.4
+        },
+        "3\"Valve": {
+          "150_mh_per_valve": 1.5,
+          "300_mh_per_valve": 2.0
+        },
+        "4\"Valve": {
+          "150_mh_per_valve": 2.0,
+          "300_mh_per_valve": 2.8
+        },
+        "6\"Valve": {
+          "150_mh_per_valve": 2.7,
+          "300_mh_per_valve": 3.7
+        },
+        "8\"Valve": {
+          "150_mh_per_valve": 3.0,
+          "300_mh_per_valve": 4.2
+        },
+        "10\"Valve": {
+          "150_mh_per_valve": 3.5,
+          "300_mh_per_valve": 5.0
+        },
+        "12\"Valve": {
+          "150_mh_per_valve": 4.5,
+          "300_mh_per_valve": 6.4
+        },
+        "14\"Valve": {
+          "150_mh_per_valve": 5.5,
+          "300_mh_per_valve": 7.8
+        },
+        "16\"Valve": {
+          "150_mh_per_valve": 6.5,
+          "300_mh_per_valve": 9.2
+        },
+        "18\"Valve": {
+          "150_mh_per_valve": 7.5,
+          "300_mh_per_valve": 10.7
+        },
+        "20\"Valve": {
+          "150_mh_per_valve": 8.5,
+          "300_mh_per_valve": 12.1
+        },
+        "24\"Valve": {
+          "150_mh_per_valve": 10.5,
+          "300_mh_per_valve": 14.9
+        },
+        "28\"Valve": {
+          "150_mh_per_valve": 12.5,
+          "300_mh_per_valve": 17.7
+        },
+        "30\"Valve": {
+          "150_mh_per_valve": 13.5,
+          "300_mh_per_valve": 19.2
+        }
+      },
+      "threads": {
+        "1\"": {
+          "mh_per_connection": 0.4
+        },
+        "2\"": {
+          "mh_per_connection": 1.1
+        },
+        "4\"": {
+          "mh_per_connection": 1.9
+        }
+      },
+      "other": {
+        "Hydro": {
+          "factor": 16.0,
+          "_note": "Hydrotesting per leg/test, Page Section Two Pressure Testing \u2014 moderate-complexity field run"
+        },
+        "Supports": {
+          "factor": 1.8,
+          "_note": "Page Section Seven Hangers & Supports \u2014 average 4-8\" stanchion shoe"
+        },
+        "Shoes": {
+          "factor": 1.4,
+          "_note": "Page Section Seven \u2014 welded pipe shoe"
+        },
+        "Exchanger": {
+          "factor": 1.0,
+          "_note": "Connection MH only; equipment-set MH is project-specific"
+        },
+        "F/W": {
+          "factor": 0.0,
+          "_note": "Field welds counted via welds table; no separate factor here"
+        },
+        "Demo": {
+          "factor": 0.8,
+          "_note": "Page-derived demo factor, ~0.8x install MH"
+        },
+        "Grout CU FT": {
+          "factor": 3.5,
+          "_note": "Page Section Seven, dry-pack grout per CF"
+        },
+        "ID Tags": {
+          "factor": 0.1,
+          "_note": "0.1 MH per tag \u2014 apply per item"
+        },
+        "Assist": {
+          "factor": 0.0,
+          "_note": "Assist/crew-share factor; off by default \u2014 Page does not include explicit assist"
+        },
+        "Contingency": {
+          "factor": 0.1,
+          "_note": "10% contingency baseline \u2014 adjust per project conditions per Page 'Production and composite rate' guidance"
+        }
+      }
+    },
+    "cost_params": {
+      "labor_rate_per_hour": 70.0,
+      "per_diem_per_hour": 7.25,
+      "material_markup": 0.15,
+      "consumables_default": 100000,
+      "consumables_markup": 0.15,
+      "tax_rate": 0.08,
+      "supervision_hours_per_week": 50,
+      "supervision_rate_per_hour": 95.0,
+      "contingency_factor": 0.1
+    }
   }
 }

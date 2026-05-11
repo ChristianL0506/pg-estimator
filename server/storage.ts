@@ -273,6 +273,27 @@ db.exec(`
   );
 `);
 
+// Custom estimator methods: user-defined estimator profiles that clone a base
+// method (bill / justin / industry) and layer factor overrides on top. Each
+// is referenced by id from an estimate via estimate_projects.customMethodId.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS custom_estimator_methods (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    baseMethod TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    overrides_json TEXT NOT NULL DEFAULT '{}',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+`);
+
+// Add customMethodId column to estimate_projects so saved custom profiles
+// can be referenced from any estimate.
+try {
+  db.exec(`ALTER TABLE estimate_projects ADD COLUMN customMethodId TEXT`);
+} catch (e: any) { /* Column already exists */ }
+
 // Add confidence column to takeoff_items if it doesn't exist
 try {
   db.exec(`ALTER TABLE takeoff_items ADD COLUMN confidence TEXT DEFAULT 'high'`);
@@ -675,6 +696,7 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
     overtimePercent: row.overtimePercent ?? 15,
     doubleTimePercent: row.doubleTimePercent ?? 2,
     estimateMethod: row.estimateMethod || "manual",
+    customMethodId: row.customMethodId || undefined,
   };
 }
 
@@ -702,7 +724,7 @@ const stmts = {
   getEstimateProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM estimate_items GROUP BY projectId`),
   getEstimateProjectBySourceTakeoff: db.prepare(`SELECT * FROM estimate_projects WHERE sourceTakeoffId = ? LIMIT 1`),
   getEstimateItems: db.prepare(`SELECT * FROM estimate_items WHERE projectId = ? ORDER BY lineNumber`),
-  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, markups_json = ? WHERE id = ?`),
+  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, markups_json = ? WHERE id = ?`),
   deleteEstimateProject: db.prepare(`DELETE FROM estimate_projects WHERE id = ?`),
   deleteEstimateItems: db.prepare(`DELETE FROM estimate_items WHERE projectId = ?`),
 
@@ -781,6 +803,13 @@ const stmts = {
   removeProjectFromFolder: db.prepare(`UPDATE takeoff_projects SET folderId = NULL WHERE id = ?`),
   getProjectsByFolder: db.prepare(`SELECT * FROM takeoff_projects WHERE folderId = ? ORDER BY createdAt DESC`),
   getFolderCombinedItems: db.prepare(`SELECT ti.* FROM takeoff_items ti INNER JOIN takeoff_projects tp ON ti.projectId = tp.id WHERE tp.folderId = ? ORDER BY tp.name, ti.lineNumber`),
+
+  // Custom estimator methods
+  insertCustomMethod: db.prepare(`INSERT INTO custom_estimator_methods (id, name, baseMethod, description, overrides_json, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)`),
+  getCustomMethods: db.prepare(`SELECT * FROM custom_estimator_methods ORDER BY createdAt DESC`),
+  getCustomMethod: db.prepare(`SELECT * FROM custom_estimator_methods WHERE id = ?`),
+  updateCustomMethod: db.prepare(`UPDATE custom_estimator_methods SET name = ?, baseMethod = ?, description = ?, overrides_json = ?, updatedAt = ? WHERE id = ?`),
+  deleteCustomMethod: db.prepare(`DELETE FROM custom_estimator_methods WHERE id = ?`),
 };
 
 // Transaction helpers
@@ -1047,9 +1076,11 @@ class Storage {
     const overtimePercent = data.overtimePercent ?? row.overtimePercent ?? 15;
     const doubleTimePercent = data.doubleTimePercent ?? row.doubleTimePercent ?? 2;
     const estimateMethod = data.estimateMethod ?? row.estimateMethod ?? "manual";
+    // customMethodId: caller may pass null to clear, undefined to leave, or a string to set
+    const customMethodId = data.customMethodId !== undefined ? data.customMethodId : row.customMethodId ?? null;
     const markups = data.markups ?? currentMarkups;
 
-    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, JSON.stringify(markups), id);
+    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, JSON.stringify(markups), id);
 
     if (data.items) {
       replaceEstimateItemsTransaction(id, data.items);
@@ -1061,7 +1092,8 @@ class Storage {
       sourceTakeoffId: row.sourceTakeoffId || undefined,
       createdAt: row.createdAt, items, markups, laborRate, overtimeRate, doubleTimeRate,
       perDiem, overtimePercent, doubleTimePercent,
-      estimateMethod: estimateMethod as "bill" | "justin" | "manual",
+      customMethodId: customMethodId || undefined,
+      estimateMethod: estimateMethod as "bill" | "justin" | "industry" | "manual",
     };
   }
 
@@ -1918,6 +1950,75 @@ class Storage {
 
   getFolderCombinedItems(folderId: string): TakeoffItem[] {
     return (stmts.getFolderCombinedItems.all(folderId) as any[]).map(rowToTakeoffItem);
+  }
+
+  // ── Custom Estimator Methods ──
+
+  createCustomMethod(data: { name: string; baseMethod: "bill" | "justin" | "industry"; description?: string; overrides?: Record<string, any> }): any {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    stmts.insertCustomMethod.run(
+      id,
+      data.name,
+      data.baseMethod,
+      data.description || "",
+      JSON.stringify(data.overrides || {}),
+      now,
+      now,
+    );
+    return { id, name: data.name, baseMethod: data.baseMethod, description: data.description || "", overrides: data.overrides || {}, createdAt: now, updatedAt: now };
+  }
+
+  getCustomMethods(): any[] {
+    return (stmts.getCustomMethods.all() as any[]).map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      baseMethod: row.baseMethod,
+      description: row.description || "",
+      overrides: JSON.parse(row.overrides_json || "{}"),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  getCustomMethod(id: string): any | undefined {
+    const row = stmts.getCustomMethod.get(id) as any | undefined;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      name: row.name,
+      baseMethod: row.baseMethod,
+      description: row.description || "",
+      overrides: JSON.parse(row.overrides_json || "{}"),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  updateCustomMethod(id: string, data: { name?: string; baseMethod?: "bill" | "justin" | "industry"; description?: string; overrides?: Record<string, any> }): any | undefined {
+    const existing = this.getCustomMethod(id);
+    if (!existing) return undefined;
+    const now = new Date().toISOString();
+    const merged = {
+      name: data.name ?? existing.name,
+      baseMethod: (data.baseMethod ?? existing.baseMethod) as "bill" | "justin" | "industry",
+      description: data.description ?? existing.description ?? "",
+      overrides: data.overrides ?? existing.overrides,
+    };
+    stmts.updateCustomMethod.run(
+      merged.name,
+      merged.baseMethod,
+      merged.description,
+      JSON.stringify(merged.overrides),
+      now,
+      id,
+    );
+    return { ...existing, ...merged, updatedAt: now };
+  }
+
+  deleteCustomMethod(id: string): boolean {
+    const result = stmts.deleteCustomMethod.run(id);
+    return result.changes > 0;
   }
 }
 

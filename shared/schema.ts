@@ -120,9 +120,44 @@ export const estimateProjectSchema = z.object({
   perDiem: z.number().default(75),
   overtimePercent: z.number().default(15),
   doubleTimePercent: z.number().default(2),
-  estimateMethod: z.enum(["bill", "justin", "manual"]).default("manual"),
+  estimateMethod: z.enum(["bill", "justin", "industry", "manual"]).default("manual"),
+  // ID of a saved custom method (CustomEstimatorMethod.id). When set, estimateMethod
+  // should be "bill" / "justin" / "industry" indicating the base; customMethodId
+  // points at the override profile to layer on top.
+  customMethodId: z.string().optional(),
 });
 export type EstimateProject = z.infer<typeof estimateProjectSchema>;
+
+// ============================================================
+// CUSTOM ESTIMATOR METHODS
+// User-defined estimator profiles. Each is a clone of an existing base
+// method (bill / justin / industry) plus a set of factor overrides that
+// layer on top of the base. Stored per-user; selectable on any estimate.
+// ============================================================
+
+export const customEstimatorMethodSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  baseMethod: z.enum(["bill", "justin", "industry"]),
+  description: z.string().optional().default(""),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  // Free-form overrides: nested key path -> replacement value. The
+  // override applies to the base method's data tree. Examples:
+  //   "labor_factors.welds.4\"Welds.std_mh_per_weld": 3.1
+  //   "cost_params.labor_rate_per_hour": 72.0
+  // A leaf value can be a number, string, or any JSON value the base supports.
+  overrides: z.record(z.string(), z.any()).default({}),
+});
+export type CustomEstimatorMethod = z.infer<typeof customEstimatorMethodSchema>;
+
+export const insertCustomEstimatorMethodSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  baseMethod: z.enum(["bill", "justin", "industry"]),
+  description: z.string().optional().default(""),
+  overrides: z.record(z.string(), z.any()).optional().default({}),
+});
+export type InsertCustomEstimatorMethod = z.infer<typeof insertCustomEstimatorMethodSchema>;
 
 export const insertEstimateProjectSchema = z.object({
   name: z.string().min(1, "Project name is required"),

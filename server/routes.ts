@@ -8,7 +8,7 @@ import path from "path";
 import { execSync, execFileSync, execFile, exec } from "child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import type { JobProgress } from "@shared/schema";
-import { insertEstimateProjectSchema, insertCostDatabaseEntrySchema, estimateItemSchema, markupsSchema, insertPurchaseRecordSchema, insertBidSchema, insertVendorQuoteSchema } from "@shared/schema";
+import { insertEstimateProjectSchema, insertCostDatabaseEntrySchema, estimateItemSchema, markupsSchema, insertPurchaseRecordSchema, insertBidSchema, insertVendorQuoteSchema, insertCustomEstimatorMethodSchema } from "@shared/schema";
 import { z } from "zod";
 import { parse as csvParse } from "csv-parse/sync";
 import { PDFDocument } from "pdf-lib";
@@ -67,7 +67,10 @@ function isAuthError(err: any): boolean {
 }
 
 const autoCalculateBodySchema = z.object({
-  method: z.enum(["bill", "justin"]).default("justin"),
+  method: z.enum(["bill", "justin", "industry"]).default("justin"),
+  // Optional: ID of a saved CustomEstimatorMethod. When provided, the base
+  // method (above) is used with this profile's overrides layered on top.
+  customMethodId: z.string().optional(),
   laborRate: z.number().min(0).max(500).default(56),
   overtimeRate: z.number().min(0).max(500).default(79),
   doubleTimeRate: z.number().min(0).max(500).default(100),
@@ -99,7 +102,8 @@ const patchEstimateSchema = z.object({
   perDiem: z.number().optional(),
   overtimePercent: z.number().optional(),
   doubleTimePercent: z.number().optional(),
-  estimateMethod: z.enum(["bill", "justin", "manual"]).optional(),
+  estimateMethod: z.enum(["bill", "justin", "industry", "manual"]).optional(),
+  customMethodId: z.string().optional(),
 });
 import { generateBillsWorkbook, generateJustinsWorkbook } from "./excelExport";
 
@@ -5217,6 +5221,72 @@ function calculateJustinLaborHours(
 }
 
 // ============================================================
+// INDUSTRY-STANDARD METHOD (Page's Estimator's Piping Man-Hour Manual, 5e)
+// ============================================================
+//
+// The Industry method's data block in estimator-data.json mirrors Justin's
+// shape exactly (pipe / welds / bolts / valves / threads / other) so we can
+// reuse Justin's calculator logic without duplication. The only difference
+// is the data source: Page's published factors vs Justin's workbook factors.
+//
+// Per-item calculation differences (Industry vs Justin):
+//   - Industry pipe handling MH is slightly lower than Justin's (Page is
+//     CS-baseline; Justin includes some project-specific overhead).
+//   - Industry weld MH is lower than Justin's (Page CS field weld
+//     productivity is ~1.5 MH/in-dia vs Justin's measured higher rates).
+//   - SS multiplier ~1.7x CS per Page Section Three alloy factors.
+//   - SCH 80 / XH multiplier ~1.2-1.25x STD per Page heavy-wall tables.
+//
+// Returns { mh, calcBasis, sizeMatchExact } with calcBasis prefixed
+// "Industry: ..." so the estimator can see where each number came from.
+
+function calculateIndustryLaborHours(
+  item: any,
+  installType: "standard" | "rack",
+  material: "CS" | "SS",
+  schedule: string,
+  industryData: any
+): { mh: number; calcBasis: string; sizeMatchExact: boolean } {
+  // Reuse the Justin calculator logic against the Industry data block.
+  // The shapes match, so this works directly. We post-process calcBasis
+  // to rename the prefix so the estimator can see the source clearly.
+  const result = calculateJustinLaborHours(item, installType, material, schedule, industryData);
+  return {
+    ...result,
+    calcBasis: result.calcBasis.replace(/^Justin:/, "Industry (Page):"),
+  };
+}
+
+// ============================================================
+// CUSTOM METHOD OVERRIDES
+// ============================================================
+//
+// applyCustomOverrides clones a base method's data tree and applies a
+// CustomEstimatorMethod's override map. Override keys are dot-paths into
+// the data tree (e.g. "labor_factors.welds.4\"Welds.std_mh_per_weld").
+// Returns a fresh data object that can be passed to the base calculator.
+
+function applyCustomOverrides(baseData: any, overrides: Record<string, any>): any {
+  if (!overrides || Object.keys(overrides).length === 0) return baseData;
+  // Deep clone so we don't mutate the cached estimator data.
+  const cloned = JSON.parse(JSON.stringify(baseData));
+  for (const [keyPath, value] of Object.entries(overrides)) {
+    if (typeof keyPath !== "string" || keyPath.length === 0) continue;
+    const parts = keyPath.split(".");
+    let cursor: any = cloned;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const k = parts[i];
+      if (cursor[k] === undefined || cursor[k] === null || typeof cursor[k] !== "object") {
+        cursor[k] = {};
+      }
+      cursor = cursor[k];
+    }
+    cursor[parts[parts.length - 1]] = value;
+  }
+  return cloned;
+}
+
+// ============================================================
 // ESTIMATING HELPERS
 // ============================================================
 
@@ -5978,6 +6048,7 @@ Picou Group Contractors`;
     }
     const {
       method,
+      customMethodId,
       laborRate,
       overtimeRate,
       doubleTimeRate,
@@ -5998,6 +6069,22 @@ Picou Group Contractors`;
       estimatorData = getEstimatorData();
     } catch (err: any) {
       return res.status(500).json({ message: `Failed to load estimator data: ${err.message}` });
+    }
+
+    // If a custom method id is provided, resolve it and layer its overrides
+    // onto the base method's data block. The base method (bill/justin/industry)
+    // still drives the calculator function; the custom profile only edits factors.
+    let customMethod: any = null;
+    if (customMethodId) {
+      customMethod = storage.getCustomMethod(customMethodId);
+      if (!customMethod) {
+        return res.status(404).json({ message: `Custom method '${customMethodId}' not found` });
+      }
+      // Apply the custom overrides to the appropriate base data block.
+      const base = customMethod.baseMethod;
+      const overridden = applyCustomOverrides(estimatorData[base], customMethod.overrides || {});
+      // Replace the data block at that base key so downstream calculators pick it up.
+      estimatorData = { ...estimatorData, [base]: overridden };
     }
 
     // Compute blended rate from ST/OT/DT percentages
@@ -6046,6 +6133,17 @@ Picou Group Contractors`;
           laborHoursPerUnit = laborHoursPerUnit * rackFactor;
           calcBasis += ` × ${rackFactor.toFixed(2)} (rack factor) = ${laborHoursPerUnit.toFixed(4)} MH`;
         }
+      } else if (method === "industry") {
+        // Industry method (Page's Estimator's Piping Man-Hour Manual)
+        // Reuses Justin's calculator shape against the Industry data block.
+        // Contingency comes from Industry cost_params (default 10% per Page guidance).
+        const iResult = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.industry);
+        const baseMH = iResult.mh;
+        sizeMatchExact = iResult.sizeMatchExact;
+        const contingencyFactor = estimatorData.industry?.cost_params?.contingency_factor ?? 0.10;
+        const contingencyMult = 1 + contingencyFactor;
+        laborHoursPerUnit = baseMH * contingencyMult;
+        calcBasis = `${iResult.calcBasis} × ${contingencyMult.toFixed(2)} (${(contingencyFactor * 100).toFixed(0)}% contingency) = ${laborHoursPerUnit.toFixed(4)} MH`;
       } else {
         const jResult = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.justin);
         const baseMH = jResult.mh;
@@ -6077,16 +6175,20 @@ Picou Group Contractors`;
       return computeEstimateItem(updatedItem);
     });
 
-    // Feature 6: Add supervision line item for Justin's method
-    if (method === "justin") {
+    // Auto-add a supervision line item for the factor-based methods
+    // (Justin and Industry). Bill's method already builds supervision into
+    // its EI factors so it doesn't need a separate row.
+    if (method === "justin" || method === "industry") {
       const hasSupervision = updatedItems.some((i: any) => (i.description || "").toLowerCase().includes("supervision"));
       if (!hasSupervision) {
         const totalHours = updatedItems.reduce((s: number, i: any) => s + (i.quantity || 0) * (i.laborHoursPerUnit || 0), 0);
-        const supervisionHoursPerWeek = estimatorData.justin?.cost_params?.supervision_hours_per_week || 60;
+        const cp = method === "justin" ? estimatorData.justin?.cost_params : estimatorData.industry?.cost_params;
+        const supervisionHoursPerWeek = cp?.supervision_hours_per_week || 60;
         const crewSize = 8;
         const hoursPerDay = 10;
         const projectWeeks = Math.max(1, Math.ceil(totalHours / (crewSize * hoursPerDay * 5)));
         const supervisionMH = projectWeeks * supervisionHoursPerWeek;
+        const methodLabel = method === "justin" ? "Justin" : "Industry";
         const supervisionItem = computeEstimateItem({
           id: randomUUID(),
           lineNumber: updatedItems.length + 1,
@@ -6103,7 +6205,7 @@ Picou Group Contractors`;
           totalCost: 0,
           notes: `Auto: ${projectWeeks} weeks × ${supervisionHoursPerWeek} hrs/wk (est. from ${totalHours.toFixed(0)} total MH)`,
           fromDatabase: false,
-          calculationBasis: `Justin: Supervision → ${projectWeeks} wk × ${supervisionHoursPerWeek} MH/wk = ${supervisionMH} MH`,
+          calculationBasis: `${methodLabel}: Supervision → ${projectWeeks} wk × ${supervisionHoursPerWeek} MH/wk = ${supervisionMH} MH`,
         });
         updatedItems.push(supervisionItem);
       }
@@ -6118,6 +6220,7 @@ Picou Group Contractors`;
       overtimePercent,
       doubleTimePercent,
       estimateMethod: method,
+      customMethodId: customMethodId || null,
     } as any);
     res.json(updated);
   });
@@ -6180,6 +6283,224 @@ Picou Group Contractors`;
     }
 
     res.json(matches);
+  });
+
+  // ===== ESTIMATOR DATA (Bill / Justin / Industry base factor tables) =====
+  // Read-only view of the bundled estimator-data.json. Useful for the UI to
+  // render the base factor tables before letting the user clone+edit into a
+  // custom method. Each method object includes a `source` field where applicable.
+  app.get("/api/estimator-methods", (_req, res) => {
+    try {
+      const data = getEstimatorData();
+      const methods = [
+        { key: "bill",     name: "Bill's EI Method",          description: data.bill?.description || "",     source: data.bill?.source || "Picou Group internal" },
+        { key: "justin",   name: "Justin's Factor Method",    description: data.justin?.description || "",   source: data.justin?.source || "Picou Group internal" },
+        { key: "industry", name: "Industry Standard (Page)",  description: data.industry?.description || "", source: data.industry?.source || "Page's Estimator's Piping Man-Hour Manual" },
+      ];
+      res.json({ methods, data: { bill: data.bill, justin: data.justin, industry: data.industry } });
+    } catch (err: any) {
+      res.status(500).json({ message: `Failed to load estimator data: ${err.message}` });
+    }
+  });
+
+  // ===== CUSTOM ESTIMATOR METHODS (clone-and-edit profiles) =====
+  app.get("/api/custom-methods", (_req, res) => {
+    res.json(storage.getCustomMethods());
+  });
+
+  app.get("/api/custom-methods/:id", (req, res) => {
+    const method = storage.getCustomMethod(req.params.id);
+    if (!method) return res.status(404).json({ message: "Custom method not found" });
+    res.json(method);
+  });
+
+  app.post("/api/custom-methods", (req, res) => {
+    const parsed = insertCustomEstimatorMethodSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten().fieldErrors });
+    }
+    // Enforce unique name (case-insensitive)
+    const existing = storage.getCustomMethods().find(m => m.name.toLowerCase() === parsed.data.name.toLowerCase());
+    if (existing) {
+      return res.status(409).json({ message: `A custom method named '${parsed.data.name}' already exists` });
+    }
+    const created = storage.createCustomMethod(parsed.data);
+    res.status(201).json(created);
+  });
+
+  app.patch("/api/custom-methods/:id", (req, res) => {
+    const parsed = insertCustomEstimatorMethodSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten().fieldErrors });
+    }
+    const updated = storage.updateCustomMethod(req.params.id, parsed.data);
+    if (!updated) return res.status(404).json({ message: "Custom method not found" });
+    res.json(updated);
+  });
+
+  app.delete("/api/custom-methods/:id", (req, res) => {
+    const ok = storage.deleteCustomMethod(req.params.id);
+    if (!ok) return res.status(404).json({ message: "Custom method not found" });
+    res.status(204).end();
+  });
+
+  // ===== COMPARE METHODS =====
+  // Runs the estimate through Bill, Justin, Industry, and any selected custom
+  // methods, returning a summary card + per-line drill-down. The estimate's
+  // saved state is NOT modified — this is a pure read-only computation.
+  //
+  // Body: { customMethodIds?: string[]; laborRate?, overtimeRate?, ... settings }
+  // Defaults to comparing bill/justin/industry. If customMethodIds is provided,
+  // each one is run with its base method + overrides.
+  app.post("/api/estimates/:id/compare-methods", (req, res) => {
+    const project = storage.getEstimateProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Estimate not found" });
+
+    const compareBodySchema = z.object({
+      customMethodIds: z.array(z.string()).optional().default([]),
+      laborRate: z.number().min(0).max(500).default(project.laborRate || 56),
+      overtimeRate: z.number().min(0).max(500).default(project.overtimeRate || 79),
+      doubleTimeRate: z.number().min(0).max(500).default(project.doubleTimeRate || 100),
+      perDiem: z.number().min(0).max(500).default(project.perDiem || 75),
+      overtimePercent: z.number().min(0).max(100).default(project.overtimePercent || 15),
+      doubleTimePercent: z.number().min(0).max(100).default(project.doubleTimePercent || 2),
+      material: z.enum(["CS", "SS"]).default("CS"),
+      schedule: z.string().default("40"),
+      installType: z.enum(["standard", "rack"]).default("standard"),
+      pipeLocation: z.string().default("ground"),
+      elevation: z.string().default("ground"),
+      alloyGroup: z.string().default("CS"),
+      rackFactor: z.number().default(1.3),
+    });
+    const parsed = compareBodySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten().fieldErrors });
+    }
+    const settings = parsed.data;
+
+    let estimatorData: any;
+    try { estimatorData = getEstimatorData(); } catch (err: any) {
+      return res.status(500).json({ message: `Failed to load estimator data: ${err.message}` });
+    }
+
+    // Build the list of methods to run: 3 base methods + any requested customs.
+    type RunSpec = { key: string; label: string; baseMethod: "bill" | "justin" | "industry"; data: any; customMethodId?: string };
+    const runs: RunSpec[] = [
+      { key: "bill",     label: "Bill",            baseMethod: "bill",     data: estimatorData.bill },
+      { key: "justin",   label: "Justin",          baseMethod: "justin",   data: estimatorData.justin },
+      { key: "industry", label: "Industry (Page)", baseMethod: "industry", data: estimatorData.industry },
+    ];
+    for (const cmId of settings.customMethodIds) {
+      const cm = storage.getCustomMethod(cmId);
+      if (!cm) continue;
+      const overridden = applyCustomOverrides(estimatorData[cm.baseMethod], cm.overrides || {});
+      runs.push({ key: `custom:${cm.id}`, label: cm.name, baseMethod: cm.baseMethod, data: overridden, customMethodId: cm.id });
+    }
+
+    // Blended labor rate (same logic as auto-calculate).
+    const stPercent = Math.max(0, (100 - settings.overtimePercent - settings.doubleTimePercent) / 100);
+    const otPercent = settings.overtimePercent / 100;
+    const dtPercent = settings.doubleTimePercent / 100;
+    const blendedRate = (settings.laborRate * stPercent) + (settings.overtimeRate * otPercent) + (settings.doubleTimeRate * dtPercent);
+    const perDiemPerHour = settings.perDiem / 10;
+    const effectiveRate = blendedRate + perDiemPerHour;
+
+    // For each item, compute MH/cost under each method. Returns:
+    //   summary[]: { key, label, baseMethod, totalMH, totalLaborCost, totalMaterialCost, totalCost, customMethodId? }
+    //   lineItems[]: { itemId, description, size, quantity, byMethod: { [key]: { mh, laborCost, calcBasis } } }
+    const lineItems: any[] = [];
+    const summaryAccum: Record<string, { totalMH: number; totalLaborCost: number; totalMaterialCost: number }> = {};
+    for (const r of runs) summaryAccum[r.key] = { totalMH: 0, totalLaborCost: 0, totalMaterialCost: 0 };
+
+    for (const item of (project.items || [])) {
+      // Detect material from item or fall back to global
+      let detectedMat: "CS" | "SS" = settings.material;
+      if ((item as any).itemMaterial) {
+        detectedMat = (item as any).itemMaterial as "CS" | "SS";
+      } else {
+        const desc = (item.description || "").toUpperCase();
+        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403)\b/.test(desc)) detectedMat = "SS";
+      }
+      const itemMat = detectedMat;
+      const itemSched = (item as any).itemSchedule || settings.schedule;
+      const itemElev = (item as any).itemElevation || settings.elevation;
+      const itemPipeLoc = (item as any).itemPipeLocation || settings.pipeLocation;
+      const itemAlloy = (item as any).itemAlloyGroup || settings.alloyGroup;
+      const lineWorkType = (item as any).workType || settings.installType;
+
+      const byMethod: Record<string, any> = {};
+
+      for (const r of runs) {
+        let mh = 0;
+        let calcBasis = "";
+        let materialAdjust = 0;
+        if (r.baseMethod === "bill") {
+          const result = calculateBillLaborHours(item, itemMat, itemSched, r.data, itemPipeLoc, itemElev, itemAlloy);
+          mh = result.laborHoursPerUnit;
+          calcBasis = result.calcBasis;
+          materialAdjust = result.materialUnitCostAdjust;
+          if (lineWorkType === "rack" && settings.rackFactor > 1) {
+            mh = mh * settings.rackFactor;
+            calcBasis += ` \u00d7 ${settings.rackFactor.toFixed(2)} (rack factor)`;
+          }
+        } else if (r.baseMethod === "industry") {
+          const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const contFactor = r.data?.cost_params?.contingency_factor ?? 0.10;
+          mh = ir.mh * (1 + contFactor);
+          calcBasis = `${ir.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${Math.round(contFactor*100)}% contingency)`;
+        } else {
+          const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const contFactor = r.data?.cost_params?.contingency_factor ?? 0.15;
+          mh = jr.mh * (1 + contFactor);
+          calcBasis = `${jr.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${Math.round(contFactor*100)}% contingency)`;
+        }
+        const laborCost = mh * effectiveRate * (item.quantity || 0);
+        const materialUnitCost = (item.materialUnitCost && item.materialUnitCost > 0) ? item.materialUnitCost : materialAdjust;
+        const materialCost = materialUnitCost * (item.quantity || 0);
+        byMethod[r.key] = {
+          mhPerUnit: mh,
+          totalMH: mh * (item.quantity || 0),
+          laborCost,
+          materialCost,
+          totalCost: laborCost + materialCost,
+          calcBasis,
+        };
+        summaryAccum[r.key].totalMH += mh * (item.quantity || 0);
+        summaryAccum[r.key].totalLaborCost += laborCost;
+        summaryAccum[r.key].totalMaterialCost += materialCost;
+      }
+
+      lineItems.push({
+        itemId: item.id,
+        lineNumber: item.lineNumber,
+        category: item.category,
+        description: item.description,
+        size: item.size,
+        quantity: item.quantity,
+        unit: item.unit,
+        byMethod,
+      });
+    }
+
+    const summary = runs.map(r => ({
+      key: r.key,
+      label: r.label,
+      baseMethod: r.baseMethod,
+      customMethodId: r.customMethodId,
+      totalMH: summaryAccum[r.key].totalMH,
+      totalLaborCost: summaryAccum[r.key].totalLaborCost,
+      totalMaterialCost: summaryAccum[r.key].totalMaterialCost,
+      totalCost: summaryAccum[r.key].totalLaborCost + summaryAccum[r.key].totalMaterialCost,
+    }));
+
+    res.json({
+      estimateId: project.id,
+      estimateName: project.name,
+      itemCount: (project.items || []).length,
+      effectiveLaborRate: effectiveRate,
+      summary,
+      lineItems,
+    });
   });
 
   // ===== EXCEL EXPORT =====
