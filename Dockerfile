@@ -20,9 +20,12 @@ COPY package*.json ./
 # Install ALL dependencies (including dev) for the build step
 RUN npm ci
 
-# Copy source and build
+# Copy source and build.
+# `npm run build` (script/build.ts) handles copying server/estimator-data.json
+# into dist/ on its own. A previous version of this Dockerfile copied a stale
+# root-level estimator-data.json over the newly-built one — don't add a cp here.
 COPY . .
-RUN npm run build && cp estimator-data.json dist/estimator-data.json
+RUN npm run build
 
 # Prune dev dependencies after build
 RUN npm prune --omit=dev

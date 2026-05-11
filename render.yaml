@@ -2,7 +2,11 @@ services:
   - type: web
     name: picou-group-estimator
     runtime: node
-    buildCommand: npm install && npm run build && cp estimator-data.json dist/estimator-data.json
+    # `npm run build` (script/build.ts) handles copying server/estimator-data.json
+    # into dist/ on its own — no extra cp step needed. A previous render.yaml
+    # copied a stale root-level estimator-data.json over the newly-built one,
+    # which broke the Industry method on prod after the e262014 release.
+    buildCommand: npm install && npm run build
     startCommand: NODE_ENV=production node dist/index.cjs
     envVars:
       - key: NODE_ENV
