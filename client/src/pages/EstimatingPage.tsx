@@ -32,6 +32,83 @@ function computeItem(item: EstimateItem): EstimateItem {
   return { ...item, materialExtension: me, laborExtension: le, totalCost: me + le };
 }
 
+// Compute the verification state of an estimate row so the user can audit at a
+// glance whether the calculator handled it correctly. State is derived purely
+// from already-persisted fields on the item (calculationBasis, laborHoursPerUnit,
+// sizeMatchExact); no extra server roundtrip required.
+type RowConfidence = {
+  state: "green" | "yellow" | "red" | "stale";
+  label: string;
+  reasons: string[];
+};
+function getRowConfidence(item: EstimateItem): RowConfidence {
+  const reasons: string[] = [];
+  const basis = (item as any).calculationBasis || "";
+  const lhpu = item.laborHoursPerUnit || 0;
+  const sizeMatchExact = (item as any).sizeMatchExact;
+
+  // Stale (calculator never ran on this row, or labor was zeroed without a basis)
+  if (!basis && lhpu === 0) {
+    return { state: "stale", label: "Not calculated yet", reasons: ["Click 'Calculate Labor Hours' to populate"] };
+  }
+
+  // Red: known problems that mean the labor number can't be trusted
+  if (basis.includes("No matching factor") || basis.includes("No matching table entry")) {
+    reasons.push("No matching labor factor \u2014 row contributes 0 MH");
+  }
+  if (basis.includes("calculator error")) reasons.push("Calculator threw an error");
+  if (lhpu === 0 && (item.category !== "gasket" && !basis.includes("shop bolt-up"))) {
+    reasons.push("Labor hours are zero but item has a calc basis \u2014 worth a manual review");
+  }
+  if (reasons.length > 0) {
+    return { state: "red", label: "Needs review", reasons };
+  }
+
+  // Yellow: calculator ran but had to fall back / approximate
+  if (sizeMatchExact === false) reasons.push("Used nearest size from the factor table, not an exact match");
+  if (basis.includes("\u26A0")) reasons.push("Calculator flagged this row with a warning");
+  if (reasons.length > 0) {
+    return { state: "yellow", label: "Check", reasons };
+  }
+
+  // Green: exact size match, no warnings, non-zero MH
+  return { state: "green", label: "OK", reasons: [] };
+}
+
+// Project-level mode/BOM mismatch detection. Mirrors the diagnose endpoint's
+// logic so we can show a persistent banner without an extra roundtrip.
+function detectModeMismatch(
+  items: EstimateItem[],
+  mode: "bundled" | "separate"
+): { kind: "double-count" | "missing-welds"; sizes?: string[]; suggestion: "separate" | "bundled" } | null {
+  const fittingsBySize = new Map<string, number>();
+  const weldsBySize = new Map<string, number>();
+  for (const it of items) {
+    const cat = (it.category || "").toLowerCase();
+    const desc = (it.description || "").toLowerCase();
+    const isFitting = ["fitting","elbow","tee","reducer","cap","coupling","union"].includes(cat);
+    const isWeld = cat === "weld" || desc.includes("butt weld") || /\bbw\b/.test(desc);
+    const sz = (it.size || "").trim();
+    if (!sz) continue;
+    if (isFitting) fittingsBySize.set(sz, (fittingsBySize.get(sz) || 0) + 1);
+    else if (isWeld) weldsBySize.set(sz, (weldsBySize.get(sz) || 0) + 1);
+  }
+  if (mode === "bundled") {
+    const overlap: string[] = [];
+    for (const sz of fittingsBySize.keys()) {
+      if ((weldsBySize.get(sz) || 0) > 0) overlap.push(sz);
+    }
+    if (overlap.length > 0) return { kind: "double-count", sizes: overlap, suggestion: "separate" };
+    return null;
+  }
+  // separate mode: any fittings but no welds?
+  let fittingCount = 0; let weldCount = 0;
+  for (const v of fittingsBySize.values()) fittingCount += v;
+  for (const v of weldsBySize.values()) weldCount += v;
+  if (fittingCount > 0 && weldCount === 0) return { kind: "missing-welds", suggestion: "bundled" };
+  return null;
+}
+
 const CATEGORIES = ["pipe", "elbow", "tee", "reducer", "valve", "flange", "gasket", "bolt", "cap", "coupling", "union", "weld", "support", "strainer", "trap", "fitting", "steel", "concrete", "rebar", "earthwork", "paving", "electrical", "other"];
 
 export default function EstimatingPage() {
@@ -1187,6 +1264,42 @@ export default function EstimatingPage() {
                       </div>
                     )}
 
+                    {/* Mode-mismatch banner — catches double-counting (bundled + welds) and missing-welds (separate + no welds) */}
+                    {(() => {
+                      const mm = detectModeMismatch(p.items, estFittingWeldMode);
+                      if (!mm) return null;
+                      if (mm.kind === "double-count") {
+                        return (
+                          <div className="border border-amber-500/40 bg-amber-500/10 rounded p-3 text-xs flex items-start gap-3">
+                            <AlertCircle size={16} className="text-amber-600 mt-0.5 shrink-0" />
+                            <div className="flex-1">
+                              <div className="font-semibold">Likely double-counting at size{mm.sizes && mm.sizes.length > 1 ? "s" : ""} {mm.sizes?.join(", ")}</div>
+                              <div className="text-[11px] mt-0.5 leading-relaxed">
+                                This estimate is in <strong>Bundled</strong> mode (fittings carry weld labor) but the BOM also has explicit weld rows at the same size. Switch to Separate mode so each weld counts exactly once, or click "Strip Auto-Inferred Welds" to remove the inferred rows.
+                              </div>
+                            </div>
+                            <Button size="sm" variant="outline" className="h-7 text-xs shrink-0" onClick={() => setEstFittingWeldMode("separate")}>
+                              Switch to Separate
+                            </Button>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="border border-blue-500/40 bg-blue-500/10 rounded p-3 text-xs flex items-start gap-3">
+                          <AlertCircle size={16} className="text-blue-600 mt-0.5 shrink-0" />
+                          <div className="flex-1">
+                            <div className="font-semibold">Mode is "Separate" but no weld rows exist</div>
+                            <div className="text-[11px] mt-0.5 leading-relaxed">
+                              In Separate mode fittings only contribute handling labor (×0.15) and weld rows carry the welding labor. Your BOM has fittings but no welds, so weld labor isn't being counted at all. Either switch back to Bundled, or click "Infer Welds from Fittings" to add weld rows.
+                            </div>
+                          </div>
+                          <Button size="sm" variant="outline" className="h-7 text-xs shrink-0" onClick={() => setEstFittingWeldMode("bundled")}>
+                            Switch to Bundled
+                          </Button>
+                        </div>
+                      );
+                    })()}
+
                     {/* Estimate items table */}
                     <div className="overflow-auto rounded-md border border-border">
                       <table className="w-full text-xs">
@@ -1194,6 +1307,7 @@ export default function EstimatingPage() {
                           <tr className="bg-muted/50 border-b border-border">
                             {([
                               { field: "lineNumber" as SortField, label: "#", cls: "w-8 text-left" },
+                              { field: null as any, label: "\u2713", cls: "w-6 text-center" },
                               { field: "category" as SortField, label: "Category", cls: "text-left" },
                               { field: "size" as SortField, label: "Size", cls: "text-left" },
                               { field: "description" as SortField, label: "Description", cls: "text-left min-w-[160px]" },
@@ -1225,21 +1339,50 @@ export default function EstimatingPage() {
                         <tbody>
                           {p.items.length === 0 ? (
                             <tr>
-                              <td colSpan={13} className="text-center py-8 text-muted-foreground">
+                              <td colSpan={14} className="text-center py-8 text-muted-foreground">
                                 No items. Use quick entry above or import from takeoff.
                               </td>
                             </tr>
                           ) : displayItems.length === 0 ? (
                             <tr>
-                              <td colSpan={13} className="text-center py-6 text-muted-foreground">
+                              <td colSpan={14} className="text-center py-6 text-muted-foreground">
                                 No items match filter.
                               </td>
                             </tr>
                           ) : (
                             <TooltipProvider delayDuration={300}>
-                            {displayItems.map(item => (
+                            {displayItems.map(item => {
+                              const conf = getRowConfidence(item);
+                              const dotColor = conf.state === "green"
+                                ? "bg-emerald-500"
+                                : conf.state === "yellow"
+                                  ? "bg-amber-500"
+                                  : conf.state === "red"
+                                    ? "bg-rose-500"
+                                    : "bg-muted-foreground/40 ring-1 ring-muted-foreground/20";
+                              return (
                               <tr key={item.id} className="border-b border-border hover:bg-muted/20" data-testid={`est-row-${item.id}`}>
                                 <td className="px-2 py-1.5 text-muted-foreground">{item.lineNumber}</td>
+                                <td className="px-2 py-1.5 text-center">
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className={`inline-block h-2.5 w-2.5 rounded-full ${dotColor} cursor-help`} data-testid={`conf-${conf.state}-${item.id}`} />
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-sm" side="right">
+                                      <div className="text-xs font-semibold mb-1">{conf.label}</div>
+                                      {conf.reasons.length > 0 ? (
+                                        <ul className="text-[11px] space-y-0.5 list-disc list-inside">
+                                          {conf.reasons.map((r, i) => <li key={i}>{r}</li>)}
+                                        </ul>
+                                      ) : (
+                                        <div className="text-[11px] text-muted-foreground">Exact size match, calculator ran cleanly.</div>
+                                      )}
+                                      {(item as any).calculationBasis && (
+                                        <div className="text-[10px] text-muted-foreground mt-2 border-t pt-1">{(item as any).calculationBasis}</div>
+                                      )}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </td>
                                 <td className="px-2 py-1.5">
                                   <Badge variant="outline" className="text-[9px] px-1 py-0">{item.category}</Badge>
                                 </td>
@@ -1364,14 +1507,15 @@ export default function EstimatingPage() {
                                   </button>
                                 </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                             </TooltipProvider>
                           )}
                         </tbody>
                         {p.items.length > 0 && (
                           <tfoot>
                             <tr className="bg-muted/50 font-medium border-t-2 border-border">
-                              <td colSpan={9} className="px-2 py-2 text-right text-xs">TOTALS</td>
+                              <td colSpan={10} className="px-2 py-2 text-right text-xs">TOTALS</td>
                               <td className="px-2 py-2 text-right text-xs font-mono text-blue-600 dark:text-blue-400">{fmt$(totalMaterial)}</td>
                               <td className="px-2 py-2 text-right text-xs font-mono text-orange-600 dark:text-orange-400">{fmt$(totalLabor)}</td>
                               <td className="px-2 py-2 text-right text-xs font-mono font-semibold">{fmt$(subtotal)}</td>
