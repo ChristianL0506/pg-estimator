@@ -15,6 +15,7 @@ import CostDatabasePage from "@/pages/CostDatabasePage";
 import ProjectHistoryPage from "@/pages/ProjectHistoryPage";
 import BidDashboardPage from "@/pages/BidDashboardPage";
 import HelpPage from "@/pages/HelpPage";
+import MethodsPage from "@/pages/MethodsPage";
 
 function AppRouter() {
   return (
@@ -30,6 +31,7 @@ function AppRouter() {
         {() => <TakeoffPage discipline="civil" />}
       </Route>
       <Route path="/estimating" component={EstimatingPage} />
+      <Route path="/methods" component={MethodsPage} />
       <Route path="/cost-database" component={CostDatabasePage} />
       <Route path="/project-history" component={ProjectHistoryPage} />
       <Route path="/bids" component={BidDashboardPage} />

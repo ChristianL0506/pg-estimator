@@ -106,6 +106,7 @@ const patchEstimateSchema = z.object({
   customMethodId: z.string().optional(),
 });
 import { generateBillsWorkbook, generateJustinsWorkbook } from "./excelExport";
+import { generateMethodFactorsWorkbook, generateCompareWorkbook } from "./methodExports";
 
 // ============================================================
 // AUTH MIDDLEWARE
@@ -5278,13 +5279,36 @@ function calculateIndustryLaborHours(
 // the data tree (e.g. "labor_factors.welds.4\"Welds.std_mh_per_weld").
 // Returns a fresh data object that can be passed to the base calculator.
 
+// Splits a dot-delimited path while honoring backslash-escaped dots, so that
+// keys that literally contain '.' (e.g. Bill's pipe sizes like "0.25") can be
+// addressed safely. Example:
+//   "labor_rates.butt_welds_ei.0\\.25.STD" -> ["labor_rates", "butt_welds_ei", "0.25", "STD"]
+function splitOverridePath(keyPath: string): string[] {
+  const parts: string[] = [];
+  let buf = "";
+  for (let i = 0; i < keyPath.length; i++) {
+    const c = keyPath[i];
+    if (c === "\\" && i + 1 < keyPath.length && keyPath[i + 1] === ".") {
+      buf += ".";
+      i++; // skip the escaped dot
+    } else if (c === ".") {
+      parts.push(buf);
+      buf = "";
+    } else {
+      buf += c;
+    }
+  }
+  parts.push(buf);
+  return parts;
+}
+
 function applyCustomOverrides(baseData: any, overrides: Record<string, any>): any {
   if (!overrides || Object.keys(overrides).length === 0) return baseData;
   // Deep clone so we don't mutate the cached estimator data.
   const cloned = JSON.parse(JSON.stringify(baseData));
   for (const [keyPath, value] of Object.entries(overrides)) {
     if (typeof keyPath !== "string" || keyPath.length === 0) continue;
-    const parts = keyPath.split(".");
+    const parts = splitOverridePath(keyPath);
     let cursor: any = cloned;
     for (let i = 0; i < parts.length - 1; i++) {
       const k = parts[i];
@@ -6570,6 +6594,183 @@ Picou Group Contractors`;
     } catch (err: any) {
       console.error("Excel export error:", err);
       res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
+  // Export a method's full factor tree to Excel. methodKey is one of
+  // 'bill' / 'justin' / 'industry' (base method) or 'custom:<id>' (custom profile).
+  // For custom profiles we apply overrides on top of the base before exporting,
+  // so the workbook reflects the actual effective factors the calculator will use.
+  app.get("/api/methods/:methodKey/export", async (req, res) => {
+    const key = req.params.methodKey;
+    try {
+      const estimatorData = getEstimatorData();
+      let methodData: any = null;
+      let methodName = "";
+      let fileLabel = "";
+      if (key === "bill" || key === "justin" || key === "industry") {
+        methodData = estimatorData[key];
+        methodName = key === "bill" ? "Bill's EI Method" : key === "justin" ? "Justin's Factor Method" : "Industry Standard (Page)";
+        fileLabel = methodName;
+      } else if (key.startsWith("custom:")) {
+        const customId = key.substring("custom:".length);
+        const cm = storage.getCustomMethod(customId);
+        if (!cm) return res.status(404).json({ message: "Custom method not found" });
+        const base = estimatorData[cm.baseMethod];
+        if (!base) return res.status(500).json({ message: `Base method '${cm.baseMethod}' missing on server\u2014redeploy main` });
+        methodData = applyCustomOverrides(base, cm.overrides || {});
+        methodName = `${cm.name} (custom \u00b7 base: ${cm.baseMethod})`;
+        fileLabel = cm.name;
+      } else {
+        return res.status(400).json({ message: `Unknown method key '${key}'` });
+      }
+      if (!methodData) {
+        return res.status(500).json({ message: `Method data unavailable for '${key}' \u2014 redeploy main` });
+      }
+      const wb = generateMethodFactorsWorkbook(key, methodName, methodData);
+      const safeName = fileLabel.replace(/[^a-zA-Z0-9 _-]/g, "").trim() || key;
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Factor Table.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Method export error:", err);
+      res.status(500).json({ message: err.message || "Method export failed" });
+    }
+  });
+
+  // Export the Compare-All view to Excel. Same body as /compare-methods
+  // (customMethodIds, labor rates, etc.) — we re-run the comparison server-side
+  // so the export reflects the latest settings, not a stale client-side payload.
+  app.post("/api/estimates/:id/compare-methods/export", async (req, res) => {
+    // Reuse the compare-methods handler logic by calling it internally. Simplest
+    // approach: forge a request to the compare endpoint via a tiny adapter.
+    // For now, replicate the logic since it's not too long; if we refactor the
+    // compare handler into a reusable function later we can call that here.
+    const project = storage.getEstimateProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Estimate not found" });
+
+    const settingsSchema = z.object({
+      customMethodIds: z.array(z.string()).optional().default([]),
+      laborRate: z.number().min(0).max(500).default(project.laborRate || 56),
+      overtimeRate: z.number().min(0).max(500).default(project.overtimeRate || 79),
+      doubleTimeRate: z.number().min(0).max(500).default(project.doubleTimeRate || 100),
+      perDiem: z.number().min(0).max(500).default(project.perDiem || 75),
+      overtimePercent: z.number().min(0).max(100).default(project.overtimePercent || 15),
+      doubleTimePercent: z.number().min(0).max(100).default(project.doubleTimePercent || 2),
+      material: z.enum(["CS", "SS"]).default("CS"),
+      schedule: z.string().default("40"),
+      installType: z.enum(["standard", "rack"]).default("standard"),
+      pipeLocation: z.string().default("ground"),
+      elevation: z.string().default("ground"),
+      alloyGroup: z.string().default("CS"),
+      rackFactor: z.number().default(1.3),
+    });
+    const parsed = settingsSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten().fieldErrors });
+    }
+    const settings = parsed.data;
+
+    let estimatorData: any;
+    try { estimatorData = getEstimatorData(); } catch (err: any) {
+      return res.status(500).json({ message: `Failed to load estimator data: ${err.message}` });
+    }
+
+    type RunSpec = { key: string; label: string; baseMethod: "bill" | "justin" | "industry"; data: any; customMethodId?: string };
+    const runs: RunSpec[] = [];
+    if (estimatorData.bill?.labor_rates)       runs.push({ key: "bill",     label: "Bill",            baseMethod: "bill",     data: estimatorData.bill });
+    if (estimatorData.justin?.labor_factors)   runs.push({ key: "justin",   label: "Justin",          baseMethod: "justin",   data: estimatorData.justin });
+    if (estimatorData.industry?.labor_factors) runs.push({ key: "industry", label: "Industry (Page)", baseMethod: "industry", data: estimatorData.industry });
+    for (const cmId of settings.customMethodIds) {
+      const cm = storage.getCustomMethod(cmId);
+      if (!cm) continue;
+      const baseBlock = estimatorData[cm.baseMethod];
+      if (!baseBlock) continue;
+      const overridden = applyCustomOverrides(baseBlock, cm.overrides || {});
+      runs.push({ key: `custom:${cm.id}`, label: cm.name, baseMethod: cm.baseMethod, data: overridden, customMethodId: cm.id });
+    }
+    if (runs.length === 0) {
+      return res.status(500).json({ message: "No estimator methods available to compare." });
+    }
+
+    const stPercent = Math.max(0, (100 - settings.overtimePercent - settings.doubleTimePercent) / 100);
+    const otPercent = settings.overtimePercent / 100;
+    const dtPercent = settings.doubleTimePercent / 100;
+    const blendedRate = (settings.laborRate * stPercent) + (settings.overtimeRate * otPercent) + (settings.doubleTimeRate * dtPercent);
+    const perDiemPerHour = settings.perDiem / 10;
+    const effectiveRate = blendedRate + perDiemPerHour;
+
+    const lineItems: any[] = [];
+    const summaryAccum: Record<string, { totalMH: number; totalLaborCost: number; totalMaterialCost: number }> = {};
+    for (const r of runs) summaryAccum[r.key] = { totalMH: 0, totalLaborCost: 0, totalMaterialCost: 0 };
+
+    for (const item of (project.items || [])) {
+      let detectedMat: "CS" | "SS" = settings.material;
+      if ((item as any).itemMaterial) detectedMat = (item as any).itemMaterial as "CS" | "SS";
+      else {
+        const desc = (item.description || "").toUpperCase();
+        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403)\b/.test(desc)) detectedMat = "SS";
+      }
+      const itemMat = detectedMat;
+      const itemSched = (item as any).itemSchedule || settings.schedule;
+      const itemElev = (item as any).itemElevation || settings.elevation;
+      const itemPipeLoc = (item as any).itemPipeLocation || settings.pipeLocation;
+      const itemAlloy = (item as any).itemAlloyGroup || settings.alloyGroup;
+      const lineWorkType = (item as any).workType || settings.installType;
+      const byMethod: Record<string, any> = {};
+      for (const r of runs) {
+        let mh = 0; let calcBasis = ""; let materialAdjust = 0;
+        if (r.baseMethod === "bill") {
+          const result = calculateBillLaborHours(item, itemMat, itemSched, r.data, itemPipeLoc, itemElev, itemAlloy);
+          mh = result.laborHoursPerUnit;
+          calcBasis = result.calcBasis;
+          materialAdjust = result.materialUnitCostAdjust;
+          if (lineWorkType === "rack" && settings.rackFactor > 1) mh *= settings.rackFactor;
+        } else if (r.baseMethod === "industry") {
+          const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const cf = r.data?.cost_params?.contingency_factor ?? 0.10;
+          mh = ir.mh * (1 + cf); calcBasis = ir.calcBasis;
+        } else {
+          const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data);
+          const cf = r.data?.cost_params?.contingency_factor ?? 0.15;
+          mh = jr.mh * (1 + cf); calcBasis = jr.calcBasis;
+        }
+        const laborCost = mh * effectiveRate * (item.quantity || 0);
+        const materialUnitCost = (item.materialUnitCost && item.materialUnitCost > 0) ? item.materialUnitCost : materialAdjust;
+        const materialCost = materialUnitCost * (item.quantity || 0);
+        byMethod[r.key] = { mhPerUnit: mh, totalMH: mh * (item.quantity || 0), laborCost, materialCost, totalCost: laborCost + materialCost, calcBasis };
+        summaryAccum[r.key].totalMH += mh * (item.quantity || 0);
+        summaryAccum[r.key].totalLaborCost += laborCost;
+        summaryAccum[r.key].totalMaterialCost += materialCost;
+      }
+      lineItems.push({
+        itemId: item.id, lineNumber: item.lineNumber, category: item.category, description: item.description,
+        size: item.size, quantity: item.quantity, unit: item.unit, byMethod,
+      });
+    }
+    const summary = runs.map(r => ({
+      key: r.key, label: r.label, baseMethod: r.baseMethod, customMethodId: r.customMethodId,
+      totalMH: summaryAccum[r.key].totalMH,
+      totalLaborCost: summaryAccum[r.key].totalLaborCost,
+      totalMaterialCost: summaryAccum[r.key].totalMaterialCost,
+      totalCost: summaryAccum[r.key].totalLaborCost + summaryAccum[r.key].totalMaterialCost,
+    }));
+    const compareResult = {
+      estimateId: project.id, estimateName: project.name,
+      itemCount: (project.items || []).length, effectiveLaborRate: effectiveRate,
+      summary, lineItems,
+    };
+    try {
+      const wb = generateCompareWorkbook(compareResult);
+      const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "").trim() || "Estimate";
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Method Comparison.xlsx"`);
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (err: any) {
+      console.error("Compare export error:", err);
+      res.status(500).json({ message: err.message || "Compare export failed" });
     }
   });
 

@@ -1538,7 +1538,51 @@ export default function EstimatingPage() {
       <Dialog open={showCompareDialog} onOpenChange={setShowCompareDialog}>
         <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Compare All Estimating Methods</DialogTitle>
+            <div className="flex items-center justify-between gap-3 pr-8">
+              <DialogTitle>Compare All Estimating Methods</DialogTitle>
+              {compareMutation.data && compareMutation.variables && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                  onClick={async () => {
+                    const id = compareMutation.variables as string;
+                    try {
+                      const res = await apiRequest("POST", `/api/estimates/${id}/compare-methods/export`, {
+                        customMethodIds: customMethods.map(m => m.id),
+                        laborRate: estLaborRate,
+                        overtimeRate: estOvertimeRate,
+                        doubleTimeRate: estDoubleTimeRate,
+                        perDiem: estPerDiem,
+                        overtimePercent: estOvertimePercent,
+                        doubleTimePercent: estDoubleTimePercent,
+                        material: estMaterial,
+                        schedule: estSchedule,
+                        installType: estInstallType,
+                        pipeLocation: estPipeLocation,
+                        elevation: estElevation,
+                        alloyGroup: estAlloyGroup,
+                        rackFactor: estRackFactor,
+                      });
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      const proj = estimates.find(p => p.id === id);
+                      a.download = `${proj?.name || "Estimate"} - Compare All Methods.xlsx`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                      toast({ title: "Downloaded compare workbook" });
+                    } catch (err: any) {
+                      toast({ title: "Export failed", description: err?.message || String(err), variant: "destructive" });
+                    }
+                  }}
+                  data-testid="btn-export-compare"
+                >
+                  <FileSpreadsheet size={13} className="mr-1.5" /> Export to Excel
+                </Button>
+              )}
+            </div>
           </DialogHeader>
           {compareMutation.isPending && (
             <div className="text-sm text-muted-foreground py-8 text-center">Running estimate through all methods…</div>

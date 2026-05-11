@@ -1,7 +1,7 @@
 import { Link, useLocation } from "wouter";
 import { useState, useEffect, useMemo } from "react";
 import {
-  LayoutDashboard, Wrench, Building2, HardHat, Calculator, Moon, Sun, Menu, FileText, Settings, DollarSign, Clock, Target, Sparkles, BookOpen, Search
+  LayoutDashboard, Wrench, Building2, HardHat, Calculator, Moon, Sun, Menu, FileText, Settings, DollarSign, Clock, Target, Sparkles, BookOpen, Search, Sliders
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useQuery } from "@tanstack/react-query";
@@ -34,6 +34,7 @@ const NAV_GROUPS: { label: string; items: { path: string; label: string; icon: a
     label: "Estimating",
     items: [
       { path: "/estimating", label: "Estimating", icon: Calculator },
+      { path: "/methods", label: "Methods", icon: Sliders },
       { path: "/cost-database", label: "Cost Database", icon: DollarSign },
       { path: "/bids", label: "Bid Tracker", icon: Target },
     ],

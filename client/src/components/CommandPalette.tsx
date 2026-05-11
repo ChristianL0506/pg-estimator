@@ -8,7 +8,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { useLocation } from "wouter";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { Search, ArrowRight, Wrench, Building2, HardHat, LayoutDashboard, Calculator, DollarSign, Clock, Target, Settings, BookOpen, FileText, Moon, Sun, Sparkles } from "lucide-react";
+import { Search, ArrowRight, Wrench, Building2, HardHat, LayoutDashboard, Calculator, DollarSign, Clock, Target, Settings, BookOpen, FileText, Moon, Sun, Sparkles, Sliders } from "lucide-react";
 import type { TakeoffProject } from "@shared/schema";
 
 type Action = {
@@ -55,6 +55,7 @@ export default function CommandPalette({ open, onOpenChange, recentProjects }: P
       { id: "page-structural", label: "Structural Takeoff", group: "Pages", icon: Building2, run: navTo("/structural") },
       { id: "page-civil", label: "Civil Takeoff", group: "Pages", icon: HardHat, run: navTo("/civil") },
       { id: "page-estimating", label: "Estimating", group: "Pages", icon: Calculator, run: navTo("/estimating") },
+      { id: "page-methods", label: "Methods", hint: "Edit factor tables", group: "Pages", icon: Sliders, run: navTo("/methods") },
       { id: "page-cost-database", label: "Cost Database", group: "Pages", icon: DollarSign, run: navTo("/cost-database") },
       { id: "page-history", label: "Project History", group: "Pages", icon: Clock, run: navTo("/project-history") },
       { id: "page-bids", label: "Bid Tracker", group: "Pages", icon: Target, run: navTo("/bids") },
