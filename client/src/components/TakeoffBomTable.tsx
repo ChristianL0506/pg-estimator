@@ -314,26 +314,43 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
           </select>
         )}
 
-        {/* Cloud filter */}
-        {hasCloudedItems && (
-          <>
-            <button
-              className={`h-7 text-xs px-2.5 rounded border font-medium transition-colors ${cloudFilter === "clouded" ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700" : "bg-background text-muted-foreground border-border hover:bg-amber-50 dark:hover:bg-amber-950/20"}`}
-              onClick={() => setCloudFilter(cloudFilter === "clouded" ? "all" : "clouded")}
-            >
-              Revisions Only ({cloudedCount})
-            </button>
-            <select
-              className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
-              value={cloudFilter}
-              onChange={e => setCloudFilter(e.target.value as any)}
-              aria-label="Filter by revision status"
-            >
-              <option value="all">All Revisions</option>
-              <option value="clouded">Clouded ({cloudedCount})</option>
-              <option value="non-clouded">Non-Clouded ({items.length - cloudedCount})</option>
-            </select>
-          </>
+        {/* Cloud filter — always visible so the estimator can start clouding
+            even when the extractor caught nothing. */}
+        <button
+          className={`h-7 text-xs px-2.5 rounded border font-medium transition-colors ${cloudFilter === "clouded" ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700" : "bg-background text-muted-foreground border-border hover:bg-amber-50 dark:hover:bg-amber-950/20"}`}
+          onClick={() => setCloudFilter(cloudFilter === "clouded" ? "all" : "clouded")}
+          data-testid="btn-revisions-only"
+        >
+          Revisions Only ({cloudedCount})
+        </button>
+        <select
+          className="h-7 text-xs border rounded px-2 bg-background text-foreground border-border"
+          value={cloudFilter}
+          onChange={e => setCloudFilter(e.target.value as any)}
+          aria-label="Filter by revision status"
+        >
+          <option value="all">All Revisions</option>
+          <option value="clouded">Clouded ({cloudedCount})</option>
+          <option value="non-clouded">Non-Clouded ({items.length - cloudedCount})</option>
+        </select>
+
+        {/* Bulk-mark visible rows. Active filter narrows the scope so the
+            estimator can sweep "all 8\" items in zone B" with one click. */}
+        {editable && filteredItems.length > 0 && (
+          <BulkCloudActions
+            items={filteredItems}
+            onBulkSet={async (clouded) => {
+              try {
+                await Promise.all(filteredItems.map(it =>
+                  apiRequest("PATCH", `/api/takeoff-items/${it.id}`, { revisionClouded: clouded })
+                ));
+                onItemUpdated?.();
+                toast({ title: `${clouded ? "Marked" : "Unmarked"} ${filteredItems.length} row${filteredItems.length === 1 ? "" : "s"}` });
+              } catch {
+                toast({ title: "Bulk update failed", variant: "destructive" });
+              }
+            }}
+          />
         )}
 
         {activeFilterCount > 0 && (
@@ -425,7 +442,8 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
           <TableHeader>
             <TableRow className="bg-muted/50">
               <TableHead className="w-10 text-xs">#</TableHead>
-              {hasCloudedItems && <TableHead className="w-6 text-xs px-1">Rev</TableHead>}
+              {editable && <TableHead className="w-6 text-xs px-1" title="Click the icon on a row to toggle revision-cloud status">Rev</TableHead>}
+              {!editable && hasCloudedItems && <TableHead className="w-6 text-xs px-1">Rev</TableHead>}
               <TableHead className="w-6 text-xs"></TableHead>
               <TableHead className="text-xs">Category</TableHead>
               <TableHead className="text-xs">Size</TableHead>
@@ -475,7 +493,31 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
                   data-testid={`row-item-${item.id}`}
                 >
                   <TableCell className="text-muted-foreground">{item.lineNumber}</TableCell>
-                  {hasCloudedItems && (
+                  {editable ? (
+                    <TableCell className="px-1">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={() => toggleFlag(item.id, "revisionClouded", !isClouded)}
+                            className={`inline-flex items-center justify-center w-5 h-5 rounded-full transition-colors ${
+                              isClouded
+                                ? "bg-amber-100 dark:bg-amber-900/40 hover:bg-amber-200 dark:hover:bg-amber-900/60"
+                                : "opacity-30 hover:opacity-100 hover:bg-amber-50 dark:hover:bg-amber-950/40"
+                            }`}
+                            data-testid={`btn-toggle-cloud-${item.id}`}
+                            aria-label={isClouded ? "Unmark as revision" : "Mark as revision"}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 ${isClouded ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}>
+                              <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+                            </svg>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="right" className="text-[10px]">
+                          {isClouded ? "Click to remove from revision" : "Click to mark as revision"}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TableCell>
+                  ) : hasCloudedItems && (
                     <TableCell className="px-1">
                       {isClouded ? (
                         <Tooltip>
@@ -655,6 +697,39 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
           items={items}
           onClose={() => setSheetPanelPage(null)}
         />
+      )}
+    </div>
+  );
+}
+
+// Bulk-cloud action chip. Shows a small two-button cluster when at least one
+// row is filtered (so the action's scope is obvious from the visible rows).
+// Wired through the parent's filtered item list — estimator can filter to a
+// size, sheet, or category and then sweep the whole subset with one click.
+function BulkCloudActions({ items, onBulkSet }: { items: any[]; onBulkSet: (clouded: boolean) => void | Promise<void> }) {
+  const cloudedInScope = items.filter((it: any) => it.revisionClouded).length;
+  const allClouded = cloudedInScope === items.length;
+  const noneClouded = cloudedInScope === 0;
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        className="h-7 text-xs px-2 rounded border border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700 dark:hover:bg-amber-900/50 transition-colors disabled:opacity-40"
+        disabled={allClouded}
+        onClick={() => onBulkSet(true)}
+        title={`Mark all ${items.length} visible row${items.length === 1 ? "" : "s"} as inside a revision cloud`}
+        data-testid="btn-bulk-cloud"
+      >
+        Mark visible as revision ({items.length})
+      </button>
+      {!noneClouded && (
+        <button
+          className="h-7 text-xs px-2 rounded border border-border text-muted-foreground hover:bg-accent transition-colors"
+          onClick={() => onBulkSet(false)}
+          title={`Unmark all ${items.length} visible row${items.length === 1 ? "" : "s"} from revision cloud`}
+          data-testid="btn-bulk-uncloud"
+        >
+          Clear revision
+        </button>
       )}
     </div>
   );
