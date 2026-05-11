@@ -176,6 +176,23 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
   const [changeOrderOpen, setChangeOrderOpen] = useState(false);
   const [changeOrderData, setChangeOrderData] = useState<any>(null);
 
+  // Manual add-row dialog state. Used to insert a takeoff line the PDF
+  // extraction missed (e.g. extra valve, additional pipe footage, missing fitting).
+  // The form is intentionally minimal — only description, category, size,
+  // quantity, unit, material, schedule are required to make the row usable
+  // both for the BOM export and downstream estimating.
+  const [addRowOpen, setAddRowOpen] = useState(false);
+  const [newRow, setNewRow] = useState({
+    description: "",
+    category: "pipe",
+    size: "",
+    quantity: 1,
+    unit: "EA",
+    material: "",
+    schedule: "",
+    notes: "",
+  });
+
   const changeOrderMutation = useMutation({
     mutationFn: async (projectId: string) => {
       const res = await apiRequest("POST", `/api/takeoff/projects/${projectId}/change-order`);
@@ -187,6 +204,29 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
     },
     onError: (err: any) => {
       toast({ title: "Change order failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // Add a manually-entered row to the active takeoff. The new line will
+  // show up at the end of the table with lineNumber 'M-001'/'M-002'/etc.
+  // and will be included in BOM export, pivot summary, and any downstream
+  // estimate created from this takeoff.
+  const addRowMutation = useMutation({
+    mutationFn: async ({ projectId, row }: { projectId: string; row: typeof newRow }) => {
+      const res = await apiRequest("POST", `/api/takeoff-projects/${projectId}/items`, row);
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Row added" });
+      setAddRowOpen(false);
+      // Reset form for the next add. Keep category/unit/material/schedule
+      // so the user can rapidly add similar rows back-to-back.
+      setNewRow(r => ({ ...r, description: "", size: "", quantity: 1, notes: "" }));
+      queryClient.invalidateQueries({ queryKey: ["/api/takeoff-projects"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/takeoff/projects", selectedId] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Add row failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -567,6 +607,17 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                     <Button
                       variant="outline"
                       size="sm"
+                      onClick={() => setAddRowOpen(true)}
+                      className="text-blue-700 border-blue-300 hover:bg-blue-50 dark:text-blue-400 dark:border-blue-700 dark:hover:bg-blue-900/30"
+                      data-testid="btn-add-row"
+                      title="Manually add a takeoff line the PDF extraction missed"
+                    >
+                      <Plus size={14} className="mr-1.5" />
+                      Add Row
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={handleExportPdf}
                       data-testid="btn-export-pdf"
                     >
@@ -787,6 +838,132 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                         )}
                       </div>
                     )}
+                  </DialogContent>
+                </Dialog>
+
+                {/* Manually Add Row dialog — for PDF-extraction misses */}
+                <Dialog open={addRowOpen} onOpenChange={setAddRowOpen}>
+                  <DialogContent className="max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>Add Takeoff Row</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3">
+                      <p className="text-xs text-muted-foreground">Adds a manually-entered line item to <span className="font-semibold">{selectedProject?.name}</span>. Useful when the PDF extraction missed something. Manual rows get a line number starting with <span className="font-mono">M-</span> and are included in all exports.</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="col-span-2">
+                          <label className="text-[11px] text-muted-foreground">Description *</label>
+                          <Input
+                            value={newRow.description}
+                            onChange={e => setNewRow(r => ({ ...r, description: e.target.value }))}
+                            placeholder="e.g. 6&quot; GATE VALVE CS 150# RF"
+                            data-testid="input-addrow-description"
+                            autoFocus
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted-foreground">Category</label>
+                          <select
+                            value={newRow.category}
+                            onChange={e => setNewRow(r => ({ ...r, category: e.target.value }))}
+                            className="w-full text-xs border border-input rounded px-2 py-1.5 bg-background"
+                            data-testid="select-addrow-category"
+                          >
+                            <option value="pipe">Pipe</option>
+                            <option value="fitting">Fitting</option>
+                            <option value="flange">Flange</option>
+                            <option value="valve">Valve</option>
+                            <option value="weld">Weld</option>
+                            <option value="support">Support</option>
+                            <option value="gasket">Gasket</option>
+                            <option value="bolt">Bolt</option>
+                            <option value="other">Other</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted-foreground">Size</label>
+                          <Input
+                            value={newRow.size}
+                            onChange={e => setNewRow(r => ({ ...r, size: e.target.value }))}
+                            placeholder='e.g. 6&quot;'
+                            data-testid="input-addrow-size"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted-foreground">Quantity *</label>
+                          <Input
+                            type="number"
+                            step="0.5"
+                            value={newRow.quantity}
+                            onChange={e => setNewRow(r => ({ ...r, quantity: parseFloat(e.target.value) || 0 }))}
+                            data-testid="input-addrow-quantity"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted-foreground">Unit</label>
+                          <select
+                            value={newRow.unit}
+                            onChange={e => setNewRow(r => ({ ...r, unit: e.target.value }))}
+                            className="w-full text-xs border border-input rounded px-2 py-1.5 bg-background"
+                            data-testid="select-addrow-unit"
+                          >
+                            <option value="EA">EA</option>
+                            <option value="LF">LF</option>
+                            <option value="FT">FT</option>
+                            <option value="LBS">LBS</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted-foreground">Material</label>
+                          <select
+                            value={newRow.material}
+                            onChange={e => setNewRow(r => ({ ...r, material: e.target.value }))}
+                            className="w-full text-xs border border-input rounded px-2 py-1.5 bg-background"
+                            data-testid="select-addrow-material"
+                          >
+                            <option value="">—</option>
+                            <option value="CS">CS</option>
+                            <option value="SS">SS</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted-foreground">Schedule</label>
+                          <select
+                            value={newRow.schedule}
+                            onChange={e => setNewRow(r => ({ ...r, schedule: e.target.value }))}
+                            className="w-full text-xs border border-input rounded px-2 py-1.5 bg-background"
+                            data-testid="select-addrow-schedule"
+                          >
+                            <option value="">—</option>
+                            <option value="STD">STD</option>
+                            <option value="40">40</option>
+                            <option value="80">80</option>
+                            <option value="160">160</option>
+                            <option value="XS">XS</option>
+                            <option value="XXS">XXS</option>
+                          </select>
+                        </div>
+                        <div className="col-span-2">
+                          <label className="text-[11px] text-muted-foreground">Notes</label>
+                          <Input
+                            value={newRow.notes}
+                            onChange={e => setNewRow(r => ({ ...r, notes: e.target.value }))}
+                            placeholder="Optional — why this row was added"
+                            data-testid="input-addrow-notes"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex justify-end gap-2 pt-2">
+                        <Button variant="outline" size="sm" onClick={() => setAddRowOpen(false)}>Cancel</Button>
+                        <Button
+                          size="sm"
+                          disabled={!newRow.description.trim() || addRowMutation.isPending || !selectedProject}
+                          onClick={() => selectedProject && addRowMutation.mutate({ projectId: selectedProject.id, row: newRow })}
+                          data-testid="btn-addrow-submit"
+                        >
+                          {addRowMutation.isPending ? "Adding…" : "Add Row"}
+                        </Button>
+                      </div>
+                    </div>
                   </DialogContent>
                 </Dialog>
 

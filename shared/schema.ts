@@ -144,6 +144,18 @@ export const estimateProjectSchema = z.object({
   //   "separate" — fitting MH = weld_factor × 0.15 (handling only). Use when the BOM
   //                already has explicit weld rows counted at full weld factor.
   fittingWeldMode: z.enum(["bundled", "separate"]).default("bundled"),
+  // Project-level contingency override (percent). When set, replaces the default
+  // contingency factor baked into estimator-data.json for the active method:
+  //   Industry: default 10%  (Page guidance)
+  //   Justin:   default 15%
+  //   Bill:     n/a (Bill's method does not apply contingency)
+  // The factor multiplies the per-unit MH at calculate time:
+  //   laborHoursPerUnit = baseMH × (1 + contingencyOverride/100)
+  // Changing this requires a re-run of the estimate calculation to take effect.
+  // Stored as a percentage (e.g. 12.5 means 12.5%), not as a multiplier.
+  // Undefined means "use the method's data-file default" — the user explicitly
+  // sets it when they want to override.
+  contingencyOverride: z.number().optional(),
   // Project-level "scope adders" — hand-entered scope that isn't on the BOM:
   // hydro testing, demo, supports, ID tags, supervision, misc subcontract, etc.
   // Two modes:

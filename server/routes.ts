@@ -109,6 +109,9 @@ const patchEstimateSchema = z.object({
   estimateMethod: z.enum(["bill", "justin", "industry", "manual"]).optional(),
   customMethodId: z.string().optional(),
   fittingWeldMode: z.enum(["bundled", "separate"]).optional(),
+  // Pass a number to override, null to clear, undefined to leave unchanged.
+  // Percentage value (e.g. 15 = 15%). Bill method ignores this.
+  contingencyOverride: z.number().nullable().optional(),
   scopeAdders: z.array(z.object({
     id: z.string(),
     label: z.string(),
@@ -6363,23 +6366,31 @@ Picou Group Contractors`;
       } else if (method === "industry") {
         // Industry method (Page's Estimator's Piping Man-Hour Manual)
         // Reuses Justin's calculator shape against the Industry data block.
-        // Contingency comes from Industry cost_params (default 10% per Page guidance).
+        // Contingency: project's contingencyOverride takes priority over the
+        // data-file default (Page guidance: 10%). User-entered as a percent.
         const iResult = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.industry, fittingWeldMode);
         const baseMH = iResult.mh;
         sizeMatchExact = iResult.sizeMatchExact;
-        const contingencyFactor = estimatorData.industry?.cost_params?.contingency_factor ?? 0.10;
+        const dataDefault = estimatorData.industry?.cost_params?.contingency_factor ?? 0.10;
+        const override = (project as any).contingencyOverride;
+        const contingencyFactor = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
         const contingencyMult = 1 + contingencyFactor;
         laborHoursPerUnit = baseMH * contingencyMult;
-        calcBasis = `${iResult.calcBasis} × ${contingencyMult.toFixed(2)} (${(contingencyFactor * 100).toFixed(0)}% contingency) = ${laborHoursPerUnit.toFixed(4)} MH`;
+        const overrideTag = (typeof override === "number" && !Number.isNaN(override)) ? " override" : "";
+        calcBasis = `${iResult.calcBasis} × ${contingencyMult.toFixed(2)} (${(contingencyFactor * 100).toFixed(1)}% contingency${overrideTag}) = ${laborHoursPerUnit.toFixed(4)} MH`;
       } else {
         const jResult = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.justin, fittingWeldMode);
         const baseMH = jResult.mh;
         sizeMatchExact = jResult.sizeMatchExact;
-        // Apply contingency factor from Justin's data (default 15%)
-        const contingencyFactor = estimatorData.justin?.cost_params?.contingency_factor || 0.15;
+        // Contingency: project's contingencyOverride takes priority over Justin's
+        // data-file default (15%). User-entered as a percent.
+        const dataDefault = estimatorData.justin?.cost_params?.contingency_factor || 0.15;
+        const override = (project as any).contingencyOverride;
+        const contingencyFactor = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
         const contingencyMult = 1 + contingencyFactor;
         laborHoursPerUnit = baseMH * contingencyMult;
-        calcBasis = `${jResult.calcBasis} × ${contingencyMult.toFixed(2)} (${(contingencyFactor * 100).toFixed(0)}% contingency) = ${laborHoursPerUnit.toFixed(4)} MH`;
+        const overrideTag = (typeof override === "number" && !Number.isNaN(override)) ? " override" : "";
+        calcBasis = `${jResult.calcBasis} × ${contingencyMult.toFixed(2)} (${(contingencyFactor * 100).toFixed(1)}% contingency${overrideTag}) = ${laborHoursPerUnit.toFixed(4)} MH`;
         // Note: rack vs standard is already handled inside calculateJustinLaborHours
         // by selecting rack_mh_per_lf vs standard columns — no secondary rack factor needed
       }
@@ -6685,14 +6696,20 @@ Picou Group Contractors`;
           }
         } else if (r.baseMethod === "industry") {
           const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
-          const contFactor = r.data?.cost_params?.contingency_factor ?? 0.10;
+          // Project's contingencyOverride takes priority over the data-file default.
+          const dataDefault = r.data?.cost_params?.contingency_factor ?? 0.10;
+          const override = (project as any).contingencyOverride;
+          const contFactor = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
           mh = ir.mh * (1 + contFactor);
-          calcBasis = `${ir.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${Math.round(contFactor*100)}% contingency)`;
+          calcBasis = `${ir.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${(contFactor*100).toFixed(1)}% contingency)`;
         } else {
           const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
-          const contFactor = r.data?.cost_params?.contingency_factor ?? 0.15;
+          // Project's contingencyOverride takes priority over Justin's data-file default.
+          const dataDefault = r.data?.cost_params?.contingency_factor ?? 0.15;
+          const override = (project as any).contingencyOverride;
+          const contFactor = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
           mh = jr.mh * (1 + contFactor);
-          calcBasis = `${jr.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${Math.round(contFactor*100)}% contingency)`;
+          calcBasis = `${jr.calcBasis} \u00d7 ${(1 + contFactor).toFixed(2)} (${(contFactor*100).toFixed(1)}% contingency)`;
         }
         const laborCost = mh * effectiveRate * (item.quantity || 0);
         const materialUnitCost = (item.materialUnitCost && item.materialUnitCost > 0) ? item.materialUnitCost : materialAdjust;
@@ -6894,15 +6911,19 @@ Picou Group Contractors`;
           sizeMatchExact = r.sizeMatchExact;
         } else if (activeBase === "industry") {
           const r = calculateIndustryLaborHours(item, lineWorkType, itemMat, itemSched, activeData, cfg.fittingWeldMode);
-          const cont = activeData.cost_params?.contingency_factor ?? 0.10;
+          const dataDefault = activeData.cost_params?.contingency_factor ?? 0.10;
+          const override = (project as any).contingencyOverride;
+          const cont = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
           mhPerUnit = r.mh * (1 + cont);
-          calcBasis = `${r.calcBasis} \u00d7 ${(1 + cont).toFixed(2)} (${Math.round(cont*100)}% contingency)`;
+          calcBasis = `${r.calcBasis} \u00d7 ${(1 + cont).toFixed(2)} (${(cont*100).toFixed(1)}% contingency)`;
           sizeMatchExact = r.sizeMatchExact;
         } else {
           const r = calculateJustinLaborHours(item, lineWorkType, itemMat, itemSched, activeData, cfg.fittingWeldMode);
-          const cont = activeData.cost_params?.contingency_factor ?? 0.15;
+          const dataDefault = activeData.cost_params?.contingency_factor ?? 0.15;
+          const override = (project as any).contingencyOverride;
+          const cont = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
           mhPerUnit = r.mh * (1 + cont);
-          calcBasis = `${r.calcBasis} \u00d7 ${(1 + cont).toFixed(2)} (${Math.round(cont*100)}% contingency)`;
+          calcBasis = `${r.calcBasis} \u00d7 ${(1 + cont).toFixed(2)} (${(cont*100).toFixed(1)}% contingency)`;
           sizeMatchExact = r.sizeMatchExact;
         }
       } catch (err: any) {
@@ -7170,11 +7191,15 @@ Picou Group Contractors`;
           if (lineWorkType === "rack" && settings.rackFactor > 1) mh *= settings.rackFactor;
         } else if (r.baseMethod === "industry") {
           const ir = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
-          const cf = r.data?.cost_params?.contingency_factor ?? 0.10;
+          const dataDefault = r.data?.cost_params?.contingency_factor ?? 0.10;
+          const override = (project as any).contingencyOverride;
+          const cf = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
           mh = ir.mh * (1 + cf); calcBasis = ir.calcBasis;
         } else {
           const jr = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, r.data, settings.fittingWeldMode);
-          const cf = r.data?.cost_params?.contingency_factor ?? 0.15;
+          const dataDefault = r.data?.cost_params?.contingency_factor ?? 0.15;
+          const override = (project as any).contingencyOverride;
+          const cf = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
           mh = jr.mh * (1 + cf); calcBasis = jr.calcBasis;
         }
         const laborCost = mh * effectiveRate * (item.quantity || 0);
@@ -8240,6 +8265,41 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       }
     }
 
+    res.json({ success: true });
+  });
+
+  // ── Manual Add / Delete Takeoff Items ──
+  // For when the PDF extraction missed something the estimator knows belongs
+  // on the takeoff. New rows get lineNumber 'M-001', 'M-002', etc. so they
+  // sort to the end and are visually distinct from extracted lines.
+  app.post("/api/takeoff-projects/:projectId/items", (req, res) => {
+    const { projectId } = req.params;
+    const body = req.body || {};
+    if (!body.description || typeof body.description !== "string") {
+      return res.status(400).json({ error: "description (string) is required" });
+    }
+    const id = storage.addTakeoffItem(projectId, {
+      description: body.description,
+      category: body.category,
+      size: body.size,
+      quantity: typeof body.quantity === "number" ? body.quantity : parseFloat(body.quantity) || 1,
+      unit: body.unit,
+      material: body.material,
+      schedule: body.schedule,
+      spec: body.spec,
+      rating: body.rating,
+      notes: body.notes,
+      lineNumber: body.lineNumber,
+      revisionClouded: !!body.revisionClouded,
+    });
+    if (!id) return res.status(404).json({ error: "Project not found" });
+    res.json({ success: true, id });
+  });
+
+  app.delete("/api/takeoff-items/:itemId", (req, res) => {
+    const { itemId } = req.params;
+    const ok = storage.deleteTakeoffItem(itemId);
+    if (!ok) return res.status(404).json({ error: "Item not found" });
     res.json({ success: true });
   });
 

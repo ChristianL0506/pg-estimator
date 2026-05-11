@@ -1620,6 +1620,40 @@ export default function EstimatingPage() {
                               </div>
                             </div>
                           ))}
+                          {/* Contingency override — multiplies per-unit MH at calculate time,
+                              NOT a post-subtotal markup. Empty = use method default
+                              (Industry 10%, Justin 15%, Bill n/a). Re-run Auto-Calculate
+                              after changing this value for it to apply to the BOM. */}
+                          <Separator className="my-2" />
+                          <div className="flex items-center gap-3">
+                            <label className="text-xs text-muted-foreground w-28 shrink-0" title="Multiplies per-unit man-hours at calculate time. Industry default 10%, Justin default 15%. Bill's method does not use contingency.">
+                              Contingency
+                            </label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                step="0.5"
+                                placeholder={p.estimateMethod === "justin" ? "15" : p.estimateMethod === "industry" ? "10" : (p.estimateMethod === "bill" ? "n/a" : "15")}
+                                disabled={p.estimateMethod === "bill"}
+                                className="w-20 text-right text-xs border border-input rounded px-2 py-1 bg-background font-mono"
+                                defaultValue={(p as any).contingencyOverride ?? ""}
+                                onBlur={e => {
+                                  const raw = e.target.value.trim();
+                                  const v = raw === "" ? null : (parseFloat(raw) || 0);
+                                  patchMutation.mutate({ id: p.id, data: { contingencyOverride: v } as any });
+                                }}
+                                data-testid="input-markup-contingency"
+                              />
+                              <span className="text-xs text-muted-foreground">%</span>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground/80 leading-tight">
+                            {p.estimateMethod === "bill" 
+                              ? "Bill's method doesn't apply contingency."
+                              : (p as any).contingencyOverride === undefined || (p as any).contingencyOverride === null
+                                ? `Empty = use ${p.estimateMethod === "justin" ? "Justin's 15%" : p.estimateMethod === "industry" ? "Industry 10%" : "method"} default. Re-run Auto-Calculate to apply changes.`
+                                : `Overriding default (${p.estimateMethod === "justin" ? "15%" : p.estimateMethod === "industry" ? "10%" : "method default"}). Re-run Auto-Calculate to apply.`}
+                          </p>
                         </CardContent>
                       </Card>
 

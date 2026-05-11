@@ -427,6 +427,12 @@ try {
   db.exec(`ALTER TABLE estimate_projects ADD COLUMN scope_adders_json TEXT DEFAULT '[]'`);
 } catch (e: any) { /* Column already exists */ }
 
+// Project-level contingency override. NULL means "use the method's default"
+// from estimator-data.json. Stored as a percentage (12.5 = 12.5%).
+try {
+  db.exec(`ALTER TABLE estimate_projects ADD COLUMN contingencyOverride REAL`);
+} catch (e: any) { /* Column already exists */ }
+
 // Create corrections table for tracking human edits
 db.exec(`
   CREATE TABLE IF NOT EXISTS corrections (
@@ -738,6 +744,7 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
     estimateMethod: row.estimateMethod || "manual",
     customMethodId: row.customMethodId || undefined,
     fittingWeldMode: (row.fittingWeldMode === "separate" ? "separate" : "bundled") as "bundled" | "separate",
+    contingencyOverride: row.contingencyOverride === null || row.contingencyOverride === undefined ? undefined : Number(row.contingencyOverride),
     scopeAdders,
   } as any;
 }
@@ -759,14 +766,14 @@ const stmts = {
   deleteTakeoffProject: db.prepare(`DELETE FROM takeoff_projects WHERE id = ?`),
   deleteTakeoffItems: db.prepare(`DELETE FROM takeoff_items WHERE projectId = ?`),
 
-  insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, fittingWeldMode, markups_json, scope_adders_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, fittingWeldMode, markups_json, scope_adders_json, contingencyOverride) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   insertEstimateItem: db.prepare(`INSERT INTO estimate_items (id, projectId, lineNumber, category, description, size, quantity, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit, materialExtension, laborExtension, totalCost, notes, fromDatabase, itemMaterial, itemSchedule, itemElevation, itemPipeLocation, itemAlloyGroup, calculationBasis, sizeMatchExact, materialCostSource, workType, revisionClouded, weldAssumption, includeInBom, includeInTakeoff, includeInEstimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getEstimateProjects: db.prepare(`SELECT * FROM estimate_projects ORDER BY createdAt DESC`),
   getEstimateProject: db.prepare(`SELECT * FROM estimate_projects WHERE id = ?`),
   getEstimateProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM estimate_items GROUP BY projectId`),
   getEstimateProjectBySourceTakeoff: db.prepare(`SELECT * FROM estimate_projects WHERE sourceTakeoffId = ? LIMIT 1`),
   getEstimateItems: db.prepare(`SELECT * FROM estimate_items WHERE projectId = ? ORDER BY lineNumber`),
-  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, fittingWeldMode = ?, markups_json = ?, scope_adders_json = ? WHERE id = ?`),
+  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, fittingWeldMode = ?, markups_json = ?, scope_adders_json = ?, contingencyOverride = ? WHERE id = ?`),
   deleteEstimateProject: db.prepare(`DELETE FROM estimate_projects WHERE id = ?`),
   deleteEstimateItems: db.prepare(`DELETE FROM estimate_items WHERE projectId = ?`),
 
@@ -999,6 +1006,60 @@ class Storage {
     return row || null;
   }
 
+  // Manually add a brand-new takeoff line. Used when the PDF extraction
+  // misses an item the estimator knows is required (extra valve, additional
+  // pipe footage, etc.). Returns the new item's id, or null if the project
+  // doesn't exist.
+  addTakeoffItem(projectId: string, data: Partial<TakeoffItem> & { description: string }): string | null {
+    const project = stmts.getTakeoffProject.get(projectId) as any;
+    if (!project) return null;
+    const id = randomUUID();
+    // Find the next line number so manual rows show at the end. Lines are
+    // sortable strings so we use a numeric suffix prefixed with 'M' for
+    // 'manual' to avoid colliding with extraction line numbers.
+    const existing = stmts.getTakeoffItems.all(projectId) as any[];
+    const manualCount = existing.filter(i => typeof i.lineNumber === "string" && i.lineNumber.startsWith("M-")).length;
+    const lineNumber = data.lineNumber || `M-${String(manualCount + 1).padStart(3, "0")}`;
+    stmts.insertTakeoffItem.run(
+      id,
+      projectId,
+      lineNumber,
+      data.discipline || project.discipline || "piping",
+      data.category || "other",
+      data.description,
+      data.size || "",
+      data.quantity ?? 1,
+      data.unit || "EA",
+      data.spec || "",
+      data.material || "",
+      data.schedule || "",
+      data.rating || "",
+      (data as any).mark || "",
+      (data as any).grade || "",
+      (data as any).weight ?? null,
+      (data as any).depth ?? null,
+      (data as any).weldType || "",
+      (data as any).weldSize || "",
+      data.notes || "Manually added",
+      data.confidence || "high",
+      data.revisionClouded ? 1 : 0,
+      "Manually added by estimator",
+      95,
+      data.sourcePage ?? null,
+      0,
+      null,
+      1,
+      1,
+      1,
+    );
+    return id;
+  }
+
+  deleteTakeoffItem(itemId: string): boolean {
+    const result = db.prepare(`DELETE FROM takeoff_items WHERE id = ?`).run(itemId);
+    return result.changes > 0;
+  }
+
   // ---- Correction Patterns (Historical Learning) ----
 
   recordCorrection(originalValue: string, correctedValue: string, field: string, context?: string): void {
@@ -1105,7 +1166,7 @@ class Storage {
       { id: randomUUID(), label: "Supervision", mode: "hours", hours: 0, flatCost: 0, note: "Project supervision hours (Justin uses 60 MH/week)" },
       { id: randomUUID(), label: "MISC Supports", mode: "cost", hours: 0, flatCost: 0, note: "Flat-cost example — enter vendor/subcontract dollars directly" },
     ];
-    stmts.insertEstimateProject.run(id, data.name, data.projectNumber || "", data.client || "", data.location || "", data.sourceTakeoffId || null, createdAt, 56, 79, 100, 75, 15, 2, "manual", "separate", JSON.stringify(markups), JSON.stringify(seedAdders));
+    stmts.insertEstimateProject.run(id, data.name, data.projectNumber || "", data.client || "", data.location || "", data.sourceTakeoffId || null, createdAt, 56, 79, 100, 75, 15, 2, "manual", "separate", JSON.stringify(markups), JSON.stringify(seedAdders), null);
     if (items.length > 0) {
       insertEstimateItemsTransaction(id, items);
     }
@@ -1146,8 +1207,13 @@ class Storage {
     let currentScopeAdders: any[] = [];
     try { if (row.scope_adders_json) currentScopeAdders = JSON.parse(row.scope_adders_json) || []; } catch {}
     const scopeAdders = (data as any).scopeAdders ?? currentScopeAdders;
+    // contingencyOverride: caller passes null to clear, undefined to leave,
+    // or a number to set. Stored as REAL; null distinguishes "unset" from 0.
+    const contingencyOverride = (data as any).contingencyOverride === undefined
+      ? (row.contingencyOverride ?? null)
+      : ((data as any).contingencyOverride === null ? null : Number((data as any).contingencyOverride));
 
-    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, fittingWeldMode, JSON.stringify(markups), JSON.stringify(scopeAdders), id);
+    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, fittingWeldMode, JSON.stringify(markups), JSON.stringify(scopeAdders), contingencyOverride, id);
 
     if (data.items) {
       replaceEstimateItemsTransaction(id, data.items);
