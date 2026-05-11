@@ -5434,22 +5434,47 @@ function inferWeldsFromFittings(items: any[]): any[] {
   }
   function detectItemSchedule(it: any): string | undefined {
     if (it.itemSchedule) return it.itemSchedule as string;
+    // First check the raw `schedule` column from the takeoff (often a bare
+    // number like '80' or '40'). This is set by PDF extraction even when
+    // the description doesn't mention the schedule.
+    const rawSch = (it.schedule || "").toString().trim().toUpperCase();
+    if (rawSch) {
+      if (/^(SCH\s*)?80S?$|^XH$|^XS$/.test(rawSch)) return "80";
+      if (/^(SCH\s*)?160S?$|^XXH$|^160\/XXH$/.test(rawSch)) return "160/XXH";
+      if (/^(SCH\s*)?40S?$/.test(rawSch)) return "40";
+      if (/^(SCH\s*)?10S?$/.test(rawSch)) return "10";
+      if (/^STD$|^STANDARD$/.test(rawSch)) return "STD";
+    }
+    // Fall back to scanning description + spec for embedded schedule markers.
     const blob = `${it.description || ""} ${it.schedule || ""} ${it.spec || ""}`.toUpperCase();
-    if (/\bSCH\s*80\b|\bXH\b|\bXS\b/.test(blob)) return "80";
+    if (/\bSCH\s*80S?\b|\bXH\b|\bXS\b/.test(blob)) return "80";
     if (/\bSCH\s*160\b|\bXXH\b/.test(blob)) return "160/XXH";
-    if (/\bSCH\s*40\b/.test(blob)) return "40";
+    if (/\bSCH\s*40S?\b/.test(blob)) return "40";
     if (/\bSCH\s*10S?\b/.test(blob)) return "10";
     if (/\bSTD\b/.test(blob)) return "STD";
     return undefined;
   }
   // Helper to merge detected metadata into the inferred weld so the downstream
   // calculator picks the right column (std / sch80 / ss) per the source's actual
-  // material and schedule.
+  // material and schedule. Also stamps a human-readable inheritance note on the
+  // weld so the user can see which factor will apply before they run calculate.
   function withInheritedMeta(source: any, weld: any): any {
     const mat = detectItemMaterial(source);
     const sch = detectItemSchedule(source);
     if (mat) weld.itemMaterial = mat;
     if (sch) weld.itemSchedule = sch;
+    // Build an inheritance tag for transparency. Default unknowns to STD / CS
+    // since that's what the calculator falls back to.
+    const matTag = mat || "CS";
+    const schTag = sch || "STD";
+    let factorCol: string;
+    if (matTag === "SS") factorCol = "SS";
+    else if (schTag === "80" || schTag === "XH") factorCol = "SCH80";
+    else factorCol = "STD";
+    // Append to existing notes (set by caller) so the user sees BOTH the
+    // weld-count rationale and the factor-column rationale.
+    const inheritNote = `Will use ${factorCol} weld factor (inherited ${matTag}/${schTag} from parent: ${(source.description || "").slice(0, 40)})`;
+    weld.notes = weld.notes ? `${weld.notes}. ${inheritNote}` : inheritNote;
     return weld;
   }
 
@@ -6333,7 +6358,9 @@ Picou Group Contractors`;
         detectedMat = (item as any).itemMaterial as "CS" | "SS";
       } else {
         const desc = (item.description || "").toUpperCase();
-        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403)\b/.test(desc)) {
+        // Match the comprehensive regex in inferWeldsFromFittings/detectItemMaterial
+        // so SS detection is consistent across inference and main calc paths.
+        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403|A240|F304|F316)\b/.test(desc)) {
           detectedMat = "SS";
         }
       }
@@ -6670,7 +6697,7 @@ Picou Group Contractors`;
         detectedMat = (item as any).itemMaterial as "CS" | "SS";
       } else {
         const desc = (item.description || "").toUpperCase();
-        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403)\b/.test(desc)) detectedMat = "SS";
+        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403|A240|F304|F316)\b/.test(desc)) detectedMat = "SS";
       }
       const itemMat = detectedMat;
       const itemSched = (item as any).itemSchedule || settings.schedule;
@@ -7172,7 +7199,7 @@ Picou Group Contractors`;
       if ((item as any).itemMaterial) detectedMat = (item as any).itemMaterial as "CS" | "SS";
       else {
         const desc = (item.description || "").toUpperCase();
-        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403)\b/.test(desc)) detectedMat = "SS";
+        if (/\b(SS|STAINLESS|TP304|TP316|304L?|316L?|A312|A182|A403|A240|F304|F316)\b/.test(desc)) detectedMat = "SS";
       }
       const itemMat = detectedMat;
       const itemSched = (item as any).itemSchedule || settings.schedule;
