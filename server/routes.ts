@@ -5121,7 +5121,7 @@ function calculateJustinLaborHours(
   schedule: string,
   justinData: any,
   fittingWeldMode: "bundled" | "separate" | "auto-welds" = "bundled"
-): { mh: number; calcBasis: string; sizeMatchExact: boolean } {
+): { mh: number; calcBasis: string; sizeMatchExact: boolean; connectionCount?: number; connectionType?: "weld" | "bolt-up" | "thread" | "socket-weld" | "pipe" | "none" } {
   const nps = parseSizeNPS(item.size);
   const factors = justinData.labor_factors;
   const catLower = (item.category || "").toLowerCase();
@@ -5157,7 +5157,7 @@ function calculateJustinLaborHours(
       else if (installType === "rack") { mh = match.val.rack_mh_per_lf || 0; col = "rack"; }
       else { mh = match.val.standard_mh_per_lf || 0; col = "standard"; }
       const warn = jSizeWarn(match);
-      return { mh, calcBasis: `Justin: Pipe ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/LF${warn}`, sizeMatchExact: match.exact };
+      return { mh, calcBasis: `Justin: Pipe ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/LF${warn}`, sizeMatchExact: match.exact, connectionCount: 0, connectionType: "pipe" };
     }
   }
 
@@ -5183,7 +5183,10 @@ function calculateJustinLaborHours(
       else if (schedNorm === "80" || schedNorm === "XH") { mh = match.val.sch80_mh_per_weld || 0; col = "SCH80"; }
       else { mh = match.val.std_mh_per_weld || 0; col = "STD"; }
       const warn = jSizeWarn(match);
-      return { mh, calcBasis: `Justin: Weld ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/weld${warn}`, sizeMatchExact: match.exact };
+      // For explicit weld rows the connection count is the qty (the BOM tells us
+      // how many welds the row represents). Caller multiplies by qty so we just
+      // surface '1 weld' per unit here — the table renderer formats with qty.
+      return { mh, calcBasis: `Justin: Weld ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/weld${warn}`, sizeMatchExact: match.exact, connectionCount: 1, connectionType: "weld" };
     }
   }
 
@@ -5194,7 +5197,7 @@ function calculateJustinLaborHours(
     if (nps <= 1) { mh = threads['1"']?.mh_per_connection || 0.5; sz = '1"'; }
     else if (nps <= 2) { mh = threads['2"']?.mh_per_connection || 1.3; sz = '2"'; }
     else { mh = threads['4"']?.mh_per_connection || 2.0; sz = '4"'; }
-    return { mh, calcBasis: `Justin: Thread ${sz} → ${mh} MH/connection`, sizeMatchExact: true };
+    return { mh, calcBasis: `Justin: Thread ${sz} → ${mh} MH/connection`, sizeMatchExact: true, connectionCount: 1, connectionType: "thread" };
   }
 
   // --- BOLT-UP (FLANGE JOINTS) ---
@@ -5224,6 +5227,8 @@ function calculateJustinLaborHours(
       mh: 0,
       calcBasis: `Justin: Stud bolt/nut hardware → 0 MH (bolt-up labor is on the flange line)`,
       sizeMatchExact: true,
+      connectionCount: 0,
+      connectionType: "none",
     };
   }
   const isFlangeJoint = (
@@ -5241,9 +5246,9 @@ function calculateJustinLaborHours(
       const warn = jSizeWarn(match);
       // Calibration: shop bolt-ups have MH included in shop fab.
       if (item.installLocation === "shop") {
-        return { mh: 0, calcBasis: `Justin: Flange ${match.matchKey} (${rating}#) shop bolt-up (MH included in shop fab)${warn}`, sizeMatchExact: match.exact };
+        return { mh: 0, calcBasis: `Justin: Flange ${match.matchKey} (${rating}#) shop bolt-up (MH included in shop fab)${warn}`, sizeMatchExact: match.exact, connectionCount: 1, connectionType: "bolt-up" };
       }
-      return { mh, calcBasis: `Justin: Flange bolt-up ${match.matchKey} (${rating}#) → ${mh} MH/set${warn}`, sizeMatchExact: match.exact };
+      return { mh, calcBasis: `Justin: Flange bolt-up ${match.matchKey} (${rating}#) → ${mh} MH/set${warn}`, sizeMatchExact: match.exact, connectionCount: 1, connectionType: "bolt-up" };
     }
   }
 
@@ -5254,7 +5259,10 @@ function calculateJustinLaborHours(
       const rating = normalizeRating(item.rating || "150");
       const mh = Number(rating) >= 300 ? (match.val["300_mh_per_valve"] || 0) : (match.val["150_mh_per_valve"] || 0);
       const warn = jSizeWarn(match);
-      return { mh, calcBasis: `Justin: Valve ${match.matchKey} (${rating}#) → ${mh} MH/valve${warn}`, sizeMatchExact: match.exact };
+      // A valve typically has 2 bolt-ups (one on each end) but Justin's table
+      // already encodes the full valve-installation labor per unit, so we mark
+      // the connection count as 2 bolt-ups for transparency without altering MH.
+      return { mh, calcBasis: `Justin: Valve ${match.matchKey} (${rating}#) → ${mh} MH/valve${warn}`, sizeMatchExact: match.exact, connectionCount: 2, connectionType: "bolt-up" };
     }
   }
 
@@ -5333,13 +5341,19 @@ function calculateJustinLaborHours(
         const mh = weldMh + handlingMh;
         const warn = jSizeWarn(weldMatch);
         const breakdown = `${weldsCount} weld(s) × ${baseMH.toFixed(2)} + ${handlingFactor} handling × ${baseMH.toFixed(2)}`;
-        return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${breakdown} = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`, sizeMatchExact: weldMatch.exact };
+        const connType = isThreaded ? "thread" : "weld";
+        return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${breakdown} = ${mh.toFixed(4)} MH (auto-welds mode)${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: weldsCount, connectionType: connType };
       }
       const effectiveMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
       const mh = baseMH * effectiveMult;
       const warn = jSizeWarn(weldMatch);
       const modeNote = fittingWeldMode === "separate" ? "separate-welds: handling only" : `bundled ×${bundledMult} weld-ends`;
-      return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → weld base=${baseMH.toFixed(2)} × ${effectiveMult} (${modeNote}) = ${mh.toFixed(4)} MH${warn}`, sizeMatchExact: weldMatch.exact };
+      // For bundled/separate, the connection count is informational — what the
+      // fitting WOULD have if welded. We pull from welds_per_fitting if present
+      // so the user sees '2 welds (bundled)' on an elbow even outside auto-welds.
+      const wpf = (justinData.welds_per_fitting || {}) as Record<string, number>;
+      const wpfCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
+      return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → weld base=${baseMH.toFixed(2)} × ${effectiveMult} (${modeNote}) = ${mh.toFixed(4)} MH${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: wpfCount, connectionType: "weld" };
     }
   }
 
@@ -6463,6 +6477,9 @@ Picou Group Contractors`;
       let calcBasis = "";
       let sizeMatchExact = true;
       let materialCostSource = (item as any).materialCostSource || "";
+      // Connection metadata captured from whichever calculator branch runs.
+      let connectionCount: number | undefined;
+      let connectionType: string | undefined;
 
       if (method === "bill") {
         const result = calculateBillLaborHours(item, itemMat, itemSched, estimatorData.bill, itemPipeLoc, itemElev, itemAlloy, fittingWeldMode);
@@ -6470,6 +6487,8 @@ Picou Group Contractors`;
         materialUnitCostAdjust = result.materialUnitCostAdjust;
         calcBasis = result.calcBasis;
         sizeMatchExact = result.sizeMatchExact;
+        connectionCount = (result as any).connectionCount;
+        connectionType = (result as any).connectionType;
         if (result.materialCostSource) materialCostSource = result.materialCostSource;
         // Bill's EI method doesn't have rack-specific rates, so apply rackFactor for rack work
         if (lineWorkType === "rack" && rackFactor > 1) {
@@ -6484,6 +6503,8 @@ Picou Group Contractors`;
         const iResult = calculateIndustryLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.industry, fittingWeldMode);
         const baseMH = iResult.mh;
         sizeMatchExact = iResult.sizeMatchExact;
+        connectionCount = (iResult as any).connectionCount;
+        connectionType = (iResult as any).connectionType;
         const dataDefault = estimatorData.industry?.cost_params?.contingency_factor ?? 0.10;
         const override = (project as any).contingencyOverride;
         const contingencyFactor = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
@@ -6495,6 +6516,8 @@ Picou Group Contractors`;
         const jResult = calculateJustinLaborHours(item, lineWorkType as "standard" | "rack", itemMat, itemSched, estimatorData.justin, fittingWeldMode);
         const baseMH = jResult.mh;
         sizeMatchExact = jResult.sizeMatchExact;
+        connectionCount = (jResult as any).connectionCount;
+        connectionType = (jResult as any).connectionType;
         // Contingency: project's contingencyOverride takes priority over Justin's
         // data-file default (15%). User-entered as a percent.
         const dataDefault = estimatorData.justin?.cost_params?.contingency_factor || 0.15;
@@ -6515,6 +6538,8 @@ Picou Group Contractors`;
         laborUnitCost,
         calculationBasis: calcBasis,
         sizeMatchExact,
+        connectionCount,
+        connectionType,
       };
       // If Bill's method provided a material cost adjust and item has no material cost set, apply it
       if (method === "bill" && materialUnitCostAdjust > 0 && (item.materialUnitCost === 0 || item.materialUnitCost === undefined)) {

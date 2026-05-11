@@ -1359,6 +1359,10 @@ export default function EstimatingPage() {
                               { field: "materialUnitCost" as SortField, label: "Mat $/Unit", cls: "text-right w-20" },
                               { field: "laborUnitCost" as SortField, label: "Labor $/Unit", cls: "text-right w-20" },
                               { field: "laborHoursPerUnit" as SortField, label: "Hrs/Unit", cls: "text-right w-16" },
+                              // Connection count + type column. Surfaces the
+                              // physical connection driving the MH math, e.g.
+                              // '2 welds' for an elbow or '1 bolt-up' for a flange.
+                              { field: null as any, label: "Conn", cls: "text-left w-24" },
                               { field: "materialExtension" as SortField, label: "Mat Total", cls: "text-right w-24" },
                               { field: "laborExtension" as SortField, label: "Labor Total", cls: "text-right w-24" },
                               { field: "totalCost" as SortField, label: "Total", cls: "text-right w-24" },
@@ -1382,13 +1386,13 @@ export default function EstimatingPage() {
                         <tbody>
                           {p.items.length === 0 ? (
                             <tr>
-                              <td colSpan={14} className="text-center py-8 text-muted-foreground">
+                              <td colSpan={15} className="text-center py-8 text-muted-foreground">
                                 No items. Use quick entry above or import from takeoff.
                               </td>
                             </tr>
                           ) : displayItems.length === 0 ? (
                             <tr>
-                              <td colSpan={14} className="text-center py-6 text-muted-foreground">
+                              <td colSpan={15} className="text-center py-6 text-muted-foreground">
                                 No items match filter.
                               </td>
                             </tr>
@@ -1492,6 +1496,31 @@ export default function EstimatingPage() {
                                     )}
                                   </td>
                                 ))}
+                                {/* Connection count + type — e.g. '2 welds' / '1 bolt-up' / '3 welds × qty'.
+                                    For per-unit-count types (fittings, flanges, threads) we show the
+                                    per-unit count. For pure weld rows the line's qty IS the weld count,
+                                    so we show 'N welds' using qty. Pipe rows show 'pipe'. Items with no
+                                    physical connection (gaskets, supports, pipe, hardware) show '—'. */}
+                                <td className="px-2 py-1.5 text-[11px] text-muted-foreground" title={(item as any).calculationBasis || ""}>
+                                  {(() => {
+                                    const cnt = (item as any).connectionCount;
+                                    const typ = (item as any).connectionType as string | undefined;
+                                    if (typ === undefined || cnt === undefined) return <span className="text-muted-foreground/40">—</span>;
+                                    if (typ === "none" || cnt === 0) return <span className="text-muted-foreground/40">{typ === "pipe" ? "pipe" : "—"}</span>;
+                                    // For explicit weld rows, the line's qty IS the weld count.
+                                    const cat = (item.category || "").toLowerCase();
+                                    const isWeldRow = cat === "weld" || (item.description || "").toLowerCase().includes(" bw ") || (item.description || "").toLowerCase().startsWith("bw ");
+                                    if (isWeldRow && typ === "weld") {
+                                      return <span className="font-mono">{item.quantity} {item.quantity === 1 ? "weld" : "welds"}</span>;
+                                    }
+                                    const label = typ === "weld" ? (cnt === 1 ? "weld" : "welds")
+                                      : typ === "bolt-up" ? (cnt === 1 ? "bolt-up" : "bolt-ups")
+                                      : typ === "thread" ? (cnt === 1 ? "thread" : "threads")
+                                      : typ === "socket-weld" ? (cnt === 1 ? "SW" : "SWs")
+                                      : typ;
+                                    return <span className="font-mono">{cnt} {label}</span>;
+                                  })()}
+                                </td>
                                 <td className="px-2 py-1.5 text-right font-mono text-blue-600 dark:text-blue-400">{fmt$(item.materialExtension || 0)}</td>
                                 <td className="px-2 py-1.5 text-right font-mono text-orange-600 dark:text-orange-400">{fmt$(item.laborExtension || 0)}</td>
                                 <td className="px-2 py-1.5 text-right font-mono font-semibold">{fmt$(item.totalCost || 0)}</td>

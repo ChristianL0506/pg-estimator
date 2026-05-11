@@ -97,6 +97,19 @@ export const estimateItemSchema = z.object({
   // Material cost provenance: where the material cost came from
   materialCostSource: z.enum(["quoted", "database", "purchase_history", "allowance", "manual", ""]).optional(),
   weldAssumption: z.string().optional(),
+  // Connection count + type — surfaced inline on each estimate row so the user
+  // can see at a glance what's driving the MH calc without opening Diagnose.
+  // Examples:
+  //   { connectionCount: 2, connectionType: "weld" }       — elbow in auto-welds
+  //   { connectionCount: 3, connectionType: "weld" }       — tee in auto-welds
+  //   { connectionCount: 1, connectionType: "bolt-up" }    — flange
+  //   { connectionCount: 1, connectionType: "thread" }     — threaded coupling
+  //   { connectionCount: N, connectionType: "weld" }       — explicit weld row (N = qty)
+  //   { connectionCount: 0, connectionType: "pipe" }       — pipe (no joint)
+  //   undefined                                            — item has no connection
+  //                                                          (e.g. pipe support, gasket)
+  connectionCount: z.number().optional(),
+  connectionType: z.enum(["weld", "bolt-up", "thread", "socket-weld", "pipe", "none"]).optional(),
   // Per-line work type: "rack" work at elevation takes more labor
   workType: z.enum(["standard", "rack"]).optional(),
   // Whether item was within a revision cloud in the source takeoff
