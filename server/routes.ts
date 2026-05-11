@@ -112,8 +112,10 @@ const patchEstimateSchema = z.object({
   scopeAdders: z.array(z.object({
     id: z.string(),
     label: z.string(),
+    mode: z.enum(["hours", "cost"]).default("hours"),
     hours: z.number().default(0),
     ratePerHour: z.number().optional(),
+    flatCost: z.number().default(0),
     note: z.string().optional(),
   })).optional(),
 });
