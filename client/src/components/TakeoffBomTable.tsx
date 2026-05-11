@@ -6,7 +6,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { CheckCircle2, Pencil } from "lucide-react";
+import { CheckCircle2, Pencil, Settings2 } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import SheetDetailPanel from "./SheetDetailPanel";
@@ -141,6 +142,19 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
       onItemUpdated();
     } catch {
       toast({ title: "Save failed", variant: "destructive" });
+    }
+  };
+
+  // Toggle a per-line scope/inclusion flag on a takeoff item. Updates the
+  // server immediately so the next downstream action (BOM/RFQ/Estimate) sees
+  // the latest state. Also handles revisionClouded toggling.
+  const toggleFlag = async (itemId: string, flag: string, value: boolean) => {
+    if (!onItemUpdated) return;
+    try {
+      await apiRequest("PATCH", `/api/takeoff-items/${itemId}`, { [flag]: value });
+      onItemUpdated();
+    } catch {
+      toast({ title: "Update failed", variant: "destructive" });
     }
   };
 
@@ -443,6 +457,12 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
               const sourcePageNum = (item as any).sourcePage as number | undefined;
               const isVerified = (item as any).confidence === "high";
               const isManuallyVerified = !!(item as any).manuallyVerified;
+              // A row is excluded from some downstream view when any scope flag
+              // is false. Default behavior (flag absent / true) keeps full opacity.
+              const inBom = (item as any).includeInBom !== false;
+              const inTakeoff = (item as any).includeInTakeoff !== false;
+              const inEstimate = (item as any).includeInEstimate !== false;
+              const anyExcluded = !inBom || !inTakeoff || !inEstimate;
 
               const qtyDisplay = item.unit === "LF" || item.unit === "CY" || item.unit === "SF" || item.unit === "SY"
                 ? item.quantity.toFixed(2)
@@ -451,7 +471,7 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
               return (
                 <TableRow
                   key={item.id}
-                  className={`group hover:bg-muted/30 text-xs ${isClouded ? "bg-amber-50/50 dark:bg-amber-950/20" : ""} ${isDedupCandidate ? "opacity-50" : ""}`}
+                  className={`group hover:bg-muted/30 text-xs ${isClouded ? "bg-amber-50/50 dark:bg-amber-950/20" : ""} ${isDedupCandidate || anyExcluded ? "opacity-50" : ""}`}
                   data-testid={`row-item-${item.id}`}
                 >
                   <TableCell className="text-muted-foreground">{item.lineNumber}</TableCell>
@@ -549,26 +569,75 @@ export default function TakeoffBomTable({ items, discipline, onItemUpdated }: Ta
                   </TableCell>
                   {editable && (
                     <TableCell className="px-1">
-                      {!isVerified ? (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1">
+                        {!isVerified ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                className="text-muted-foreground/40 group-hover:text-muted-foreground hover:!text-green-600 transition-colors p-0.5"
+                                onClick={() => verifyItem(item.id)}
+                              >
+                                <CheckCircle2 size={14} />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="left" className="text-[10px]">Mark as verified</TooltipContent>
+                          </Tooltip>
+                        ) : isManuallyVerified ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <CheckCircle2 size={14} className="text-green-500" />
+                            </TooltipTrigger>
+                            <TooltipContent side="left" className="text-[10px]">Manually verified</TooltipContent>
+                          </Tooltip>
+                        ) : null}
+                        <Popover>
+                          <PopoverTrigger asChild>
                             <button
-                              className="text-muted-foreground/40 group-hover:text-muted-foreground hover:!text-green-600 transition-colors p-0.5"
-                              onClick={() => verifyItem(item.id)}
+                              className={`text-muted-foreground/40 group-hover:text-muted-foreground hover:!text-primary transition-colors p-0.5 ${anyExcluded ? "!text-amber-600" : ""}`}
+                              title="Scope flags & revision"
+                              data-testid={`btn-scope-${item.id}`}
                             >
-                              <CheckCircle2 size={14} />
+                              <Settings2 size={14} />
                             </button>
-                          </TooltipTrigger>
-                          <TooltipContent side="left" className="text-[10px]">Mark as verified</TooltipContent>
-                        </Tooltip>
-                      ) : isManuallyVerified ? (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <CheckCircle2 size={14} className="text-green-500" />
-                          </TooltipTrigger>
-                          <TooltipContent side="left" className="text-[10px]">Manually verified</TooltipContent>
-                        </Tooltip>
-                      ) : null}
+                          </PopoverTrigger>
+                          <PopoverContent className="w-56 p-3 space-y-2" side="left">
+                            <div>
+                              <p className="text-[10px] font-semibold text-muted-foreground uppercase mb-1">Include in</p>
+                              <div className="space-y-1">
+                                {([
+                                  { field: "includeInBom", label: "BOM / RFQ", checked: inBom },
+                                  { field: "includeInTakeoff", label: "Takeoff", checked: inTakeoff },
+                                  { field: "includeInEstimate", label: "Estimate", checked: inEstimate },
+                                ] as const).map(({ field, label, checked }) => (
+                                  <label key={field} className="flex items-center gap-2 text-[11px] cursor-pointer hover:bg-muted/40 rounded px-1 py-0.5">
+                                    <input
+                                      type="checkbox"
+                                      className="h-3 w-3"
+                                      checked={checked}
+                                      onChange={e => toggleFlag(item.id, field, e.target.checked)}
+                                      data-testid={`scope-${field}-${item.id}`}
+                                    />
+                                    <span className="flex-1">{label}</span>
+                                    {!checked && <span className="text-[9px] text-amber-600 dark:text-amber-400">excluded</span>}
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="border-t pt-2">
+                              <label className="flex items-center gap-2 text-[11px] cursor-pointer hover:bg-muted/40 rounded px-1 py-0.5">
+                                <input
+                                  type="checkbox"
+                                  className="h-3 w-3"
+                                  checked={!!isClouded}
+                                  onChange={e => toggleFlag(item.id, "revisionClouded", e.target.checked)}
+                                />
+                                <span className="flex-1">Inside revision cloud</span>
+                              </label>
+                              <p className="text-[9px] text-muted-foreground mt-1 leading-tight">Mark clouded items so they can be priced separately as a revision estimate.</p>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
                     </TableCell>
                   )}
                 </TableRow>

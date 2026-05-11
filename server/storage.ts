@@ -410,6 +410,17 @@ try {
   // Column already exists — ignore
 }
 
+// Per-line scope flags on takeoff and estimate items. Default to 1 (included)
+// so legacy rows behave as before. The estimator can flip these off per row
+// to exclude an item from a downstream deliverable without deleting it.
+for (const tbl of ["takeoff_items", "estimate_items"]) {
+  for (const col of ["includeInBom", "includeInTakeoff", "includeInEstimate"]) {
+    try {
+      db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col} INTEGER DEFAULT 1`);
+    } catch (e: any) { /* Column already exists */ }
+  }
+}
+
 // Create corrections table for tracking human edits
 db.exec(`
   CREATE TABLE IF NOT EXISTS corrections (
@@ -651,6 +662,10 @@ function rowToTakeoffItem(row: any): TakeoffItem {
     _dedupCandidate: row._dedupCandidate === 1 || row._dedupCandidate === true || undefined,
     dedupNote: row.dedupNote || undefined,
     manuallyVerified: row.manuallyVerified === 1 || row.manuallyVerified === true || undefined,
+    // Scope flags default to true (NULL on legacy rows reads as true).
+    includeInBom: row.includeInBom !== 0,
+    includeInTakeoff: row.includeInTakeoff !== 0,
+    includeInEstimate: row.includeInEstimate !== 0,
   };
 }
 
@@ -682,6 +697,9 @@ function rowToEstimateItem(row: any): EstimateItem {
     weldAssumption: row.weldAssumption || undefined,
     workType: row.workType || undefined,
     revisionClouded: row.revisionClouded === 1 || row.revisionClouded === true,
+    includeInBom: row.includeInBom !== 0,
+    includeInTakeoff: row.includeInTakeoff !== 0,
+    includeInEstimate: row.includeInEstimate !== 0,
   };
 }
 
@@ -718,7 +736,7 @@ function serializeEstimateProject(row: any, items: EstimateItem[]): EstimateProj
 
 const stmts = {
   insertTakeoffProject: db.prepare(`INSERT INTO takeoff_projects (id, name, fileName, discipline, lineNumber, area, revision, drawingDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  insertTakeoffItem: db.prepare(`INSERT INTO takeoff_items (id, projectId, lineNumber, discipline, category, description, size, quantity, unit, spec, material, schedule, rating, mark, grade, weight, depth, weldType, weldSize, notes, confidence, revisionClouded, confidenceNotes, confidenceScore, sourcePage, _dedupCandidate, dedupNote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertTakeoffItem: db.prepare(`INSERT INTO takeoff_items (id, projectId, lineNumber, discipline, category, description, size, quantity, unit, spec, material, schedule, rating, mark, grade, weight, depth, weldType, weldSize, notes, confidence, revisionClouded, confidenceNotes, confidenceScore, sourcePage, _dedupCandidate, dedupNote, includeInBom, includeInTakeoff, includeInEstimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getTakeoffProjects: db.prepare(`SELECT * FROM takeoff_projects ORDER BY createdAt DESC`),
   getTakeoffProjectsByDiscipline: db.prepare(`SELECT * FROM takeoff_projects WHERE discipline = ? ORDER BY createdAt DESC`),
   getTakeoffProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM takeoff_items GROUP BY projectId`),
@@ -730,7 +748,7 @@ const stmts = {
   deleteTakeoffItems: db.prepare(`DELETE FROM takeoff_items WHERE projectId = ?`),
 
   insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, fittingWeldMode, markups_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  insertEstimateItem: db.prepare(`INSERT INTO estimate_items (id, projectId, lineNumber, category, description, size, quantity, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit, materialExtension, laborExtension, totalCost, notes, fromDatabase, itemMaterial, itemSchedule, itemElevation, itemPipeLocation, itemAlloyGroup, calculationBasis, sizeMatchExact, materialCostSource, workType, revisionClouded, weldAssumption) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertEstimateItem: db.prepare(`INSERT INTO estimate_items (id, projectId, lineNumber, category, description, size, quantity, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit, materialExtension, laborExtension, totalCost, notes, fromDatabase, itemMaterial, itemSchedule, itemElevation, itemPipeLocation, itemAlloyGroup, calculationBasis, sizeMatchExact, materialCostSource, workType, revisionClouded, weldAssumption, includeInBom, includeInTakeoff, includeInEstimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getEstimateProjects: db.prepare(`SELECT * FROM estimate_projects ORDER BY createdAt DESC`),
   getEstimateProject: db.prepare(`SELECT * FROM estimate_projects WHERE id = ?`),
   getEstimateProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM estimate_items GROUP BY projectId`),
@@ -836,7 +854,10 @@ const insertTakeoffItemsTransaction = db.transaction((projectId: string, items: 
       (item as any).confidenceScore != null ? (item as any).confidenceScore : null,
       (item as any).sourcePage != null ? (item as any).sourcePage : null,
       (item as any)._dedupCandidate ? 1 : 0,
-      (item as any).dedupNote || null
+      (item as any).dedupNote || null,
+      (item as any).includeInBom === false ? 0 : 1,
+      (item as any).includeInTakeoff === false ? 0 : 1,
+      (item as any).includeInEstimate === false ? 0 : 1
     );
   }
 });
@@ -855,7 +876,10 @@ const insertEstimateItemsTransaction = db.transaction((projectId: string, items:
       item.materialCostSource || "",
       item.workType || null,
       item.revisionClouded ? 1 : 0,
-      (item as any).weldAssumption || null
+      (item as any).weldAssumption || null,
+      (item as any).includeInBom === false ? 0 : 1,
+      (item as any).includeInTakeoff === false ? 0 : 1,
+      (item as any).includeInEstimate === false ? 0 : 1
     );
   }
 });
@@ -943,7 +967,7 @@ class Storage {
   }
 
   updateTakeoffItem(itemId: string, updates: Record<string, any>): boolean {
-    const allowedFields = ["size", "quantity", "description", "category", "unit", "material", "schedule", "spec", "rating", "notes", "confidence", "confidenceScore", "confidenceNotes", "manuallyVerified"];
+    const allowedFields = ["size", "quantity", "description", "category", "unit", "material", "schedule", "spec", "rating", "notes", "confidence", "confidenceScore", "confidenceNotes", "manuallyVerified", "includeInBom", "includeInTakeoff", "includeInEstimate", "revisionClouded"];
     const fields: string[] = [];
     const values: any[] = [];
     for (const field of allowedFields) {

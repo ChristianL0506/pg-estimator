@@ -5907,6 +5907,80 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.status(201).json(estimateProject);
   });
 
+  // Create an estimate from a takeoff that only includes items inside a
+  // revision cloud. Useful for quoting the delta when a drawing comes back
+  // with rev N changes — the resulting estimate is its own project that can
+  // be priced, exported, and audit-trailed independently.
+  app.post("/api/takeoff/import-revision-to-estimate", async (req, res) => {
+    const { takeoffProjectId, revisionLabel } = req.body || {};
+    if (!takeoffProjectId || typeof takeoffProjectId !== "string") {
+      return res.status(400).json({ error: "takeoffProjectId is required and must be a string" });
+    }
+    const takeoffProject = await storage.getTakeoffProject(takeoffProjectId);
+    if (!takeoffProject) return res.status(404).json({ error: "Takeoff project not found" });
+
+    const cloudedItems = (takeoffProject.items || []).filter((it: any) => !!it.revisionClouded);
+    if (cloudedItems.length === 0) {
+      return res.status(400).json({ error: "No revision-clouded items found on this takeoff. Mark items as clouded in the takeoff first." });
+    }
+
+    const estimateItems = cloudedItems.map((item, idx) => {
+      const category = mapTakeoffToEstimateCategory(takeoffProject.discipline, item.category) as any;
+      const estimateItem: any = {
+        id: randomUUID(),
+        lineNumber: idx + 1,
+        category,
+        description: item.description,
+        size: item.size,
+        quantity: item.quantity,
+        unit: item.unit,
+        materialUnitCost: 0,
+        laborUnitCost: 0,
+        laborHoursPerUnit: 0,
+        materialExtension: 0,
+        laborExtension: 0,
+        totalCost: 0,
+        notes: item.notes || "",
+        fromDatabase: false,
+        revisionClouded: true,
+      };
+      const matches = storage.matchCostEntries([{ description: item.description, size: item.size }]);
+      const key = `${item.description.toLowerCase().trim()}|${item.size.toLowerCase().trim()}`;
+      const match = matches[key];
+      if (match) {
+        Object.assign(estimateItem, {
+          materialUnitCost: match.materialUnitCost,
+          laborUnitCost: match.laborUnitCost,
+          laborHoursPerUnit: match.laborHoursPerUnit,
+          fromDatabase: true,
+          materialCostSource: "database",
+        });
+      }
+      if (!match || match.materialUnitCost === 0) {
+        const purchaseMatch = storage.getLatestCostForItem(item.description, item.size);
+        if (purchaseMatch && purchaseMatch.unitCost > 0) {
+          estimateItem.materialUnitCost = purchaseMatch.unitCost;
+          estimateItem.materialCostSource = "purchase_history";
+          estimateItem.fromDatabase = true;
+        }
+      }
+      if (!estimateItem.materialCostSource) estimateItem.materialCostSource = "";
+      return computeEstimateItem(estimateItem);
+    });
+
+    // Don't auto-infer welds for revision estimates — the user should opt in
+    // explicitly. Revisions are deltas; bundled fittings already carry their
+    // welds and explicit weld rows might inflate the change order.
+
+    const revLabel = (revisionLabel && typeof revisionLabel === "string") ? revisionLabel.trim() : (takeoffProject.revision || "Revision");
+    const estimateProject = storage.createEstimateProject({
+      name: `${takeoffProject.name} — ${revLabel} (clouded only)`,
+      sourceTakeoffId: takeoffProjectId,
+      items: estimateItems,
+    });
+    res.status(201).json({ ...estimateProject, revisionItemCount: estimateItems.length });
+  });
+
   // ===== ESTIMATE PROJECTS =====
 
   app.get("/api/estimates", (_req, res) => {
@@ -5988,9 +6062,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!project) return res.status(404).json({ message: "Estimate not found" });
 
     const selectedItemIds: string[] | undefined = req.body.selectedItemIds;
+    // RFQ honors the per-row 'includeInBom' flag (default true). When the user
+    // explicitly selects items, that selection takes precedence over the flag.
     const items = selectedItemIds
       ? (project.items || []).filter(i => selectedItemIds.includes(i.id))
-      : project.items;
+      : (project.items || []).filter(i => (i as any).includeInBom !== false);
 
     // Build materials table with spec details
     const materialsTable = items.map(i => ({
@@ -6193,6 +6269,13 @@ Picou Group Contractors`;
     const effectiveRate = blendedRate + perDiemPerHour;
 
     const updatedItems = (project.items || []).map(item => {
+      // Excluded rows are pass-through — keep whatever labor/cost they had,
+      // since they don't contribute to totals anyway and re-running the
+      // calculator on them would overwrite values the user might want to
+      // preserve for if they re-include the row later.
+      if ((item as any).includeInEstimate === false) {
+        return item;
+      }
       // Use per-item overrides if present, otherwise fall back to global settings
       // Auto-detect SS from description if itemMaterial not set (Calibration Item 2)
       let detectedMat: "CS" | "SS" = material;
@@ -6520,6 +6603,9 @@ Picou Group Contractors`;
     for (const r of runs) summaryAccum[r.key] = { totalMH: 0, totalLaborCost: 0, totalMaterialCost: 0 };
 
     for (const item of (project.items || [])) {
+      // Skip rows the user has excluded from this estimate. They stay on the
+      // BOM for ordering/takeoff purposes but don't contribute to labor/cost.
+      if ((item as any).includeInEstimate === false) continue;
       // Detect material from item or fall back to global
       let detectedMat: "CS" | "SS" = settings.material;
       if ((item as any).itemMaterial) {
@@ -6617,7 +6703,10 @@ Picou Group Contractors`;
     const project = storage.getEstimateProject(req.params.id);
     if (!project) return res.status(404).json({ message: "Estimate not found" });
     try {
-      const wb = await generateBillsWorkbook(project);
+      // Strip rows the user has excluded from the estimate so the workbook
+      // matches the labor/cost totals shown in the UI.
+      const filtered = { ...project, items: (project.items || []).filter((i: any) => i.includeInEstimate !== false) };
+      const wb = await generateBillsWorkbook(filtered);
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="${project.name.replace(/[^a-zA-Z0-9 _-]/g, "")} - Bills Format.xlsx"`);
       await wb.xlsx.write(res);
@@ -6632,7 +6721,8 @@ Picou Group Contractors`;
     const project = storage.getEstimateProject(req.params.id);
     if (!project) return res.status(404).json({ message: "Estimate not found" });
     try {
-      const wb = await generateJustinsWorkbook(project);
+      const filtered = { ...project, items: (project.items || []).filter((i: any) => i.includeInEstimate !== false) };
+      const wb = await generateJustinsWorkbook(filtered);
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="${project.name.replace(/[^a-zA-Z0-9 _-]/g, "")} - Justins Format.xlsx"`);
       await wb.xlsx.write(res);
@@ -6652,7 +6742,8 @@ Picou Group Contractors`;
     const project = storage.getEstimateProject(req.params.id);
     if (!project) return res.status(404).json({ message: "Estimate not found" });
     try {
-      const wb = await generateJustinsWorkbook(project);
+      const filtered = { ...project, items: (project.items || []).filter((i: any) => i.includeInEstimate !== false) };
+      const wb = await generateJustinsWorkbook(filtered);
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="${project.name.replace(/[^a-zA-Z0-9 _-]/g, "")} - Industry Standard.xlsx"`);
       await wb.xlsx.write(res);
@@ -6775,6 +6866,8 @@ Picou Group Contractors`;
       if (mhPerUnit === 0) warnings.push("no-matching-factor");
       if (!sizeMatchExact) warnings.push("nearest-size-used");
       if (calcBasis.includes("\u26A0")) warnings.push("flagged");
+      const excluded = (item as any).includeInEstimate === false;
+      if (excluded) warnings.push("excluded-from-estimate");
 
       rows.push({
         itemId: item.id,
@@ -6785,8 +6878,8 @@ Picou Group Contractors`;
         quantity: item.quantity,
         unit: item.unit,
         mhPerUnit,
-        totalMH: mhPerUnit * (item.quantity || 0),
-        calcBasis,
+        totalMH: excluded ? 0 : mhPerUnit * (item.quantity || 0),
+        calcBasis: excluded ? `${calcBasis} \u2014 EXCLUDED FROM ESTIMATE` : calcBasis,
         sizeMatchExact,
         warnings,
       });
@@ -7006,6 +7099,7 @@ Picou Group Contractors`;
     for (const r of runs) summaryAccum[r.key] = { totalMH: 0, totalLaborCost: 0, totalMaterialCost: 0 };
 
     for (const item of (project.items || [])) {
+      if ((item as any).includeInEstimate === false) continue;
       let detectedMat: "CS" | "SS" = settings.material;
       if ((item as any).itemMaterial) detectedMat = (item as any).itemMaterial as "CS" | "SS";
       else {
@@ -8065,6 +8159,11 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       if (body[field] !== undefined) {
         updates[field] = field === "quantity" ? (parseFloat(body[field]) || 0) : String(body[field]);
       }
+    }
+
+    // Boolean scope flags + revisionClouded — update if the body includes them.
+    for (const flag of ["includeInBom", "includeInTakeoff", "includeInEstimate", "revisionClouded"]) {
+      if (body[flag] !== undefined) updates[flag] = body[flag] ? 1 : 0;
     }
 
     if (body.verified === true) {

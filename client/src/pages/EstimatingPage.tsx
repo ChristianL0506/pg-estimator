@@ -483,11 +483,15 @@ export default function EstimatingPage() {
   };
 
   // Per-line override update
-  const handleUpdateItemOverride = (itemId: string, field: string, value: string | undefined) => {
+  const handleUpdateItemOverride = (itemId: string, field: string, value: string | boolean | undefined) => {
     if (!selectedProject) return;
-    const items = selectedProject.items.map(i =>
-      i.id === itemId ? { ...i, [field]: value || undefined } : i
-    );
+    const items = selectedProject.items.map(i => {
+      if (i.id !== itemId) return i;
+      // For boolean fields, preserve the literal value (including false).
+      // For string fields, fall back to undefined when blank.
+      const normalized = typeof value === "boolean" ? value : (value || undefined);
+      return { ...i, [field]: normalized };
+    });
     debouncedUpdateItems(selectedProject.id, items);
   };
 
@@ -519,9 +523,12 @@ export default function EstimatingPage() {
     });
     return items;
   }, [p?.items, sortField, sortDir, itemFilter]);
-  const totalMaterial = p?.items.reduce((s, i) => s + (i.materialExtension || 0), 0) || 0;
-  const totalLabor = p?.items.reduce((s, i) => s + (i.laborExtension || 0), 0) || 0;
-  const totalHours = p?.items.reduce((s, i) => s + i.quantity * (i.laborHoursPerUnit || 0), 0) || 0;
+  // Totals only include rows flagged includeInEstimate. Rows excluded from the
+  // estimate stay visible (greyed out) so the user can verify they intended to
+  // exclude them, but they don't contribute to cost or markup math.
+  const totalMaterial = p?.items.reduce((s, i) => s + ((i as any).includeInEstimate === false ? 0 : (i.materialExtension || 0)), 0) || 0;
+  const totalLabor = p?.items.reduce((s, i) => s + ((i as any).includeInEstimate === false ? 0 : (i.laborExtension || 0)), 0) || 0;
+  const totalHours = p?.items.reduce((s, i) => s + ((i as any).includeInEstimate === false ? 0 : i.quantity * (i.laborHoursPerUnit || 0)), 0) || 0;
   const subtotal = totalMaterial + totalLabor;
   const overheadAmt = p ? subtotal * (p.markups.overhead / 100) : 0;
   const profitAmt = p ? (subtotal + overheadAmt) * (p.markups.profit / 100) : 0;
@@ -1353,6 +1360,14 @@ export default function EstimatingPage() {
                             <TooltipProvider delayDuration={300}>
                             {displayItems.map(item => {
                               const conf = getRowConfidence(item);
+                              // A row is "excluded somewhere" if any of the three scope flags
+                              // is false. We gray the whole row so the user can spot it at a
+                              // glance, but still show it (and let them re-include via the
+                              // settings popover).
+                              const anyExcluded =
+                                (item as any).includeInBom === false ||
+                                (item as any).includeInTakeoff === false ||
+                                (item as any).includeInEstimate === false;
                               const dotColor = conf.state === "green"
                                 ? "bg-emerald-500"
                                 : conf.state === "yellow"
@@ -1361,7 +1376,7 @@ export default function EstimatingPage() {
                                     ? "bg-rose-500"
                                     : "bg-muted-foreground/40 ring-1 ring-muted-foreground/20";
                               return (
-                              <tr key={item.id} className="border-b border-border hover:bg-muted/20" data-testid={`est-row-${item.id}`}>
+                              <tr key={item.id} className={`border-b border-border hover:bg-muted/20 ${anyExcluded ? "opacity-50 bg-muted/30" : ""}`} data-testid={`est-row-${item.id}`}>
                                 <td className="px-2 py-1.5 text-muted-foreground">{item.lineNumber}</td>
                                 <td className="px-2 py-1.5 text-center">
                                   <Tooltip>
@@ -1474,28 +1489,55 @@ export default function EstimatingPage() {
                                         <Settings2 size={11} />
                                       </button>
                                     </PopoverTrigger>
-                                    <PopoverContent className="w-56 p-3 space-y-2" side="left">
-                                      <p className="text-[10px] font-semibold text-muted-foreground uppercase">Line Overrides</p>
-                                      {[
-                                        { field: "workType", label: "Work Type", options: ["standard", "rack"] },
-                                        { field: "itemMaterial", label: "Material", options: ["CS", "SS"] },
-                                        { field: "itemSchedule", label: "Schedule", options: ["STD", "XH", "10", "20", "40", "80", "160/XXH"] },
-                                        { field: "itemElevation", label: "Elevation", options: ["0-20ft", "20-40ft", "40-80ft", "80ft+"] },
-                                        { field: "itemPipeLocation", label: "Pipe Location", options: ["Sleeper Rack", "Underground", "Open Rack", "Elevated Rack"] },
-                                        { field: "itemAlloyGroup", label: "Alloy Group", options: ["1", "2", "3", "4", "5", "6", "7", "8", "9"] },
-                                      ].map(({ field, label, options }) => (
-                                        <div key={field} className="flex items-center gap-2">
-                                          <label className="text-[10px] text-muted-foreground w-20 shrink-0">{label}</label>
-                                          <select
-                                            className="flex-1 text-[10px] bg-background border border-input rounded px-1.5 py-0.5"
-                                            value={(item as any)[field] || ""}
-                                            onChange={e => handleUpdateItemOverride(item.id, field, e.target.value || undefined)}
-                                          >
-                                            <option value="">(global)</option>
-                                            {options.map(o => <option key={o} value={o}>{o}</option>)}
-                                          </select>
+                                    <PopoverContent className="w-64 p-3 space-y-3" side="left">
+                                      <div>
+                                        <p className="text-[10px] font-semibold text-muted-foreground uppercase mb-1">Include in</p>
+                                        <div className="space-y-1">
+                                          {([
+                                            { field: "includeInBom", label: "BOM / RFQ", hint: "Material orders and vendor RFQs" },
+                                            { field: "includeInTakeoff", label: "Takeoff", hint: "Takeoff page tables and PDFs" },
+                                            { field: "includeInEstimate", label: "Estimate", hint: "Labor & cost totals" },
+                                          ] as const).map(({ field, label, hint }) => {
+                                            const checked = (item as any)[field] !== false;
+                                            return (
+                                              <label key={field} className="flex items-center gap-2 text-[10px] cursor-pointer hover:bg-muted/40 rounded px-1 py-0.5" title={hint}>
+                                                <input
+                                                  type="checkbox"
+                                                  className="h-3 w-3"
+                                                  checked={checked}
+                                                  onChange={e => handleUpdateItemOverride(item.id, field, e.target.checked)}
+                                                  data-testid={`scope-${field}-${item.id}`}
+                                                />
+                                                <span className="flex-1">{label}</span>
+                                                {!checked && <span className="text-[9px] text-amber-600 dark:text-amber-400">excluded</span>}
+                                              </label>
+                                            );
+                                          })}
                                         </div>
-                                      ))}
+                                      </div>
+                                      <div className="border-t pt-2">
+                                        <p className="text-[10px] font-semibold text-muted-foreground uppercase mb-1">Line Overrides</p>
+                                        {[
+                                          { field: "workType", label: "Work Type", options: ["standard", "rack"] },
+                                          { field: "itemMaterial", label: "Material", options: ["CS", "SS"] },
+                                          { field: "itemSchedule", label: "Schedule", options: ["STD", "XH", "10", "20", "40", "80", "160/XXH"] },
+                                          { field: "itemElevation", label: "Elevation", options: ["0-20ft", "20-40ft", "40-80ft", "80ft+"] },
+                                          { field: "itemPipeLocation", label: "Pipe Location", options: ["Sleeper Rack", "Underground", "Open Rack", "Elevated Rack"] },
+                                          { field: "itemAlloyGroup", label: "Alloy Group", options: ["1", "2", "3", "4", "5", "6", "7", "8", "9"] },
+                                        ].map(({ field, label, options }) => (
+                                          <div key={field} className="flex items-center gap-2 mb-1">
+                                            <label className="text-[10px] text-muted-foreground w-20 shrink-0">{label}</label>
+                                            <select
+                                              className="flex-1 text-[10px] bg-background border border-input rounded px-1.5 py-0.5"
+                                              value={(item as any)[field] || ""}
+                                              onChange={e => handleUpdateItemOverride(item.id, field, e.target.value || undefined)}
+                                            >
+                                              <option value="">(global)</option>
+                                              {options.map(o => <option key={o} value={o}>{o}</option>)}
+                                            </select>
+                                          </div>
+                                        ))}
+                                      </div>
                                     </PopoverContent>
                                   </Popover>
                                   <button

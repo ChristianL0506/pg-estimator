@@ -222,6 +222,21 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
     },
   });
 
+  // Create a separate estimate from ONLY the revision-clouded items — useful
+  // for quoting the delta when a drawing comes back with rev N changes.
+  const importRevisionMutation = useMutation({
+    mutationFn: (vars: { takeoffProjectId: string; revisionLabel?: string }) =>
+      apiRequest("POST", "/api/takeoff/import-revision-to-estimate", vars).then(r => r.json()),
+    onSuccess: (estimate: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/estimates"] });
+      toast({ title: `Revision estimate created (${estimate.revisionItemCount} items)`, description: "Navigating to estimating..." });
+      setTimeout(() => navigate("/estimating"), 300);
+    },
+    onError: (err: any) => {
+      toast({ title: "Failed to create revision estimate", description: err.message, variant: "destructive" });
+    },
+  });
+
   const handleExportPdf = () => {
     if (!selectedProject) return;
     if (discipline === "mechanical") exportMechanicalPdf(selectedProject);
@@ -629,6 +644,23 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                         {changeOrderMutation.isPending ? "Generating..." : "Change Order"}
                       </Button>
                     )}
+                    {(() => {
+                      const cloudedCount = (selectedProject.items || []).filter((it: any) => it.revisionClouded).length;
+                      return cloudedCount > 0 ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-amber-400 text-amber-700 hover:bg-amber-50 dark:text-amber-300 dark:border-amber-700 dark:hover:bg-amber-900/30"
+                          onClick={() => importRevisionMutation.mutate({ takeoffProjectId: selectedProject.id, revisionLabel: selectedProject.revision })}
+                          disabled={importRevisionMutation.isPending}
+                          data-testid="btn-create-revision-estimate"
+                          title={`Create a separate estimate from the ${cloudedCount} clouded item${cloudedCount === 1 ? "" : "s"} for change-order pricing`}
+                        >
+                          <Calculator size={14} className="mr-1.5" />
+                          {importRevisionMutation.isPending ? "Creating..." : `Revision Estimate (${cloudedCount})`}
+                        </Button>
+                      ) : null;
+                    })()}
                     <Button
                       size="sm"
                       className="bg-green-600 hover:bg-green-700 text-white"

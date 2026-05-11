@@ -34,6 +34,14 @@ export const takeoffItemSchema = z.object({
   sourcePage: z.number().optional(),
   _dedupCandidate: z.boolean().optional(),
   dedupNote: z.string().optional(),
+  // Per-line scope flags — let the estimator exclude a row from each
+  // downstream deliverable without deleting it. Defaults to included.
+  //   includeInBom      — appears in RFQ / material orders
+  //   includeInTakeoff  — appears in Takeoff page tables and PDFs
+  //   includeInEstimate — counts toward labor/material totals on the Estimate
+  includeInBom: z.boolean().optional().default(true),
+  includeInTakeoff: z.boolean().optional().default(true),
+  includeInEstimate: z.boolean().optional().default(true),
 });
 export type TakeoffItem = z.infer<typeof takeoffItemSchema>;
 
@@ -93,6 +101,10 @@ export const estimateItemSchema = z.object({
   workType: z.enum(["standard", "rack"]).optional(),
   // Whether item was within a revision cloud in the source takeoff
   revisionClouded: z.boolean().optional().default(false),
+  // Per-line scope flags (see TakeoffItem for semantics). Default to included.
+  includeInBom: z.boolean().optional().default(true),
+  includeInTakeoff: z.boolean().optional().default(true),
+  includeInEstimate: z.boolean().optional().default(true),
 });
 export type EstimateItem = z.infer<typeof estimateItemSchema>;
 
