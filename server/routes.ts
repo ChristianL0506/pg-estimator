@@ -5156,7 +5156,16 @@ function calculateJustinLaborHours(
     return ` \u26A0 used nearest ${match.matchKey}`;
   }
 
-  // --- PIPE: 3 columns — Standard, Rack, and SS ---
+  // --- PIPE: 3 columns — Standard, Rack, and SS — + field welds every 40' ---
+  // Pipe comes in 40' sticks. Each crossing of a 40' boundary on a run means
+  // one additional field butt weld. 40' run = 0 extra welds (one stick),
+  // 80' = 1 extra, 83' = 2 extra (three sticks, two joints), 120' = 2 extra.
+  // Formula: extraWelds = LF <= 40 ? 0 : floor((LF - 1) / 40).
+  // We bake the extra-weld MH into the per-LF rate so the caller's
+  // (Hrs/Unit × qty) math gives the right total without changing the return
+  // signature. The Conn column for pipe stays 'pipe' (no joints inherent to
+  // pipe itself) — the extra welds are part of the run cost, not a per-LF
+  // connection count.
   if (catLower === "pipe" || (descLower.includes("pipe") && !descLower.includes("support") && !descLower.includes("shoe"))) {
     const match = findBestMatch(factors.pipe || {});
     if (match) {
@@ -5165,8 +5174,29 @@ function calculateJustinLaborHours(
       if (material === "SS") { mh = match.val.ss_mh_per_lf || (match.val.standard_mh_per_lf || 0) * 1.8; col = "SS"; }
       else if (installType === "rack") { mh = match.val.rack_mh_per_lf || 0; col = "rack"; }
       else { mh = match.val.standard_mh_per_lf || 0; col = "standard"; }
+      const totalLF = Math.max(0, Number(item.quantity) || 0);
+      const extraWelds = totalLF <= 40 ? 0 : Math.floor((totalLF - 1) / 40);
+      let weldBasis = "";
+      if (extraWelds > 0 && totalLF > 0) {
+        // Look up the weld factor that matches THIS pipe's size/material/schedule
+        // so the extra field welds are charged at the correct rate.
+        const weldMatch = findBestMatch(factors.welds || {});
+        if (weldMatch) {
+          const schedNorm = normalizeSchedule(schedule);
+          let weldFactor = 0;
+          if (material === "SS") weldFactor = weldMatch.val.ss_mh_per_weld || 0;
+          else if (schedNorm === "80" || schedNorm === "XH") weldFactor = weldMatch.val.sch80_mh_per_weld || 0;
+          else weldFactor = weldMatch.val.std_mh_per_weld || 0;
+          if (weldFactor > 0) {
+            const extraWeldMh = extraWelds * weldFactor;
+            const extraPerLf = extraWeldMh / totalLF;
+            mh += extraPerLf;
+            weldBasis = ` + ${extraWelds} field weld(s) × ${weldFactor.toFixed(2)} MH/weld / ${totalLF} LF = ${extraPerLf.toFixed(4)} added MH/LF`;
+          }
+        }
+      }
       const warn = jSizeWarn(match);
-      return { mh, calcBasis: `Justin: Pipe ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/LF${warn}`, sizeMatchExact: match.exact, connectionCount: 0, connectionType: "pipe" };
+      return { mh, calcBasis: `Justin: Pipe ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/LF${weldBasis}${warn}`, sizeMatchExact: match.exact, connectionCount: 0, connectionType: "pipe" };
     }
   }
 
@@ -5341,46 +5371,27 @@ function calculateJustinLaborHours(
       else if (catLower === "coupling" || descLower.includes("coupling") || descLower.includes("nipple")) { fittingKey = "coupling"; fittingLabel = "Coupling"; }
       else if (catLower === "union" || descLower.includes("union")) { fittingKey = "union"; fittingLabel = "Union"; }
 
-      const bundledMult = (wem[fittingKey] !== undefined ? wem[fittingKey] : (wem["fitting"] !== undefined ? wem["fitting"] : 0.5));
-      // Auto-welds mode: fitting MH = welds_per_fitting × weld_factor + handling.
-      // Threaded fittings (descLower includes 'thread' or 'screw') count 0 welds
-      // and only get a small handling allowance.
-      // Handling base = 0.15 × weld_factor (matches the 'separate' mode's handling).
-      if (fittingWeldMode === "auto-welds") {
-        // Simple, what-an-estimator-actually-reads math:
-        //   Hrs/Unit = welds_per_fitting × weld_factor
-        // No handling adder, no extra multipliers. The factor in the table is
-        // already "MH per single weld"; the connection count tells us how many
-        // of those welds a single unit of this fitting represents.
-        // Threaded fittings (NPT couplings, nipples) count 0 welds and instead
-        // use the threaded-connection factor from the threads table.
-        const wpf = (justinData.welds_per_fitting || {}) as Record<string, number>;
-        let weldsCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
-        const isThreaded = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
-        if (isThreaded) weldsCount = 0;
-        if (isThreaded) {
-          // Use the threads table for threaded fittings.
-          const threads = factors.threads || {};
-          let threadMh = 0; let threadSz = "";
-          if (nps <= 1) { threadMh = threads['1"']?.mh_per_connection || 0.5; threadSz = '1"'; }
-          else if (nps <= 2) { threadMh = threads['2"']?.mh_per_connection || 1.3; threadSz = '2"'; }
-          else { threadMh = threads['4"']?.mh_per_connection || 2.0; threadSz = '4"'; }
-          return { mh: threadMh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} (threaded) → ${threadMh} MH/connection (${threadSz} thread)`, sizeMatchExact: weldMatch.exact, connectionCount: 1, connectionType: "thread" };
-        }
-        const mh = weldsCount * baseMH;
-        const warn = jSizeWarn(weldMatch);
-        return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${weldsCount} weld(s) × ${baseMH.toFixed(2)} MH/weld = ${mh.toFixed(4)} MH/unit${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: weldsCount, connectionType: "weld" };
-      }
-      const effectiveMult = fittingWeldMode === "separate" ? 0.15 : bundledMult;
-      const mh = baseMH * effectiveMult;
-      const warn = jSizeWarn(weldMatch);
-      const modeNote = fittingWeldMode === "separate" ? "separate-welds: handling only" : `bundled ×${bundledMult} weld-ends`;
-      // For bundled/separate, the connection count is informational — what the
-      // fitting WOULD have if welded. We pull from welds_per_fitting if present
-      // so the user sees '2 welds (bundled)' on an elbow even outside auto-welds.
+      // Justin's one-and-only fitting math:
+      //   Hrs/Unit = welds_per_fitting × weld_factor
+      // No handling adder, no bundled/separate option. The factor in the table
+      // already includes handling. Connection count comes from welds_per_fitting
+      // (elbow=2, tee=3, reducer=2, cap=1, coupling=2, union=0 threaded by default).
+      // The fittingWeldMode parameter is ignored for Justin's method.
       const wpf = (justinData.welds_per_fitting || {}) as Record<string, number>;
-      const wpfCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
-      return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → weld base=${baseMH.toFixed(2)} × ${effectiveMult} (${modeNote}) = ${mh.toFixed(4)} MH${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: wpfCount, connectionType: "weld" };
+      let weldsCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
+      const isThreaded = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
+      if (isThreaded) {
+        // Threaded fittings (NPT couplings, nipples) use the threads table.
+        const threads = factors.threads || {};
+        let threadMh = 0; let threadSz = "";
+        if (nps <= 1) { threadMh = threads['1"']?.mh_per_connection || 0.5; threadSz = '1"'; }
+        else if (nps <= 2) { threadMh = threads['2"']?.mh_per_connection || 1.3; threadSz = '2"'; }
+        else { threadMh = threads['4"']?.mh_per_connection || 2.0; threadSz = '4"'; }
+        return { mh: threadMh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} (threaded) → ${threadMh} MH/connection (${threadSz} thread)`, sizeMatchExact: weldMatch.exact, connectionCount: 1, connectionType: "thread" };
+      }
+      const mh = weldsCount * baseMH;
+      const warn = jSizeWarn(weldMatch);
+      return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${weldsCount} weld(s) × ${baseMH.toFixed(2)} MH/weld = ${mh.toFixed(4)} MH/unit${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: weldsCount, connectionType: "weld" };
     }
   }
 
@@ -6478,18 +6489,21 @@ Picou Group Contractors`;
       if ((item as any).includeInEstimate === false) {
         return item;
       }
-      // In auto-welds mode, the fitting line itself carries the weld math
+      // Justin and Industry methods always bake welds into the fitting line
       // (welds_per_fitting × weld_factor). Any auto-inferred weld rows in the
       // BOM would double-count, so zero them out and flag the basis. The user
       // can also Strip them via the toolbar button — this is the safety net.
+      // Bill's method still respects the legacy fittingWeldMode setting since
+      // Bill's worksheet may genuinely use bundled multipliers.
       const isAutoInferred = typeof (item as any).weldAssumption === "string" &&
         ((item as any).weldAssumption as string).includes("auto-inferred");
-      if (fittingWeldMode === "auto-welds" && isAutoInferred) {
+      const justinOrIndustry = method === "justin" || method === "industry";
+      if (isAutoInferred && (justinOrIndustry || fittingWeldMode === "auto-welds")) {
         return computeEstimateItem({
           ...item,
           laborHoursPerUnit: 0,
           laborUnitCost: 0,
-          calculationBasis: `Auto-welds mode: this auto-inferred weld is already counted on the parent fitting line. 0 MH to avoid double-count. (Click 'Strip Auto-Inferred Welds' to remove these rows entirely.)`,
+          calculationBasis: `${justinOrIndustry ? method.charAt(0).toUpperCase() + method.slice(1) + "’s method" : "Auto-welds mode"}: this auto-inferred weld is already counted on the parent fitting line. 0 MH to avoid double-count. (Click 'Strip Auto-Inferred Welds' to remove these rows entirely.)`,
           sizeMatchExact: true,
           connectionCount: 0,
           connectionType: "none",

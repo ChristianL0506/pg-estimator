@@ -1042,23 +1042,28 @@ export default function EstimatingPage() {
                             </>
                           )}
 
-                          {/* Fitting/weld accounting mode — applies to every method.
-                              Three options trade off how welds get counted:
-                              - Bundled:   legacy multiplier on fitting (under-counts welds)
-                              - Separate:  weld rows in BOM + handling on fitting
-                              - Auto-welds: each fitting counts as N welds inline (no row needed) */}
+                          {/* Fitting Welds mode — only relevant for Bill's method.
+                              Justin and Industry always use: Hrs/Unit = welds_per_fitting × weld_factor,
+                              with auto-inferred weld rows automatically zeroed to prevent double-count
+                              and pipe-length field welds folded into the per-LF rate. */}
                           <div>
-                            <label className="text-[10px] text-muted-foreground block mb-1" title="Bundled: legacy multiplier on fitting. Separate: weld rows in BOM + fitting handling only. Auto-welds: fitting line counts as its N welds (elbow=2, tee=3, etc.) inline — do NOT run Infer Welds in this mode.">Fitting Welds</label>
-                            <select
-                              className="text-xs border border-input rounded px-2 py-1 bg-background h-7"
-                              value={estFittingWeldMode}
-                              onChange={e => setEstFittingWeldMode(e.target.value as "bundled" | "separate" | "auto-welds")}
-                              data-testid="select-fitting-weld-mode"
-                            >
-                              <option value="bundled">Bundled (legacy multipliers)</option>
-                              <option value="separate">Separate weld rows</option>
-                              <option value="auto-welds">Auto-welds (welds in fitting)</option>
-                            </select>
+                            <label className="text-[10px] text-muted-foreground block mb-1" title={p.estimateMethod === "bill" ? "Bundled: legacy multiplier on fitting. Separate: weld rows in BOM + fitting handling only. Auto-welds: fitting line counts as its N welds (elbow=2, tee=3, etc.) inline." : "Justin and Industry methods always use welds_per_fitting × factor (handling included in factor). Field welds for pipe runs > 40' are added automatically."}>Fitting Welds</label>
+                            {(p.estimateMethod === "justin" || p.estimateMethod === "industry") ? (
+                              <div className="text-xs border border-input rounded px-2 py-1 bg-muted/30 h-7 flex items-center text-muted-foreground">
+                                Welds in fitting (locked for {p.estimateMethod === "industry" ? "Industry" : "Justin"})
+                              </div>
+                            ) : (
+                              <select
+                                className="text-xs border border-input rounded px-2 py-1 bg-background h-7"
+                                value={estFittingWeldMode}
+                                onChange={e => setEstFittingWeldMode(e.target.value as "bundled" | "separate" | "auto-welds")}
+                                data-testid="select-fitting-weld-mode"
+                              >
+                                <option value="bundled">Bundled (legacy multipliers)</option>
+                                <option value="separate">Separate weld rows</option>
+                                <option value="auto-welds">Auto-welds (welds in fitting)</option>
+                              </select>
+                            )}
                           </div>
 
                           {/* Diagnose button */}
