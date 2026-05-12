@@ -2274,101 +2274,234 @@ function DbRow({ entry, onDelete }: { entry: CostDatabaseEntry; onDelete: () => 
   );
 }
 
-// ReconciliationPanel — shows estimate qty vs source BOM qty vs connection
-// count per (category, size, material) so the user can confirm 1:1 with the
-// takeoff and spot any mismatch.
+// ReconciliationPanel — two tables side by side:
+//   1) Line-by-line: estimate qty vs BOM qty per (category, size, material).
+//   2) Connections: per-size connection counts (shop/field BW/SW, bolt-ups,
+//      threaded) summed across the estimate AND the BOM — mirrors the
+//      takeoff's ConnectionsSummary view.
+// If the estimate has no sourceTakeoffId, the user can pick one from a
+// dropdown. The selection is persisted on the project so future reconciles
+// pick it up automatically.
 function ReconciliationPanel({ estimateId }: { estimateId: string }) {
+  // Local BOM override selector. Empty = use whatever the server resolved.
+  const [bomOverride, setBomOverride] = useState<string>("");
+  const queryKey = ["/api/estimates", estimateId, "reconcile", bomOverride];
   const { data, isLoading } = useQuery<any>({
-    queryKey: ["/api/estimates", estimateId, "reconcile"],
+    queryKey,
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/estimates/${estimateId}/reconcile`);
+      const qs = bomOverride ? `?bomTakeoffId=${encodeURIComponent(bomOverride)}` : "";
+      const res = await apiRequest("GET", `/api/estimates/${estimateId}/reconcile${qs}`);
       return res.json();
     },
   });
+
+  const queryClient = useQueryClient();
+  const linkBomMutation = useMutation({
+    mutationFn: async (takeoffId: string | null) => {
+      const res = await apiRequest("PATCH", `/api/estimates/${estimateId}`, { sourceTakeoffId: takeoffId });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/estimates", estimateId] });
+      setBomOverride("");
+    },
+  });
+
   const rows = (data?.rows as any[]) || [];
   const totals = data?.totals || { estimateQty: 0, bomQty: 0, estimateMh: 0 };
+  const connRows = (data?.connections?.rows as any[]) || [];
+  const connTotals = data?.connections?.totals || { estimate: { total: 0 }, bom: { total: 0 } };
   const hasBom = !!data?.hasBom;
-  const mismatchCount = rows.filter(r => !r.matches).length;
+  const resolvedTakeoffId = data?.resolvedTakeoffId || null;
+  const sourceTakeoffId = data?.sourceTakeoffId || null;
+  const candidateBoms = (data?.candidateBoms as any[]) || [];
+  const lineMismatchCount = rows.filter(r => !r.matches).length;
+  const connMismatchCount = connRows.filter(r => !r.matches).length;
+
   return (
-    <Card className="border-card-border">
-      <CardHeader className="p-4 pb-2">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <CardTitle className="text-sm">Reconciliation — Estimate vs BOM vs Connections</CardTitle>
-            <p className="text-[10px] text-muted-foreground mt-0.5">
-              {isLoading ? "Loading…" :
-                !hasBom ? "No source BOM attached. Showing estimate-only counts." :
-                mismatchCount === 0 ? `All ${rows.length} groups reconcile cleanly.` :
-                `${mismatchCount} of ${rows.length} groups don't match the BOM.`}
-            </p>
+    <div className="space-y-3">
+      {/* BOM picker / link control */}
+      <Card className="border-card-border">
+        <CardHeader className="p-4 pb-2">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="min-w-0">
+              <CardTitle className="text-sm">BOM Reconciliation</CardTitle>
+              <p className="text-[10px] text-muted-foreground mt-0.5">
+                {isLoading ? "Loading…" :
+                  hasBom ? <>Comparing against takeoff <span className="font-mono">{resolvedTakeoffId?.slice(0, 8) || "?"}</span>. {lineMismatchCount} line mismatch{lineMismatchCount === 1 ? "" : "es"}, {connMismatchCount} connection mismatch{connMismatchCount === 1 ? "" : "es"}.</> :
+                  "No source BOM attached. Pick a takeoff to reconcile against."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <select
+                className="text-xs border border-input rounded px-2 py-1 bg-background h-7"
+                value={bomOverride || resolvedTakeoffId || ""}
+                onChange={e => setBomOverride(e.target.value)}
+                data-testid="select-reconcile-bom"
+              >
+                <option value="">— Select BOM —</option>
+                {candidateBoms.map(b => (
+                  <option key={b.id} value={b.id}>{b.name} ({b.itemCount} items)</option>
+                ))}
+              </select>
+              {bomOverride && bomOverride !== sourceTakeoffId && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => linkBomMutation.mutate(bomOverride)}
+                  disabled={linkBomMutation.isPending}
+                  data-testid="btn-link-bom"
+                  title="Save this takeoff as the project's source BOM so it auto-loads next time."
+                >
+                  Save as source
+                </Button>
+              )}
+            </div>
           </div>
-          {hasBom && mismatchCount > 0 && (
-            <span className="text-[10px] px-2 py-1 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 font-semibold">
-              {mismatchCount} mismatch{mismatchCount === 1 ? "" : "es"}
-            </span>
+        </CardHeader>
+      </Card>
+
+      {/* Table 1: Line-by-line */}
+      <Card className="border-card-border">
+        <CardHeader className="p-4 pb-2">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <CardTitle className="text-sm">Lines — Estimate vs BOM</CardTitle>
+              <p className="text-[10px] text-muted-foreground mt-0.5">Each row groups items by category + size + material. Quantities should match the BOM 1:1.</p>
+            </div>
+            {hasBom && lineMismatchCount > 0 && (
+              <span className="text-[10px] px-2 py-1 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 font-semibold">{lineMismatchCount} mismatch{lineMismatchCount === 1 ? "" : "es"}</span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="p-4 pt-0">
+          {rows.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-2">No items to reconcile. Auto-calculate first.</p>
+          ) : (
+            <div className="max-h-72 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-background">
+                  <tr className="text-[10px] text-muted-foreground uppercase tracking-wide border-b border-border">
+                    <th className="text-left py-1 pr-2">Category</th>
+                    <th className="text-left py-1 px-2">Size</th>
+                    <th className="text-left py-1 px-2">Mat</th>
+                    <th className="text-right py-1 px-2 w-20">Estimate</th>
+                    <th className="text-right py-1 px-2 w-20">BOM</th>
+                    <th className="text-right py-1 px-2 w-20">Total MH</th>
+                    <th className="text-center py-1 px-2 w-8"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, idx) => {
+                    const delta = r.estimateQty - r.bomQty;
+                    return (
+                      <tr key={`${r.category}-${r.size}-${r.material}-${idx}`} className={`border-t border-border ${!r.matches && hasBom && r.bomQty > 0 ? "bg-amber-50/50 dark:bg-amber-950/20" : ""}`}>
+                        <td className="py-1.5 pr-2 capitalize">{r.category}</td>
+                        <td className="py-1.5 px-2 font-mono">{r.size || "—"}</td>
+                        <td className="py-1.5 px-2">{r.material || "—"}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{r.estimateQty.toLocaleString()}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{hasBom ? r.bomQty.toLocaleString() : <span className="text-muted-foreground/40">—</span>}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{r.estimateMh.toFixed(1)}</td>
+                        <td className="py-1.5 px-2 text-center">
+                          {!hasBom ? null : r.bomQty === 0 ? (
+                            <span className="text-[10px] text-muted-foreground/60" title="No matching BOM entry — likely an inferred field weld or manually added row.">—</span>
+                          ) : r.matches ? (
+                            <span className="text-emerald-600 dark:text-emerald-400" title="Matches BOM">✓</span>
+                          ) : (
+                            <span className="text-amber-600 dark:text-amber-400" title={`Delta ${delta > 0 ? "+" : ""}${delta}`}>{delta > 0 ? "+" : ""}{delta}</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr className="border-t-2 border-border bg-muted/30 font-semibold">
+                    <td className="py-1.5 pr-2" colSpan={3}>Totals</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{totals.estimateQty.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{hasBom ? totals.bomQty.toLocaleString() : "—"}</td>
+                    <td className="py-1.5 px-2 text-right font-mono text-primary">{totals.estimateMh.toFixed(1)}</td>
+                    <td></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           )}
-        </div>
-      </CardHeader>
-      <CardContent className="p-4 pt-0">
-        {rows.length === 0 ? (
-          <p className="text-xs text-muted-foreground py-2">No items to reconcile yet. Auto-calculate the estimate first.</p>
-        ) : (
-          <div className="max-h-72 overflow-y-auto">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-background">
-                <tr className="text-[10px] text-muted-foreground uppercase tracking-wide border-b border-border">
-                  <th className="text-left py-1 pr-2">Category</th>
-                  <th className="text-left py-1 px-2">Size</th>
-                  <th className="text-left py-1 px-2">Mat</th>
-                  <th className="text-right py-1 px-2 w-20">Estimate</th>
-                  <th className="text-right py-1 px-2 w-20">BOM</th>
-                  <th className="text-right py-1 px-2 w-24">Connections</th>
-                  <th className="text-right py-1 px-2 w-20">Total MH</th>
-                  <th className="text-center py-1 px-2 w-8"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, idx) => {
-                  const delta = r.estimateQty - r.bomQty;
-                  const showDelta = hasBom && r.bomQty > 0 && delta !== 0;
-                  return (
-                    <tr key={`${r.category}-${r.size}-${r.material}-${idx}`} className={`border-t border-border ${!r.matches && hasBom && r.bomQty > 0 ? "bg-amber-50/50 dark:bg-amber-950/20" : ""}`}>
-                      <td className="py-1.5 pr-2 capitalize">{r.category}</td>
-                      <td className="py-1.5 px-2 font-mono">{r.size || "—"}</td>
-                      <td className="py-1.5 px-2">{r.material || "—"}</td>
-                      <td className="py-1.5 px-2 text-right font-mono">{r.estimateQty.toLocaleString()}</td>
-                      <td className="py-1.5 px-2 text-right font-mono">{hasBom ? r.bomQty.toLocaleString() : <span className="text-muted-foreground/40">—</span>}</td>
-                      <td className="py-1.5 px-2 text-right font-mono">
-                        {r.connectionCount.toLocaleString()}
-                        {r.connectionType && <span className="text-[9px] text-muted-foreground ml-1">{r.connectionType}</span>}
-                      </td>
-                      <td className="py-1.5 px-2 text-right font-mono">{r.estimateMh.toFixed(1)}</td>
+        </CardContent>
+      </Card>
+
+      {/* Table 2: Connections rollup vs BOM connections */}
+      <Card className="border-card-border">
+        <CardHeader className="p-4 pb-2">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <CardTitle className="text-sm">Connections — Estimate vs BOM</CardTitle>
+              <p className="text-[10px] text-muted-foreground mt-0.5">Total physical connections per size. Should match the takeoff's Connections Summary view.</p>
+            </div>
+            {hasBom && connMismatchCount > 0 && (
+              <span className="text-[10px] px-2 py-1 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 font-semibold">{connMismatchCount} mismatch{connMismatchCount === 1 ? "" : "es"}</span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="p-4 pt-0">
+          {connRows.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-2">No connections to reconcile.</p>
+          ) : (
+            <div className="max-h-72 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-background">
+                  <tr className="text-[10px] text-muted-foreground uppercase tracking-wide border-b border-border">
+                    <th className="text-left py-1 pr-2">Size</th>
+                    <th className="text-right py-1 px-2">Shop BW</th>
+                    <th className="text-right py-1 px-2">Shop SW</th>
+                    <th className="text-right py-1 px-2">Field BW</th>
+                    <th className="text-right py-1 px-2">Field SW</th>
+                    <th className="text-right py-1 px-2">Bolt-Ups</th>
+                    <th className="text-right py-1 px-2">Threaded</th>
+                    <th className="text-right py-1 px-2 w-20">Est Total</th>
+                    <th className="text-right py-1 px-2 w-20">BOM Total</th>
+                    <th className="text-center py-1 px-2 w-8"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {connRows.map((r, idx) => (
+                    <tr key={`conn-${r.size}-${idx}`} className={`border-t border-border ${!r.matches && hasBom ? "bg-amber-50/50 dark:bg-amber-950/20" : ""}`}>
+                      <td className="py-1.5 pr-2 font-mono">{r.size}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{r.estimate.shopBW.toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{r.estimate.shopSW.toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{r.estimate.fieldBW.toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{r.estimate.fieldSW.toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{r.estimate.boltUps.toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{r.estimate.threaded.toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right font-mono font-semibold">{r.estimate.total.toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{hasBom ? r.bom.total.toLocaleString() : <span className="text-muted-foreground/40">—</span>}</td>
                       <td className="py-1.5 px-2 text-center">
-                        {!hasBom ? null : r.bomQty === 0 ? (
-                          <span className="text-[10px] text-muted-foreground/60" title="This group has no matching BOM entry — likely a derived item like a field weld or a manually added row.">—</span>
-                        ) : r.matches ? (
-                          <span className="text-emerald-600 dark:text-emerald-400" title="Estimate matches BOM">✓</span>
+                        {!hasBom ? null : r.matches ? (
+                          <span className="text-emerald-600 dark:text-emerald-400" title="Matches BOM">✓</span>
                         ) : (
-                          <span className="text-amber-600 dark:text-amber-400" title={`Estimate ${delta > 0 ? "+" : ""}${delta} vs BOM`}>{delta > 0 ? "+" : ""}{delta}</span>
+                          <span className="text-amber-600 dark:text-amber-400" title={`Delta ${r.delta > 0 ? "+" : ""}${r.delta}`}>{r.delta > 0 ? "+" : ""}{r.delta}</span>
                         )}
                       </td>
                     </tr>
-                  );
-                })}
-                <tr className="border-t-2 border-border bg-muted/30 font-semibold">
-                  <td className="py-1.5 pr-2" colSpan={3}>Totals</td>
-                  <td className="py-1.5 px-2 text-right font-mono">{totals.estimateQty.toLocaleString()}</td>
-                  <td className="py-1.5 px-2 text-right font-mono">{hasBom ? totals.bomQty.toLocaleString() : "—"}</td>
-                  <td className="py-1.5 px-2"></td>
-                  <td className="py-1.5 px-2 text-right font-mono text-primary">{totals.estimateMh.toFixed(1)}</td>
-                  <td></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+                  ))}
+                  <tr className="border-t-2 border-border bg-muted/30 font-semibold">
+                    <td className="py-1.5 pr-2">Totals</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{connTotals.estimate.shopBW.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{connTotals.estimate.shopSW.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{connTotals.estimate.fieldBW.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{connTotals.estimate.fieldSW.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{connTotals.estimate.boltUps.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{connTotals.estimate.threaded.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono text-primary">{connTotals.estimate.total.toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-right font-mono">{hasBom ? connTotals.bom.total.toLocaleString() : "—"}</td>
+                    <td></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 

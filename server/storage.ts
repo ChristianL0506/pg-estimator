@@ -793,7 +793,7 @@ const stmts = {
   getEstimateProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM estimate_items GROUP BY projectId`),
   getEstimateProjectBySourceTakeoff: db.prepare(`SELECT * FROM estimate_projects WHERE sourceTakeoffId = ? LIMIT 1`),
   getEstimateItems: db.prepare(`SELECT * FROM estimate_items WHERE projectId = ? ORDER BY lineNumber`),
-  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, fittingWeldMode = ?, markups_json = ?, scope_adders_json = ?, contingencyOverride = ? WHERE id = ?`),
+  updateEstimateProject: db.prepare(`UPDATE estimate_projects SET name = ?, projectNumber = ?, client = ?, location = ?, sourceTakeoffId = ?, laborRate = ?, overtimeRate = ?, doubleTimeRate = ?, perDiem = ?, overtimePercent = ?, doubleTimePercent = ?, estimateMethod = ?, customMethodId = ?, fittingWeldMode = ?, markups_json = ?, scope_adders_json = ?, contingencyOverride = ? WHERE id = ?`),
   deleteEstimateProject: db.prepare(`DELETE FROM estimate_projects WHERE id = ?`),
   deleteEstimateItems: db.prepare(`DELETE FROM estimate_items WHERE projectId = ?`),
 
@@ -1216,6 +1216,11 @@ class Storage {
     const projectNumber = data.projectNumber ?? row.projectNumber ?? "";
     const client = data.client ?? row.client ?? "";
     const location = data.location ?? row.location ?? "";
+    // sourceTakeoffId: caller passes null to clear, undefined to leave, or a
+    // string to set. Lets the user retroactively link a BOM for reconciliation.
+    const sourceTakeoffId = (data as any).sourceTakeoffId === undefined
+      ? (row.sourceTakeoffId ?? null)
+      : ((data as any).sourceTakeoffId === null ? null : String((data as any).sourceTakeoffId));
     const laborRate = data.laborRate ?? row.laborRate ?? 56;
     const overtimeRate = data.overtimeRate ?? row.overtimeRate ?? 79;
     const doubleTimeRate = data.doubleTimeRate ?? row.doubleTimeRate ?? 100;
@@ -1237,7 +1242,7 @@ class Storage {
       ? (row.contingencyOverride ?? null)
       : ((data as any).contingencyOverride === null ? null : Number((data as any).contingencyOverride));
 
-    stmts.updateEstimateProject.run(name, projectNumber, client, location, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, fittingWeldMode, JSON.stringify(markups), JSON.stringify(scopeAdders), contingencyOverride, id);
+    stmts.updateEstimateProject.run(name, projectNumber, client, location, sourceTakeoffId, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, customMethodId, fittingWeldMode, JSON.stringify(markups), JSON.stringify(scopeAdders), contingencyOverride, id);
 
     if (data.items) {
       replaceEstimateItemsTransaction(id, data.items);

@@ -111,6 +111,10 @@ const patchEstimateSchema = z.object({
   estimateMethod: z.enum(["bill", "justin", "industry", "manual"]).optional(),
   customMethodId: z.string().optional(),
   fittingWeldMode: z.enum(["bundled", "separate", "auto-welds"]).optional(),
+  // Lets the user link a takeoff as the source BOM after the fact (e.g.
+  // for an estimate that was created manually). Used by the reconciliation
+  // panel's BOM picker. Pass null to clear.
+  sourceTakeoffId: z.string().nullable().optional(),
   // Pass a number to override, null to clear, undefined to leave unchanged.
   // Percentage value (e.g. 15 = 15%). Bill method ignores this.
   contingencyOverride: z.number().nullable().optional(),
@@ -6823,14 +6827,32 @@ Picou Group Contractors`;
   //                    flange → 1 × qty bolt-ups, weld row → qty welds, etc.)
   // Lets the user verify estimate matches BOM 1:1 and that the connection
   // totals match what their separate connection summary view shows.
-  app.get("/api/estimates/:id/reconcile", (req, res) => {
+  app.get("/api/estimates/:id/reconcile", async (req, res) => {
     const project = storage.getEstimateProject(req.params.id);
     if (!project) return res.status(404).json({ message: "Estimate not found" });
-    // Source takeoff items for BOM column. May be null if no source.
+    // BOM source resolution:
+    //   1. Explicit ?bomTakeoffId override (user picked from a dropdown)
+    //   2. project.sourceTakeoffId (set at import time)
+    //   3. Single-takeoff-in-system fallback (so a freshly-created estimate
+    //      that wasn't imported can still reconcile if there's just one
+    //      candidate — user can always override).
+    const overrideId = (req.query.bomTakeoffId as string) || "";
+    let resolvedTakeoffId: string | null = null;
     let bomItems: any[] = [];
-    if (project.sourceTakeoffId) {
-      const takeoff = storage.getTakeoffProject(project.sourceTakeoffId);
-      bomItems = (takeoff?.items || []) as any[];
+    if (overrideId) {
+      resolvedTakeoffId = overrideId;
+      const t = storage.getTakeoffProject(overrideId);
+      bomItems = (t?.items || []) as any[];
+    } else if (project.sourceTakeoffId) {
+      resolvedTakeoffId = project.sourceTakeoffId;
+      const t = storage.getTakeoffProject(project.sourceTakeoffId);
+      bomItems = (t?.items || []) as any[];
+    } else {
+      const all = await storage.getTakeoffProjects();
+      if (all.length === 1) {
+        resolvedTakeoffId = all[0].id;
+        bomItems = (storage.getTakeoffProject(all[0].id)?.items || []) as any[];
+      }
     }
 
     // Connection count per fitting (mirrors welds_per_fitting baked into the
@@ -6949,6 +6971,121 @@ Picou Group Contractors`;
       delta: g.estimateQty - g.bomQty,
     }));
 
+    // === Second table: connection rollup by size, mirroring the takeoff's
+    // ConnectionsSummary component. We compute both sides:
+    //   estimateSide: from current estimate items (after field-weld inference)
+    //   bomSide:      from the source BOM items (raw takeoff lines)
+    // So the user can see, per size, whether the connections drawn on the BOM
+    // match what the estimate actually charges labor for.
+    type ConnRow = {
+      size: string;
+      shopBW: number; shopSW: number;
+      fieldBW: number; fieldSW: number;
+      boltUps: number; threaded: number;
+      total: number;
+    };
+    const rollupConnections = (sourceItems: any[]): ConnRow[] => {
+      const sizeMap: Record<string, ConnRow> = {};
+      const ensure = (size: string) => {
+        if (!sizeMap[size]) sizeMap[size] = { size, shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 };
+        return sizeMap[size];
+      };
+      for (const item of sourceItems) {
+        const cat = (item.category || "").toLowerCase();
+        const size = item.size || "N/A";
+        const qty = item.quantity || 0;
+        const desc = (item.description || "").toLowerCase();
+        const section = (item.installLocation || ((item.notes || "").toLowerCase().includes("field") ? "field" : "shop")).toString();
+        const isField = section === "field";
+        const r = ensure(size);
+        const isThreaded = desc.includes("threaded") || desc.includes("screw") || desc.includes("npt");
+        const isSocketWeld = desc.includes("socket weld") || /\bsw\b/i.test(desc);
+        const addBW = (n: number) => { if (isField) r.fieldBW += n; else r.shopBW += n; };
+        const addSW = (n: number) => { if (isField) r.fieldSW += n; else r.shopSW += n; };
+        // Pipe → floor(qty / 40) field BWs, then stop.
+        if (cat === "pipe" && qty >= 40) {
+          r.fieldBW += Math.floor(qty / 40);
+          continue;
+        }
+        if (cat === "pipe") continue;
+        if (cat === "gasket" || cat === "bolt" || desc.includes("gasket") || desc.includes("stud") || desc.includes("bolt")) continue;
+        if (cat === "flange" || desc.includes("flange")) {
+          addBW(qty);
+          r.boltUps += Math.ceil(qty / 2);
+          continue;
+        }
+        if (isThreaded) { r.threaded += qty; continue; }
+        if (cat === "coupling" || cat === "union" || desc.includes("coupling") || desc.includes("nipple")) {
+          addSW(qty * 2);
+          continue;
+        }
+        if (cat === "valve" && isSocketWeld) { addSW(qty * 2); continue; }
+        if (cat === "sockolet" || desc.includes("sockolet")) { addSW(qty * 2); continue; }
+        if (cat === "weldolet" || desc.includes("weldolet") || desc.includes("threadolet")) { addBW(qty); continue; }
+        // Generic fitting rules: elbow=2, tee=3, reducer=2, cap=1, etc.
+        const fittingWelds: Record<string, number> = { elbow: 2, elbow_90: 2, elbow_45: 2, tee: 3, reducer: 2, cap: 1 };
+        let welds = fittingWelds[cat];
+        if (welds === undefined) {
+          if (desc.includes("elbow") || desc.includes("ell")) welds = 2;
+          else if (desc.includes("tee")) welds = 3;
+          else if (desc.includes("reducer") || desc.includes("swage")) welds = 2;
+          else if (desc.includes("cap")) welds = 1;
+        }
+        if (welds && welds > 0) {
+          const count = qty * welds;
+          if (isSocketWeld) addSW(count); else addBW(count);
+        }
+      }
+      // Compute totals per row.
+      const out: ConnRow[] = Object.values(sizeMap).map(r => ({
+        ...r,
+        total: r.shopBW + r.shopSW + r.fieldBW + r.fieldSW + r.boltUps + r.threaded,
+      }));
+      out.sort((a, b) => (parseFloat(a.size) || 0) - (parseFloat(b.size) || 0));
+      return out;
+    };
+
+    const estimateConnections = rollupConnections((project.items || []).filter(it => (it as any).includeInEstimate !== false));
+    const bomConnections = bomItems.length > 0 ? rollupConnections(bomItems.filter(it => (it as any).includeInBom !== false)) : [];
+    // Merge into a single set of rows keyed by size, with both sides side-by-side.
+    const allSizes = Array.from(new Set([
+      ...estimateConnections.map(r => r.size),
+      ...bomConnections.map(r => r.size),
+    ])).sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0));
+    const connRows = allSizes.map(size => {
+      const e = estimateConnections.find(r => r.size === size) || { size, shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 };
+      const b = bomConnections.find(r => r.size === size) || { size, shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 };
+      return {
+        size,
+        estimate: e,
+        bom: b,
+        matches: (e.total === b.total) || bomItems.length === 0,
+        delta: e.total - b.total,
+      };
+    });
+    const connTotals = {
+      estimate: connRows.reduce((acc, r) => ({
+        shopBW: acc.shopBW + r.estimate.shopBW, shopSW: acc.shopSW + r.estimate.shopSW,
+        fieldBW: acc.fieldBW + r.estimate.fieldBW, fieldSW: acc.fieldSW + r.estimate.fieldSW,
+        boltUps: acc.boltUps + r.estimate.boltUps, threaded: acc.threaded + r.estimate.threaded,
+        total: acc.total + r.estimate.total,
+      }), { shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 }),
+      bom: connRows.reduce((acc, r) => ({
+        shopBW: acc.shopBW + r.bom.shopBW, shopSW: acc.shopSW + r.bom.shopSW,
+        fieldBW: acc.fieldBW + r.bom.fieldBW, fieldSW: acc.fieldSW + r.bom.fieldSW,
+        boltUps: acc.boltUps + r.bom.boltUps, threaded: acc.threaded + r.bom.threaded,
+        total: acc.total + r.bom.total,
+      }), { shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 }),
+    };
+
+    // List of takeoffs the user could pick as a BOM source.
+    const allTakeoffs = await storage.getTakeoffProjects();
+    const candidateBoms = allTakeoffs.map(t => ({
+      id: t.id,
+      name: t.name,
+      itemCount: ((storage.getTakeoffProject(t.id)?.items) || []).length,
+    }));
+
     res.json({
       rows,
       totals: {
@@ -6956,8 +7093,14 @@ Picou Group Contractors`;
         bomQty: rows.reduce((s, r) => s + r.bomQty, 0),
         estimateMh: rows.reduce((s, r) => s + r.estimateMh, 0),
       },
+      connections: {
+        rows: connRows,
+        totals: connTotals,
+      },
       sourceTakeoffId: project.sourceTakeoffId || null,
+      resolvedTakeoffId,
       hasBom: bomItems.length > 0,
+      candidateBoms,
     });
   });
 
