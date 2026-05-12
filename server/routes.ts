@@ -7104,6 +7104,357 @@ Picou Group Contractors`;
     });
   });
 
+  // ===== RECONCILE FROM UPLOADED XLSX FILES =====
+  // Lets the user drop the BOM and/or Connections Summary Excel exports
+  // directly into the reconciliation panel without needing the original
+  // takeoff project to still be in the system. Useful when:
+  //   - Estimator has the export files but the source takeoff was archived
+  //   - Reconciling against someone else's BOM emailed over
+  //   - Quick spot-check without re-importing a full takeoff
+  //
+  // Accepts multipart/form-data with two optional file fields:
+  //   bom         — the 'BOM' sheet from /export-bom
+  //   connections — the 'Connections by Size' sheet from /export-connections
+  // At least one is required. Returns the same shape as GET /reconcile.
+  const xlsxUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_FILE_SIZE },
+    fileFilter: (_req, file, cb) => {
+      const ok = file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        || file.mimetype === "application/vnd.ms-excel"
+        || file.originalname.toLowerCase().endsWith(".xlsx")
+        || file.originalname.toLowerCase().endsWith(".xls");
+      if (ok) cb(null, true);
+      else cb(new Error("Only .xlsx files are allowed."));
+    },
+  });
+
+  app.post("/api/estimates/:id/reconcile-from-files",
+    xlsxUpload.fields([{ name: "bom", maxCount: 1 }, { name: "connections", maxCount: 1 }]),
+    async (req, res) => {
+      const project = storage.getEstimateProject(req.params.id);
+      if (!project) return res.status(404).json({ message: "Estimate not found" });
+      const files = req.files as { bom?: Express.Multer.File[]; connections?: Express.Multer.File[] };
+      const bomFile = files?.bom?.[0];
+      const connFile = files?.connections?.[0];
+      if (!bomFile && !connFile) {
+        return res.status(400).json({ message: "Upload at least one of: 'bom' (BOM export) or 'connections' (Connections Summary export)." });
+      }
+
+      // Lazy-import exceljs (only here — keeps cold-start fast for routes that
+      // don't need it).
+      const ExcelJS = (await import("exceljs")).default;
+
+      // Parse the BOM export. Sheet "BOM" with columns:
+      //   Line # | Category | Size | Description | Quantity | Unit | Material |
+      //   Schedule | Spec | Rating | Confidence | Source Page | Notes
+      let bomItems: any[] = [];
+      let bomFilename = "";
+      if (bomFile) {
+        bomFilename = bomFile.originalname;
+        try {
+          const wb = new ExcelJS.Workbook();
+          await wb.xlsx.load(bomFile.buffer as any);
+          // Prefer a sheet literally named "BOM"; fall back to the first one.
+          const ws = wb.getWorksheet("BOM") || wb.worksheets[0];
+          if (!ws) throw new Error("No worksheet found in BOM file.");
+          // Read header row to find column positions — robust to column reordering.
+          const headerRow = ws.getRow(1);
+          const colIdx: Record<string, number> = {};
+          headerRow.eachCell((cell, colNumber) => {
+            const v = String(cell.value || "").trim().toLowerCase();
+            if (v) colIdx[v] = colNumber;
+          });
+          // Helper to read a cell by header name with fallback aliases.
+          const cellAt = (row: ExcelJS.Row, ...names: string[]) => {
+            for (const n of names) {
+              const idx = colIdx[n.toLowerCase()];
+              if (idx) {
+                const v = row.getCell(idx).value;
+                if (v !== null && v !== undefined) return v;
+              }
+            }
+            return null;
+          };
+          ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+            if (rowNumber === 1) return;  // skip header
+            const description = String(cellAt(row, "description") || "").trim();
+            if (!description) return;  // skip blank rows
+            const rawQty = cellAt(row, "quantity", "qty");
+            const qty = typeof rawQty === "number" ? rawQty : parseFloat(String(rawQty || 0)) || 0;
+            bomItems.push({
+              lineNumber: String(cellAt(row, "line #", "line", "line number") || rowNumber - 1),
+              category: String(cellAt(row, "category") || "").toLowerCase(),
+              size: String(cellAt(row, "size") || "").trim(),
+              description,
+              quantity: qty,
+              unit: String(cellAt(row, "unit") || "EA"),
+              material: String(cellAt(row, "material") || ""),
+              itemMaterial: (() => {
+                const m = String(cellAt(row, "material") || "").toUpperCase();
+                if (m.includes("SS") || m.includes("STAINLESS")) return "SS";
+                if (m.includes("CS") || m.includes("CARBON")) return "CS";
+                return undefined;
+              })(),
+              schedule: String(cellAt(row, "schedule") || ""),
+              spec: String(cellAt(row, "spec") || ""),
+              rating: String(cellAt(row, "rating") || ""),
+              notes: String(cellAt(row, "notes") || ""),
+              includeInBom: true,
+            });
+          });
+        } catch (err: any) {
+          return res.status(400).json({ message: `Failed to parse BOM file: ${err.message || err}` });
+        }
+      }
+
+      // Parse the Connections Summary export. Looking for a sheet that has
+      // per-size connection totals. The /export-connections endpoint produces
+      // a 'Connections by Size' sheet. Columns vary but typically include:
+      //   Size | Shop BW | Shop SW | Field BW | Field SW | Bolt-Ups | Threaded | Total
+      // We accept any sheet that has a 'Size' column and at least one of the
+      // count columns. Returns a per-size record set we can compare directly.
+      let bomConnRows: any[] = [];
+      let connFilename = "";
+      if (connFile) {
+        connFilename = connFile.originalname;
+        try {
+          const wb = new ExcelJS.Workbook();
+          await wb.xlsx.load(connFile.buffer as any);
+          // Find the right sheet: prefer the one named like "Connections".
+          let ws: ExcelJS.Worksheet | undefined;
+          for (const w of wb.worksheets) {
+            if (/connection/i.test(w.name)) { ws = w; break; }
+          }
+          if (!ws) ws = wb.worksheets[0];
+          if (!ws) throw new Error("No worksheet found in Connections file.");
+          const headerRow = ws.getRow(1);
+          const colIdx: Record<string, number> = {};
+          headerRow.eachCell((cell, colNumber) => {
+            const v = String(cell.value || "").trim().toLowerCase();
+            if (v) colIdx[v] = colNumber;
+          });
+          // Map header variants → our canonical keys.
+          const headerAlias = (key: string): number => {
+            const aliasMap: Record<string, string[]> = {
+              size: ["size", "nps", "diameter"],
+              shopBW: ["shop bw", "shop butt welds", "shop butt weld", "shop bw count"],
+              shopSW: ["shop sw", "shop socket welds", "shop socket weld"],
+              fieldBW: ["field bw", "field butt welds", "field butt weld"],
+              fieldSW: ["field sw", "field socket welds", "field socket weld"],
+              boltUps: ["bolt-ups", "bolt ups", "boltups", "bolt up"],
+              threaded: ["threaded", "threaded connections", "threaded conns"],
+              total: ["total", "total connections"],
+            };
+            for (const alias of (aliasMap[key] || [])) {
+              const idx = colIdx[alias];
+              if (idx) return idx;
+            }
+            return 0;
+          };
+          const sizeCol = headerAlias("size");
+          if (!sizeCol) throw new Error("Connections sheet has no 'Size' column.");
+          ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+            if (rowNumber === 1) return;
+            const sizeRaw = row.getCell(sizeCol).value;
+            const size = sizeRaw === null || sizeRaw === undefined ? "" : String(sizeRaw).trim();
+            if (!size) return;
+            if (/^total/i.test(size)) return;  // skip totals row
+            const readNum = (key: string): number => {
+              const idx = headerAlias(key);
+              if (!idx) return 0;
+              const v = row.getCell(idx).value;
+              if (typeof v === "number") return v;
+              const parsed = parseFloat(String(v || 0));
+              return isNaN(parsed) ? 0 : parsed;
+            };
+            const shopBW = readNum("shopBW");
+            const shopSW = readNum("shopSW");
+            const fieldBW = readNum("fieldBW");
+            const fieldSW = readNum("fieldSW");
+            const boltUps = readNum("boltUps");
+            const threaded = readNum("threaded");
+            const total = shopBW + shopSW + fieldBW + fieldSW + boltUps + threaded;
+            bomConnRows.push({ size, shopBW, shopSW, fieldBW, fieldSW, boltUps, threaded, total });
+          });
+        } catch (err: any) {
+          return res.status(400).json({ message: `Failed to parse Connections file: ${err.message || err}` });
+        }
+      }
+
+      // ============ Re-run reconciliation logic on the uploaded data ============
+      // (mirror the per-line grouping + connection rollup from the regular endpoint)
+      const wpfDefaults: Record<string, number> = {
+        elbow_90: 2, elbow_45: 2, elbow: 2,
+        tee: 3, reducer: 2, cap: 1,
+        coupling: 2, union: 0, flange: 1,
+        fitting: 2,
+      };
+      const keyFor = (it: any) => {
+        const rawCat = (it.category || "other").toLowerCase();
+        const desc = (it.description || "").toLowerCase();
+        let cat = rawCat;
+        if (cat === "elbow_90" || cat === "elbow_45") cat = "elbow";
+        if (!cat || cat === "other") {
+          if (desc.includes("pipe") && !desc.includes("support") && !desc.includes("shoe")) cat = "pipe";
+          else if (desc.includes("elbow") || desc.includes("ell")) cat = "elbow";
+          else if (desc.includes("tee")) cat = "tee";
+          else if (desc.includes("reducer")) cat = "reducer";
+          else if (desc.includes("flange")) cat = "flange";
+          else if (desc.includes("valve")) cat = "valve";
+          else if (desc.includes("cap")) cat = "cap";
+          else if (desc.includes("weld")) cat = "weld";
+          else if (desc.includes("gasket")) cat = "gasket";
+          else if (desc.includes("bolt") || desc.includes("stud")) cat = "bolt";
+        }
+        const size = (it.size || "").trim();
+        const mat = it.itemMaterial || (desc.match(/\b(ss|stainless|cs|carbon)\b/i)?.[1] ? (desc.match(/\b(ss|stainless|cs|carbon)\b/i)![1].toUpperCase().startsWith("S") ? "SS" : "CS") : "");
+        return { key: `${cat}|${size}|${mat}`, cat, size, mat };
+      };
+
+      const groups = new Map<string, any>();
+      const upsert = (k: string, cat: string, size: string, mat: string) => {
+        if (!groups.has(k)) {
+          groups.set(k, { category: cat, size, material: mat, estimateQty: 0, estimateMh: 0, bomQty: 0, connectionCount: 0, connectionType: "" });
+        }
+        return groups.get(k)!;
+      };
+      // Estimate side (same as the regular endpoint)
+      for (const it of (project.items || [])) {
+        if ((it as any).includeInEstimate === false) continue;
+        const isAutoInferred = typeof (it as any).weldAssumption === "string" &&
+          ((it as any).weldAssumption as string).includes("auto-inferred");
+        const isFieldWeld = isAutoInferred && ((it as any).weldAssumption as string).includes("field-weld");
+        const { key, cat, size, mat } = keyFor(it);
+        const effectiveCat = isFieldWeld ? "field-weld" : cat;
+        const effectiveKey = isFieldWeld ? `field-weld|${size}|${mat}` : key;
+        const g = upsert(effectiveKey, effectiveCat, size, mat);
+        g.estimateQty += (it.quantity || 0);
+        g.estimateMh += (it.laborExtension || ((it.laborHoursPerUnit || 0) * (it.quantity || 0)));
+        if (effectiveCat === "pipe") { g.connectionCount += (it.quantity || 0); g.connectionType = "LF"; }
+        else if (effectiveCat === "flange") { g.connectionCount += (it.quantity || 0); g.connectionType = "bolt-ups"; }
+        else if (effectiveCat === "weld" || effectiveCat === "field-weld") { g.connectionCount += (it.quantity || 0); g.connectionType = "welds"; }
+        else if (effectiveCat === "valve") { g.connectionCount += (it.quantity || 0); g.connectionType = "valves"; }
+        else if (effectiveCat === "gasket" || effectiveCat === "bolt") { g.connectionType = "hardware"; }
+        else { const wpf = wpfDefaults[effectiveCat] ?? 0; g.connectionCount += (it.quantity || 0) * wpf; g.connectionType = wpf > 0 ? "welds" : ""; }
+      }
+      // BOM side from uploaded file
+      for (const it of bomItems) {
+        const { key, cat, size, mat } = keyFor(it);
+        const g = upsert(key, cat, size, mat);
+        g.bomQty += (it.quantity || 0);
+      }
+
+      const lineRows = Array.from(groups.values()).sort((a: any, b: any) => {
+        if (a.category !== b.category) return a.category.localeCompare(b.category);
+        const an = parseFloat((a.size || "").replace(/[^\d.]/g, "")) || 0;
+        const bn = parseFloat((b.size || "").replace(/[^\d.]/g, "")) || 0;
+        if (an !== bn) return an - bn;
+        return (a.material || "").localeCompare(b.material || "");
+      }).map((g: any) => ({
+        ...g,
+        matches: (g.bomQty === 0 || g.bomQty === g.estimateQty),
+        delta: g.estimateQty - g.bomQty,
+      }));
+
+      // Connection rollup: estimate side (computed from project items), BOM
+      // side comes directly from the uploaded Connections sheet if provided.
+      // We re-use the same rollupConnections helper inline.
+      const rollupConnections = (sourceItems: any[]): any[] => {
+        const sizeMap: Record<string, any> = {};
+        const ensure = (size: string) => {
+          if (!sizeMap[size]) sizeMap[size] = { size, shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 };
+          return sizeMap[size];
+        };
+        for (const item of sourceItems) {
+          const cat = (item.category || "").toLowerCase();
+          const size = item.size || "N/A";
+          const qty = item.quantity || 0;
+          const desc = (item.description || "").toLowerCase();
+          const section = (item.installLocation || ((item.notes || "").toLowerCase().includes("field") ? "field" : "shop")).toString();
+          const isField = section === "field";
+          const r = ensure(size);
+          const isThreaded = desc.includes("threaded") || desc.includes("screw") || desc.includes("npt");
+          const isSocketWeld = desc.includes("socket weld") || /\bsw\b/i.test(desc);
+          const addBW = (n: number) => { if (isField) r.fieldBW += n; else r.shopBW += n; };
+          const addSW = (n: number) => { if (isField) r.fieldSW += n; else r.shopSW += n; };
+          if (cat === "pipe" && qty >= 40) { r.fieldBW += Math.floor(qty / 40); continue; }
+          if (cat === "pipe") continue;
+          if (cat === "gasket" || cat === "bolt" || desc.includes("gasket") || desc.includes("stud") || desc.includes("bolt")) continue;
+          if (cat === "flange" || desc.includes("flange")) { addBW(qty); r.boltUps += Math.ceil(qty / 2); continue; }
+          if (isThreaded) { r.threaded += qty; continue; }
+          if (cat === "coupling" || cat === "union" || desc.includes("coupling") || desc.includes("nipple")) { addSW(qty * 2); continue; }
+          if (cat === "valve" && isSocketWeld) { addSW(qty * 2); continue; }
+          if (cat === "sockolet" || desc.includes("sockolet")) { addSW(qty * 2); continue; }
+          if (cat === "weldolet" || desc.includes("weldolet") || desc.includes("threadolet")) { addBW(qty); continue; }
+          const map: Record<string, number> = { elbow: 2, elbow_90: 2, elbow_45: 2, tee: 3, reducer: 2, cap: 1 };
+          let welds = map[cat];
+          if (welds === undefined) {
+            if (desc.includes("elbow") || desc.includes("ell")) welds = 2;
+            else if (desc.includes("tee")) welds = 3;
+            else if (desc.includes("reducer") || desc.includes("swage")) welds = 2;
+            else if (desc.includes("cap")) welds = 1;
+          }
+          if (welds && welds > 0) {
+            const count = qty * welds;
+            if (isSocketWeld) addSW(count); else addBW(count);
+          }
+        }
+        return Object.values(sizeMap).map((r: any) => ({ ...r, total: r.shopBW + r.shopSW + r.fieldBW + r.fieldSW + r.boltUps + r.threaded })).sort((a: any, b: any) => (parseFloat(a.size) || 0) - (parseFloat(b.size) || 0));
+      };
+      const estimateConnections = rollupConnections((project.items || []).filter(it => (it as any).includeInEstimate !== false));
+      // BOM connection rows come either from the uploaded Connections sheet
+      // (preferred — it's the authoritative count) OR derived from the BOM file
+      // items as a fallback. Mark which one was used.
+      let connectionSource: "uploaded" | "derived" | "none" = "none";
+      let bomConnections: any[] = [];
+      if (bomConnRows.length > 0) {
+        connectionSource = "uploaded";
+        bomConnections = bomConnRows;
+      } else if (bomItems.length > 0) {
+        connectionSource = "derived";
+        bomConnections = rollupConnections(bomItems);
+      }
+
+      const allSizes = Array.from(new Set([
+        ...estimateConnections.map((r: any) => r.size),
+        ...bomConnections.map((r: any) => r.size),
+      ])).sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0));
+      const connRows = allSizes.map(size => {
+        const e = estimateConnections.find((r: any) => r.size === size) || { size, shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 };
+        const b = bomConnections.find((r: any) => r.size === size) || { size, shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 };
+        return { size, estimate: e, bom: b, matches: (e.total === b.total) || bomConnections.length === 0, delta: e.total - b.total };
+      });
+      const sumBucket = (rows: any[], side: "estimate" | "bom") => rows.reduce((acc: any, r: any) => ({
+        shopBW: acc.shopBW + r[side].shopBW, shopSW: acc.shopSW + r[side].shopSW,
+        fieldBW: acc.fieldBW + r[side].fieldBW, fieldSW: acc.fieldSW + r[side].fieldSW,
+        boltUps: acc.boltUps + r[side].boltUps, threaded: acc.threaded + r[side].threaded,
+        total: acc.total + r[side].total,
+      }), { shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0, total: 0 });
+
+      res.json({
+        rows: lineRows,
+        totals: {
+          estimateQty: lineRows.reduce((s, r) => s + r.estimateQty, 0),
+          bomQty: lineRows.reduce((s, r) => s + r.bomQty, 0),
+          estimateMh: lineRows.reduce((s, r) => s + r.estimateMh, 0),
+        },
+        connections: {
+          rows: connRows,
+          totals: { estimate: sumBucket(connRows, "estimate"), bom: sumBucket(connRows, "bom") },
+          source: connectionSource,
+        },
+        hasBom: bomItems.length > 0 || bomConnRows.length > 0,
+        bomFromFile: !!bomFile,
+        connectionsFromFile: !!connFile,
+        bomFilename,
+        connFilename,
+        bomItemCount: bomItems.length,
+        connRowCount: bomConnRows.length,
+      });
+    }
+  );
+
   // ===== COST DATABASE =====
 
   app.get("/api/cost-database", (_req, res) => {

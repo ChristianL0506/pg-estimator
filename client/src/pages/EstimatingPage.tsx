@@ -2285,15 +2285,89 @@ function DbRow({ entry, onDelete }: { entry: CostDatabaseEntry; onDelete: () => 
 function ReconciliationPanel({ estimateId }: { estimateId: string }) {
   // Local BOM override selector. Empty = use whatever the server resolved.
   const [bomOverride, setBomOverride] = useState<string>("");
+  // File-mode state: when the user drops in XLSX files, we POST them and
+  // store the response here — takes priority over the takeoff-based reconcile.
+  const [fileData, setFileData] = useState<any | null>(null);
+  const [fileError, setFileError] = useState<string>("");
+  const [isUploading, setIsUploading] = useState(false);
+  const [bomFile, setBomFile] = useState<File | null>(null);
+  const [connFile, setConnFile] = useState<File | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
   const queryKey = ["/api/estimates", estimateId, "reconcile", bomOverride];
-  const { data, isLoading } = useQuery<any>({
+  const { data: takeoffData, isLoading } = useQuery<any>({
     queryKey,
     queryFn: async () => {
       const qs = bomOverride ? `?bomTakeoffId=${encodeURIComponent(bomOverride)}` : "";
       const res = await apiRequest("GET", `/api/estimates/${estimateId}/reconcile${qs}`);
       return res.json();
     },
+    enabled: !fileData,  // skip when using uploaded files
   });
+
+  // The active data source: file upload wins if present, else takeoff-derived.
+  const data = fileData || takeoffData;
+
+  // Upload handler — takes whichever files the user has staged.
+  const uploadFiles = async (bom: File | null, conn: File | null) => {
+    if (!bom && !conn) return;
+    setIsUploading(true);
+    setFileError("");
+    try {
+      const formData = new FormData();
+      if (bom) formData.append("bom", bom);
+      if (conn) formData.append("connections", conn);
+      const res = await apiUpload(`/api/estimates/${estimateId}/reconcile-from-files`, formData);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: `Upload failed (${res.status})` }));
+        throw new Error(err.message || "Upload failed");
+      }
+      const result = await res.json();
+      setFileData(result);
+    } catch (err: any) {
+      setFileError(err.message || "Failed to parse uploaded file(s)");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // Auto-upload as soon as a file is set so the user doesn't need a separate
+  // submit click. Re-runs whenever either staged file changes.
+  useEffect(() => {
+    if (bomFile || connFile) {
+      uploadFiles(bomFile, connFile);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bomFile, connFile]);
+
+  // Drag-and-drop handler: route files by filename keyword.
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const dropped = Array.from(e.dataTransfer.files);
+    let nextBom: File | null = bomFile;
+    let nextConn: File | null = connFile;
+    for (const f of dropped) {
+      const lower = f.name.toLowerCase();
+      if (!/\.xlsx?$/i.test(lower)) continue;
+      if (lower.includes("connection")) nextConn = f;
+      else if (lower.includes("bom")) nextBom = f;
+      else {
+        // No keyword match — if user hasn't set BOM yet, default to BOM slot.
+        if (!nextBom) nextBom = f;
+        else if (!nextConn) nextConn = f;
+      }
+    }
+    setBomFile(nextBom);
+    setConnFile(nextConn);
+  };
+
+  const clearFiles = () => {
+    setBomFile(null);
+    setConnFile(null);
+    setFileData(null);
+    setFileError("");
+  };
 
   // Uses the queryClient singleton imported at the top of this file — same
   // pattern as every other mutation here. (useQueryClient() would also work
@@ -2322,44 +2396,91 @@ function ReconciliationPanel({ estimateId }: { estimateId: string }) {
 
   return (
     <div className="space-y-3">
-      {/* BOM picker / link control */}
+      {/* BOM picker / file drop / link control */}
       <Card className="border-card-border">
         <CardHeader className="p-4 pb-2">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="min-w-0">
               <CardTitle className="text-sm">BOM Reconciliation</CardTitle>
               <p className="text-[10px] text-muted-foreground mt-0.5">
-                {isLoading ? "Loading…" :
+                {fileData ? <>Using uploaded file{(fileData.bomFromFile && fileData.connectionsFromFile) ? "s" : ""}: {fileData.bomFromFile && <span className="font-mono">{fileData.bomFilename}</span>}{fileData.bomFromFile && fileData.connectionsFromFile && ", "}{fileData.connectionsFromFile && <span className="font-mono">{fileData.connFilename}</span>}. {lineMismatchCount} line mismatch{lineMismatchCount === 1 ? "" : "es"}, {connMismatchCount} connection mismatch{connMismatchCount === 1 ? "" : "es"}.</> :
+                  isLoading ? "Loading…" :
                   hasBom ? <>Comparing against takeoff <span className="font-mono">{resolvedTakeoffId?.slice(0, 8) || "?"}</span>. {lineMismatchCount} line mismatch{lineMismatchCount === 1 ? "" : "es"}, {connMismatchCount} connection mismatch{connMismatchCount === 1 ? "" : "es"}.</> :
-                  "No source BOM attached. Pick a takeoff to reconcile against."}
+                  "No source BOM. Pick a takeoff below or drop in BOM/Connections Excel files."}
               </p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <select
-                className="text-xs border border-input rounded px-2 py-1 bg-background h-7"
-                value={bomOverride || resolvedTakeoffId || ""}
-                onChange={e => setBomOverride(e.target.value)}
-                data-testid="select-reconcile-bom"
-              >
-                <option value="">— Select BOM —</option>
-                {candidateBoms.map(b => (
-                  <option key={b.id} value={b.id}>{b.name} ({b.itemCount} items)</option>
-                ))}
-              </select>
-              {bomOverride && bomOverride !== sourceTakeoffId && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 text-xs"
-                  onClick={() => linkBomMutation.mutate(bomOverride)}
-                  disabled={linkBomMutation.isPending}
-                  data-testid="btn-link-bom"
-                  title="Save this takeoff as the project's source BOM so it auto-loads next time."
+            {!fileData && (
+              <div className="flex items-center gap-2 shrink-0">
+                <select
+                  className="text-xs border border-input rounded px-2 py-1 bg-background h-7"
+                  value={bomOverride || resolvedTakeoffId || ""}
+                  onChange={e => setBomOverride(e.target.value)}
+                  data-testid="select-reconcile-bom"
                 >
-                  Save as source
-                </Button>
-              )}
+                  <option value="">— Select takeoff —</option>
+                  {candidateBoms.map(b => (
+                    <option key={b.id} value={b.id}>{b.name} ({b.itemCount} items)</option>
+                  ))}
+                </select>
+                {bomOverride && bomOverride !== sourceTakeoffId && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={() => linkBomMutation.mutate(bomOverride)}
+                    disabled={linkBomMutation.isPending}
+                    data-testid="btn-link-bom"
+                    title="Save this takeoff as the project's source BOM so it auto-loads next time."
+                  >
+                    Save as source
+                  </Button>
+                )}
+              </div>
+            )}
+            {fileData && (
+              <Button size="sm" variant="outline" className="h-7 text-xs shrink-0" onClick={clearFiles} data-testid="btn-clear-uploaded-files">
+                Clear uploaded files
+              </Button>
+            )}
+          </div>
+          {/* Drop zone for BOM / Connections Excel exports. Always shown so the
+              user can swap in different files at any time. */}
+          <div
+            onDrop={handleDrop}
+            onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            className={`mt-3 border-2 border-dashed rounded p-3 text-center text-xs transition-colors ${isDragging ? "border-primary bg-primary/5" : "border-border bg-muted/20"}`}
+            data-testid="reconcile-dropzone"
+          >
+            <div className="flex items-center justify-center gap-3 flex-wrap">
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] text-muted-foreground">BOM xlsx:</label>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls"
+                  onChange={e => { const f = e.target.files?.[0] || null; setBomFile(f); }}
+                  className="text-[10px]"
+                  data-testid="input-bom-file"
+                />
+                {bomFile && <span className="text-[10px] font-mono">{bomFile.name}</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] text-muted-foreground">Connections xlsx:</label>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls"
+                  onChange={e => { const f = e.target.files?.[0] || null; setConnFile(f); }}
+                  className="text-[10px]"
+                  data-testid="input-conn-file"
+                />
+                {connFile && <span className="text-[10px] font-mono">{connFile.name}</span>}
+              </div>
+              {isUploading && <span className="text-[10px] text-muted-foreground">Parsing…</span>}
             </div>
+            <p className="text-[10px] text-muted-foreground/70 mt-1">
+              Or drag &amp; drop your <span className="font-mono">- BOM.xlsx</span> and <span className="font-mono">- Connections.xlsx</span> exports anywhere on this card.
+            </p>
+            {fileError && <p className="text-[10px] text-destructive mt-1">{fileError}</p>}
           </div>
         </CardHeader>
       </Card>
