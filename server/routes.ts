@@ -5156,19 +5156,19 @@ function calculateJustinLaborHours(
     return ` \u26A0 used nearest ${match.matchKey}`;
   }
 
-  // --- PIPE: 3 columns — Standard, Rack, and SS ---
-  // Pipe labor is purely per-LF. The factor in Justin's pipe table is the
-  // raw MH/LF for the size/material/install type. No handling adder, no
-  // pipe-joint welds baked in. Field welds for pipe runs > 40' are added
-  // as a SEPARATE inferred row underneath the pipe row (handled outside
-  // this function during takeoff → estimate import).
+  // --- PIPE: 2 columns — Standard and Rack ---
+  // Justin's pipe table is by SIZE only, not material. The install-type
+  // setting at the project level picks the column:
+  //   installType="standard" → standard_mh_per_lf (regardless of CS/SS)
+  //   installType="rack"     → rack_mh_per_lf     (regardless of CS/SS)
+  // There is no SS-specific pipe column. Material affects WELDS (which we
+  // handle separately on inferred pipe-field-weld rows), not pipe LF.
   if (catLower === "pipe" || (descLower.includes("pipe") && !descLower.includes("support") && !descLower.includes("shoe"))) {
     const match = findBestMatch(factors.pipe || {});
     if (match) {
       let mh = 0;
       let col = "";
-      if (material === "SS") { mh = match.val.ss_mh_per_lf || (match.val.standard_mh_per_lf || 0) * 1.8; col = "SS"; }
-      else if (installType === "rack") { mh = match.val.rack_mh_per_lf || 0; col = "rack"; }
+      if (installType === "rack") { mh = match.val.rack_mh_per_lf || 0; col = "rack"; }
       else { mh = match.val.standard_mh_per_lf || 0; col = "standard"; }
       const warn = jSizeWarn(match);
       // The Conn column for pipe shows LF since labor is per-LF. The raw
@@ -5180,7 +5180,7 @@ function calculateJustinLaborHours(
         connectionCount: 0,
         connectionType: "pipe",
         rawFactor: mh,
-        rawFactorLabel: `${mh.toFixed(4)} MH/LF`,
+        rawFactorLabel: `${mh.toFixed(4)} MH/LF (${col})`,
       } as any;
     }
   }
@@ -6811,6 +6811,154 @@ Picou Group Contractors`;
       customMethodId: customMethodId || null,
     } as any);
     res.json(updated);
+  });
+
+  // ===== RECONCILIATION =====
+  // Group estimate items by (category + size + material) and report:
+  //   estimateQty:    sum of qty from current estimate items (skip auto-inferred
+  //                   synthetic rows so the count is item-level)
+  //   bomQty:         sum of qty from the source takeoff items (the raw BOM)
+  //   connectionTotal: implied total physical connections for this group
+  //                   (pipe → LF, elbow → 2 × qty welds, tee → 3 × qty welds,
+  //                    flange → 1 × qty bolt-ups, weld row → qty welds, etc.)
+  // Lets the user verify estimate matches BOM 1:1 and that the connection
+  // totals match what their separate connection summary view shows.
+  app.get("/api/estimates/:id/reconcile", (req, res) => {
+    const project = storage.getEstimateProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Estimate not found" });
+    // Source takeoff items for BOM column. May be null if no source.
+    let bomItems: any[] = [];
+    if (project.sourceTakeoffId) {
+      const takeoff = storage.getTakeoffProject(project.sourceTakeoffId);
+      bomItems = (takeoff?.items || []) as any[];
+    }
+
+    // Connection count per fitting (mirrors welds_per_fitting baked into the
+    // calculator). Used both for the estimate's calculated rows and to
+    // produce the BOM-derived connection totals.
+    const wpfDefaults: Record<string, number> = {
+      elbow_90: 2, elbow_45: 2, elbow: 2,
+      tee: 3, reducer: 2, cap: 1,
+      coupling: 2, union: 0, flange: 1,
+      fitting: 2,
+    };
+
+    // Normalize a row to its grouping key: category + size + material.
+    // We collapse 'elbow_90' / 'elbow_45' / 'elbow' to just 'elbow' for
+    // reconciliation purposes (the user thinks of an elbow as an elbow).
+    const keyFor = (it: any): { key: string; cat: string; size: string; mat: string } => {
+      const rawCat = (it.category || "other").toLowerCase();
+      const desc = (it.description || "").toLowerCase();
+      let cat = rawCat;
+      if (cat === "elbow_90" || cat === "elbow_45") cat = "elbow";
+      // Pipe heuristic for items without a category set
+      if (!cat || cat === "other") {
+        if (desc.includes("pipe") && !desc.includes("support") && !desc.includes("shoe")) cat = "pipe";
+        else if (desc.includes("elbow") || desc.includes("ell")) cat = "elbow";
+        else if (desc.includes("tee")) cat = "tee";
+        else if (desc.includes("reducer")) cat = "reducer";
+        else if (desc.includes("flange")) cat = "flange";
+        else if (desc.includes("valve")) cat = "valve";
+        else if (desc.includes("cap")) cat = "cap";
+        else if (desc.includes("weld")) cat = "weld";
+        else if (desc.includes("gasket")) cat = "gasket";
+        else if (desc.includes("bolt") || desc.includes("stud")) cat = "bolt";
+      }
+      const size = (it.size || "").trim();
+      const mat = (it.itemMaterial || (desc.match(/\b(ss|stainless|cs|carbon)\b/i)?.[1] ? (desc.match(/\b(ss|stainless|cs|carbon)\b/i)![1].toUpperCase().startsWith("S") ? "SS" : "CS") : "")) || "";
+      return { key: `${cat}|${size}|${mat}`, cat, size, mat };
+    };
+
+    const groups = new Map<string, {
+      category: string;
+      size: string;
+      material: string;
+      estimateQty: number;
+      estimateMh: number;
+      bomQty: number;
+      connectionCount: number;
+      connectionType: string;
+    }>();
+
+    const upsert = (k: string, cat: string, size: string, mat: string) => {
+      if (!groups.has(k)) {
+        groups.set(k, { category: cat, size, material: mat, estimateQty: 0, estimateMh: 0, bomQty: 0, connectionCount: 0, connectionType: "" });
+      }
+      return groups.get(k)!;
+    };
+
+    // Estimate side. Skip rows excluded from the estimate by per-line flag.
+    // Auto-inferred field welds DO count toward estimateQty (they are real
+    // physical welds), but we tag them with category 'field-weld' so the user
+    // can see they came from inference rather than the BOM.
+    for (const it of (project.items || [])) {
+      if ((it as any).includeInEstimate === false) continue;
+      const isAutoInferred = typeof (it as any).weldAssumption === "string" &&
+        ((it as any).weldAssumption as string).includes("auto-inferred");
+      const isFieldWeld = isAutoInferred && ((it as any).weldAssumption as string).includes("field-weld");
+      const { key, cat, size, mat } = keyFor(it);
+      const effectiveCat = isFieldWeld ? "field-weld" : cat;
+      const effectiveKey = isFieldWeld ? `field-weld|${size}|${mat}` : key;
+      const g = upsert(effectiveKey, effectiveCat, size, mat);
+      g.estimateQty += (it.quantity || 0);
+      g.estimateMh += (it.laborExtension || ((it.laborHoursPerUnit || 0) * (it.quantity || 0)));
+      // Derive connection count for this group. For pipe it's LF (which equals qty).
+      // For fittings it's qty × welds_per_fitting. For explicit welds it's qty.
+      if (effectiveCat === "pipe") {
+        g.connectionCount += (it.quantity || 0);
+        g.connectionType = "LF";
+      } else if (effectiveCat === "flange") {
+        g.connectionCount += (it.quantity || 0);
+        g.connectionType = "bolt-ups";
+      } else if (effectiveCat === "weld" || effectiveCat === "field-weld") {
+        g.connectionCount += (it.quantity || 0);
+        g.connectionType = "welds";
+      } else if (effectiveCat === "valve") {
+        g.connectionCount += (it.quantity || 0);
+        g.connectionType = "valves";
+      } else if (effectiveCat === "gasket" || effectiveCat === "bolt") {
+        g.connectionCount += 0;
+        g.connectionType = "hardware";
+      } else {
+        const wpf = wpfDefaults[effectiveCat] ?? 0;
+        g.connectionCount += (it.quantity || 0) * wpf;
+        g.connectionType = wpf > 0 ? "welds" : "";
+      }
+    }
+
+    // BOM side. Skip rows the user excluded from BOM/takeoff. Don't add to
+    // connection count from BOM — connections are derived from the estimate's
+    // canonical rows so we don't double-add.
+    for (const it of bomItems) {
+      if ((it as any).includeInBom === false) continue;
+      const { key, cat, size, mat } = keyFor(it);
+      const g = upsert(key, cat, size, mat);
+      g.bomQty += (it.quantity || 0);
+    }
+
+    const rows = Array.from(groups.values()).sort((a, b) => {
+      // Sort by category alpha, then by size (parsed as number when possible).
+      if (a.category !== b.category) return a.category.localeCompare(b.category);
+      const an = parseFloat(a.size.replace(/[^\d.]/g, "")) || 0;
+      const bn = parseFloat(b.size.replace(/[^\d.]/g, "")) || 0;
+      if (an !== bn) return an - bn;
+      return a.material.localeCompare(b.material);
+    }).map(g => ({
+      ...g,
+      matches: (g.bomQty === 0 || g.bomQty === g.estimateQty),
+      delta: g.estimateQty - g.bomQty,
+    }));
+
+    res.json({
+      rows,
+      totals: {
+        estimateQty: rows.reduce((s, r) => s + r.estimateQty, 0),
+        bomQty: rows.reduce((s, r) => s + r.bomQty, 0),
+        estimateMh: rows.reduce((s, r) => s + r.estimateMh, 0),
+      },
+      sourceTakeoffId: project.sourceTakeoffId || null,
+      hasBom: bomItems.length > 0,
+    });
   });
 
   // ===== COST DATABASE =====
