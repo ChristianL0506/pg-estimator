@@ -624,46 +624,100 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <Download size={14} className="mr-1.5" />
                       Export PDF
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
-                      onClick={async () => {
+                    {/* Two pairs of export buttons: full BOM/Connections, plus
+                        revision-only variants that only count items inside a
+                        revision cloud. The revision-only buttons are disabled
+                        if there are no clouded items on this takeoff. */}
+                    {(() => {
+                      const revCount = (selectedProject.items || []).filter((it: any) => it.revisionClouded).length;
+                      const revLabel = selectedProject.revision ? ` (${selectedProject.revision})` : "";
+                      const downloadXlsx = async (url: string, filename: string, toastMsg: string) => {
                         try {
-                          const res = await apiRequest("GET", `/api/takeoff-projects/${selectedProject.id}/export-bom`);
+                          const res = await apiRequest("GET", url);
+                          if (!res.ok) {
+                            const err = await res.json().catch(() => ({ message: "Export failed" }));
+                            throw new Error(err.message || "Export failed");
+                          }
                           const blob = await res.blob();
                           const a = document.createElement("a");
                           a.href = URL.createObjectURL(blob);
-                          a.download = `${selectedProject.name} - BOM.xlsx`;
+                          a.download = filename;
                           a.click();
                           URL.revokeObjectURL(a.href);
-                          toast({ title: "Downloaded BOM workbook" });
-                        } catch { toast({ title: "Export failed", variant: "destructive" }); }
-                      }}
-                    >
-                      <FileSpreadsheet size={14} className="mr-1.5" />
-                      Export BOM
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
-                      onClick={async () => {
-                        try {
-                          const res = await apiRequest("GET", `/api/takeoff-projects/${selectedProject.id}/export-connections`);
-                          const blob = await res.blob();
-                          const a = document.createElement("a");
-                          a.href = URL.createObjectURL(blob);
-                          a.download = `${selectedProject.name} - Connections.xlsx`;
-                          a.click();
-                          URL.revokeObjectURL(a.href);
-                          toast({ title: "Downloaded Connections workbook" });
-                        } catch { toast({ title: "Export failed", variant: "destructive" }); }
-                      }}
-                    >
-                      <FileSpreadsheet size={14} className="mr-1.5" />
-                      Export Connections
-                    </Button>
+                          toast({ title: toastMsg });
+                        } catch (err: any) {
+                          toast({ title: err.message || "Export failed", variant: "destructive" });
+                        }
+                      };
+                      return (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                            onClick={() => downloadXlsx(
+                              `/api/takeoff-projects/${selectedProject.id}/export-bom`,
+                              `${selectedProject.name} - BOM.xlsx`,
+                              "Downloaded BOM workbook"
+                            )}
+                            data-testid="btn-export-bom"
+                          >
+                            <FileSpreadsheet size={14} className="mr-1.5" />
+                            Export BOM
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-900/30"
+                            disabled={revCount === 0}
+                            title={revCount === 0
+                              ? "No revision-clouded items on this takeoff. Mark items inside a cloud first."
+                              : `Export only the ${revCount} revision-clouded item${revCount === 1 ? "" : "s"}${revLabel}.`}
+                            onClick={() => downloadXlsx(
+                              `/api/takeoff-projects/${selectedProject.id}/export-bom?revisionOnly=1`,
+                              `${selectedProject.name} - BOM - Revision Only.xlsx`,
+                              `Downloaded revision-only BOM (${revCount} items)`
+                            )}
+                            data-testid="btn-export-bom-revision"
+                          >
+                            <FileSpreadsheet size={14} className="mr-1.5" />
+                            Export BOM (Rev{revCount > 0 ? `: ${revCount}` : ""})
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
+                            onClick={() => downloadXlsx(
+                              `/api/takeoff-projects/${selectedProject.id}/export-connections`,
+                              `${selectedProject.name} - Connections.xlsx`,
+                              "Downloaded Connections workbook"
+                            )}
+                            data-testid="btn-export-connections"
+                          >
+                            <FileSpreadsheet size={14} className="mr-1.5" />
+                            Export Connections
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-900/30"
+                            disabled={revCount === 0}
+                            title={revCount === 0
+                              ? "No revision-clouded items on this takeoff. Mark items inside a cloud first."
+                              : `Export connection counts only for the ${revCount} revision-clouded item${revCount === 1 ? "" : "s"}${revLabel}.`}
+                            onClick={() => downloadXlsx(
+                              `/api/takeoff-projects/${selectedProject.id}/export-connections?revisionOnly=1`,
+                              `${selectedProject.name} - Connections - Revision Only.xlsx`,
+                              `Downloaded revision-only Connections (${revCount} items)`
+                            )}
+                            data-testid="btn-export-connections-revision"
+                          >
+                            <FileSpreadsheet size={14} className="mr-1.5" />
+                            Export Connections (Rev{revCount > 0 ? `: ${revCount}` : ""})
+                          </Button>
+                        </>
+                      );
+                    })()}
                     <Button
                       variant="outline"
                       size="sm"

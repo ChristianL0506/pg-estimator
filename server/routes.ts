@@ -9415,12 +9415,21 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
   app.get("/api/takeoff-projects/:id/export-bom", async (req, res) => {
     const project = await storage.getTakeoffProject(req.params.id);
     if (!project) return res.status(404).json({ message: "Project not found" });
+    // ?revisionOnly=1 — export ONLY items inside a revision cloud.
+    // Filename and sheet are tagged so the recipient can tell at a glance.
+    const revisionOnly = req.query.revisionOnly === "1" || req.query.revisionOnly === "true";
+    const exportItems = revisionOnly
+      ? (project.items || []).filter((it: any) => !!it.revisionClouded)
+      : (project.items || []);
+    if (revisionOnly && exportItems.length === 0) {
+      return res.status(400).json({ message: "No revision-clouded items on this takeoff. Mark items inside a cloud first or export the full BOM." });
+    }
     try {
       const ExcelJS = await import("exceljs");
       const wb = new ExcelJS.default.Workbook();
 
-      // Sheet 1: BOM
-      const ws = wb.addWorksheet("BOM");
+      // Sheet 1: BOM (or BOM — Revision Only)
+      const ws = wb.addWorksheet(revisionOnly ? "BOM (Revision)" : "BOM");
       ws.columns = [
         { header: "Line #", key: "lineNumber" },
         { header: "Category", key: "category" },
@@ -9436,7 +9445,7 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         { header: "Source Page", key: "sourcePage" },
         { header: "Notes", key: "notes" },
       ];
-      for (const item of project.items) {
+      for (const item of exportItems) {
         ws.addRow({
           lineNumber: item.lineNumber || "",
           category: item.category || "",
@@ -9455,8 +9464,8 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
       }
       applyExcelStyles(ws);
 
-      // Sheet 2: Summary pivot
-      const ws2 = wb.addWorksheet("Summary");
+      // Sheet 2: Summary pivot — same filtered set.
+      const ws2 = wb.addWorksheet(revisionOnly ? "Summary (Revision)" : "Summary");
       ws2.columns = [
         { header: "Category", key: "category" },
         { header: "Size", key: "size" },
@@ -9464,7 +9473,7 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         { header: "Total Qty", key: "totalQty" },
       ];
       const pivot = new Map<string, { count: number; totalQty: number }>();
-      for (const item of project.items) {
+      for (const item of exportItems) {
         const key = `${item.category || "other"}|${item.size || "N/A"}`;
         const existing = pivot.get(key) || { count: 0, totalQty: 0 };
         existing.count++;
@@ -9476,14 +9485,15 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         ws2.addRow({ category, size, count: val.count, totalQty: val.totalQty });
       }
       // Totals row
-      ws2.addRow({ category: "TOTAL", size: "", count: project.items.length, totalQty: project.items.reduce((s, i) => s + (i.quantity ?? 0), 0) });
+      ws2.addRow({ category: "TOTAL", size: "", count: exportItems.length, totalQty: exportItems.reduce((s, i) => s + (i.quantity ?? 0), 0) });
       const totalRow = ws2.getRow(ws2.rowCount);
       totalRow.font = { bold: true };
       applyExcelStyles(ws2);
 
       const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "");
+      const suffix = revisionOnly ? `BOM - Revision Only (${project.revision || "rev"})` : "BOM";
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - BOM.xlsx"`);
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - ${suffix}.xlsx"`);
       await wb.xlsx.write(res);
       res.end();
     } catch (err: any) {
@@ -9530,6 +9540,14 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
   app.get("/api/takeoff-projects/:id/export-connections", async (req, res) => {
     const project = await storage.getTakeoffProject(req.params.id);
     if (!project) return res.status(404).json({ message: "Project not found" });
+    // ?revisionOnly=1 — only count connections on items inside a revision cloud.
+    const revisionOnly = req.query.revisionOnly === "1" || req.query.revisionOnly === "true";
+    const exportItems = revisionOnly
+      ? (project.items || []).filter((it: any) => !!it.revisionClouded)
+      : (project.items || []);
+    if (revisionOnly && exportItems.length === 0) {
+      return res.status(400).json({ message: "No revision-clouded items on this takeoff." });
+    }
     try {
       const ExcelJS = await import("exceljs");
       const wb = new ExcelJS.default.Workbook();
@@ -9547,7 +9565,7 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
         return sizeMap.get(size)!;
       };
 
-      for (const item of project.items) {
+      for (const item of exportItems) {
         // Skip dedup candidates (same-drawing-number duplicates, continuation duplicates).
         // These items are kept in the BOM (UI shows them at 50% opacity) but must not
         // be counted in the connections totals.
@@ -9827,7 +9845,8 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
 
       const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "");
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Connections.xlsx"`);
+      const connSuffix = revisionOnly ? `Connections - Revision Only (${project.revision || "rev"})` : "Connections";
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - ${connSuffix}.xlsx"`);
       await wb.xlsx.write(res);
       res.end();
     } catch (err: any) {
