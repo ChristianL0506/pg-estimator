@@ -5156,16 +5156,12 @@ function calculateJustinLaborHours(
     return ` \u26A0 used nearest ${match.matchKey}`;
   }
 
-  // --- PIPE: 3 columns — Standard, Rack, and SS — + field welds every 40' ---
-  // Pipe comes in 40' sticks. Each crossing of a 40' boundary on a run means
-  // one additional field butt weld. 40' run = 0 extra welds (one stick),
-  // 80' = 1 extra, 83' = 2 extra (three sticks, two joints), 120' = 2 extra.
-  // Formula: extraWelds = LF <= 40 ? 0 : floor((LF - 1) / 40).
-  // We bake the extra-weld MH into the per-LF rate so the caller's
-  // (Hrs/Unit × qty) math gives the right total without changing the return
-  // signature. The Conn column for pipe stays 'pipe' (no joints inherent to
-  // pipe itself) — the extra welds are part of the run cost, not a per-LF
-  // connection count.
+  // --- PIPE: 3 columns — Standard, Rack, and SS ---
+  // Pipe labor is purely per-LF. The factor in Justin's pipe table is the
+  // raw MH/LF for the size/material/install type. No handling adder, no
+  // pipe-joint welds baked in. Field welds for pipe runs > 40' are added
+  // as a SEPARATE inferred row underneath the pipe row (handled outside
+  // this function during takeoff → estimate import).
   if (catLower === "pipe" || (descLower.includes("pipe") && !descLower.includes("support") && !descLower.includes("shoe"))) {
     const match = findBestMatch(factors.pipe || {});
     if (match) {
@@ -5174,29 +5170,18 @@ function calculateJustinLaborHours(
       if (material === "SS") { mh = match.val.ss_mh_per_lf || (match.val.standard_mh_per_lf || 0) * 1.8; col = "SS"; }
       else if (installType === "rack") { mh = match.val.rack_mh_per_lf || 0; col = "rack"; }
       else { mh = match.val.standard_mh_per_lf || 0; col = "standard"; }
-      const totalLF = Math.max(0, Number(item.quantity) || 0);
-      const extraWelds = totalLF <= 40 ? 0 : Math.floor((totalLF - 1) / 40);
-      let weldBasis = "";
-      if (extraWelds > 0 && totalLF > 0) {
-        // Look up the weld factor that matches THIS pipe's size/material/schedule
-        // so the extra field welds are charged at the correct rate.
-        const weldMatch = findBestMatch(factors.welds || {});
-        if (weldMatch) {
-          const schedNorm = normalizeSchedule(schedule);
-          let weldFactor = 0;
-          if (material === "SS") weldFactor = weldMatch.val.ss_mh_per_weld || 0;
-          else if (schedNorm === "80" || schedNorm === "XH") weldFactor = weldMatch.val.sch80_mh_per_weld || 0;
-          else weldFactor = weldMatch.val.std_mh_per_weld || 0;
-          if (weldFactor > 0) {
-            const extraWeldMh = extraWelds * weldFactor;
-            const extraPerLf = extraWeldMh / totalLF;
-            mh += extraPerLf;
-            weldBasis = ` + ${extraWelds} field weld(s) × ${weldFactor.toFixed(2)} MH/weld / ${totalLF} LF = ${extraPerLf.toFixed(4)} added MH/LF`;
-          }
-        }
-      }
       const warn = jSizeWarn(match);
-      return { mh, calcBasis: `Justin: Pipe ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/LF${weldBasis}${warn}`, sizeMatchExact: match.exact, connectionCount: 0, connectionType: "pipe" };
+      // The Conn column for pipe shows LF since labor is per-LF. The raw
+      // factor surfaces as rawFactor for the UI's Factor column.
+      return {
+        mh,
+        calcBasis: `Justin: Pipe ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/LF${warn}`,
+        sizeMatchExact: match.exact,
+        connectionCount: 0,
+        connectionType: "pipe",
+        rawFactor: mh,
+        rawFactorLabel: `${mh.toFixed(4)} MH/LF`,
+      } as any;
     }
   }
 
@@ -5229,10 +5214,17 @@ function calculateJustinLaborHours(
       else if (schedNorm === "80" || schedNorm === "XH") { mh = match.val.sch80_mh_per_weld || 0; col = "SCH80"; }
       else { mh = match.val.std_mh_per_weld || 0; col = "STD"; }
       const warn = jSizeWarn(match);
-      // For explicit weld rows the connection count is the qty (the BOM tells us
-      // how many welds the row represents). Caller multiplies by qty so we just
-      // surface '1 weld' per unit here — the table renderer formats with qty.
-      return { mh, calcBasis: `Justin: Weld ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/weld${warn}`, sizeMatchExact: match.exact, connectionCount: 1, connectionType: "weld" };
+      // Explicit weld row: qty IS the weld count. connectionCount=1 per unit;
+      // rawFactor is the raw per-weld MH so the UI shows it untouched.
+      return {
+        mh,
+        calcBasis: `Justin: Weld ${match.matchKey} (${col}) → ${mh.toFixed(4)} MH/weld${warn}`,
+        sizeMatchExact: match.exact,
+        connectionCount: 1,
+        connectionType: "weld",
+        rawFactor: mh,
+        rawFactorLabel: `${mh.toFixed(4)} MH/weld (${col})`,
+      } as any;
     }
   }
 
@@ -5243,7 +5235,15 @@ function calculateJustinLaborHours(
     if (nps <= 1) { mh = threads['1"']?.mh_per_connection || 0.5; sz = '1"'; }
     else if (nps <= 2) { mh = threads['2"']?.mh_per_connection || 1.3; sz = '2"'; }
     else { mh = threads['4"']?.mh_per_connection || 2.0; sz = '4"'; }
-    return { mh, calcBasis: `Justin: Thread ${sz} → ${mh} MH/connection`, sizeMatchExact: true, connectionCount: 1, connectionType: "thread" };
+    return {
+      mh,
+      calcBasis: `Justin: Thread ${sz} → ${mh} MH/connection`,
+      sizeMatchExact: true,
+      connectionCount: 1,
+      connectionType: "thread",
+      rawFactor: mh,
+      rawFactorLabel: `${mh} MH/thread`,
+    } as any;
   }
 
   // --- BOLT-UP (FLANGE JOINTS) ---
@@ -5268,14 +5268,17 @@ function calculateJustinLaborHours(
     (descLower.includes("stud") && !descLower.includes("bolt-up") && !descLower.includes("bolted"))
   );
   if (isStudBoltItem) {
-    // Stud bolt / nut hardware item — labor is captured on the flange's bolt-up.
+    // Stud bolt / nut hardware — 0 labor. Material cost still rolls up normally
+    // since the user does need to purchase the hardware.
     return {
       mh: 0,
       calcBasis: `Justin: Stud bolt/nut hardware → 0 MH (bolt-up labor is on the flange line)`,
       sizeMatchExact: true,
       connectionCount: 0,
       connectionType: "none",
-    };
+      rawFactor: 0,
+      rawFactorLabel: "— (hardware)",
+    } as any;
   }
   const isFlangeJoint = (
     catLower === "flange" ||
@@ -5292,9 +5295,25 @@ function calculateJustinLaborHours(
       const warn = jSizeWarn(match);
       // Calibration: shop bolt-ups have MH included in shop fab.
       if (item.installLocation === "shop") {
-        return { mh: 0, calcBasis: `Justin: Flange ${match.matchKey} (${rating}#) shop bolt-up (MH included in shop fab)${warn}`, sizeMatchExact: match.exact, connectionCount: 1, connectionType: "bolt-up" };
+        return {
+          mh: 0,
+          calcBasis: `Justin: Flange ${match.matchKey} (${rating}#) shop bolt-up (MH included in shop fab)${warn}`,
+          sizeMatchExact: match.exact,
+          connectionCount: 1,
+          connectionType: "bolt-up",
+          rawFactor: 0,
+          rawFactorLabel: "shop fab",
+        } as any;
       }
-      return { mh, calcBasis: `Justin: Flange bolt-up ${match.matchKey} (${rating}#) → ${mh} MH/set${warn}`, sizeMatchExact: match.exact, connectionCount: 1, connectionType: "bolt-up" };
+      return {
+        mh,
+        calcBasis: `Justin: Flange bolt-up ${match.matchKey} (${rating}#) → ${mh} MH/set${warn}`,
+        sizeMatchExact: match.exact,
+        connectionCount: 1,
+        connectionType: "bolt-up",
+        rawFactor: mh,
+        rawFactorLabel: `${mh} MH/bolt-up (${rating}#)`,
+      } as any;
     }
   }
 
@@ -5305,10 +5324,17 @@ function calculateJustinLaborHours(
       const rating = normalizeRating(item.rating || "150");
       const mh = Number(rating) >= 300 ? (match.val["300_mh_per_valve"] || 0) : (match.val["150_mh_per_valve"] || 0);
       const warn = jSizeWarn(match);
-      // A valve typically has 2 bolt-ups (one on each end) but Justin's table
-      // already encodes the full valve-installation labor per unit, so we mark
-      // the connection count as 2 bolt-ups for transparency without altering MH.
-      return { mh, calcBasis: `Justin: Valve ${match.matchKey} (${rating}#) → ${mh} MH/valve${warn}`, sizeMatchExact: match.exact, connectionCount: 2, connectionType: "bolt-up" };
+      // Justin's valve factor is the full per-valve labor (both ends). We tag
+      // connectionCount=1 (valve) with the raw factor shown as MH/valve.
+      return {
+        mh,
+        calcBasis: `Justin: Valve ${match.matchKey} (${rating}#) → ${mh} MH/valve${warn}`,
+        sizeMatchExact: match.exact,
+        connectionCount: 1,
+        connectionType: "bolt-up",
+        rawFactor: mh,
+        rawFactorLabel: `${mh} MH/valve (${rating}#)`,
+      } as any;
     }
   }
 
@@ -5371,27 +5397,39 @@ function calculateJustinLaborHours(
       else if (catLower === "coupling" || descLower.includes("coupling") || descLower.includes("nipple")) { fittingKey = "coupling"; fittingLabel = "Coupling"; }
       else if (catLower === "union" || descLower.includes("union")) { fittingKey = "union"; fittingLabel = "Union"; }
 
-      // Justin's one-and-only fitting math:
-      //   Hrs/Unit = welds_per_fitting × weld_factor
-      // No handling adder, no bundled/separate option. The factor in the table
-      // already includes handling. Connection count comes from welds_per_fitting
-      // (elbow=2, tee=3, reducer=2, cap=1, coupling=2, union=0 threaded by default).
-      // The fittingWeldMode parameter is ignored for Justin's method.
+      // Justin's fitting math is just: Hrs/Unit = welds_per_fitting × weld_factor.
+      // The weld_factor surfaced as rawFactor is the LITERAL number from the
+      // table (e.g. 4.68 for 3" SS BW) — unchanged by anything else.
       const wpf = (justinData.welds_per_fitting || {}) as Record<string, number>;
       let weldsCount = (wpf[fittingKey] !== undefined ? wpf[fittingKey] : (wpf["fitting"] !== undefined ? wpf["fitting"] : 2));
       const isThreaded = descLower.includes("thread") || descLower.includes("screwed") || descLower.includes("thrd") || descLower.includes(" npt ");
       if (isThreaded) {
-        // Threaded fittings (NPT couplings, nipples) use the threads table.
         const threads = factors.threads || {};
         let threadMh = 0; let threadSz = "";
         if (nps <= 1) { threadMh = threads['1"']?.mh_per_connection || 0.5; threadSz = '1"'; }
         else if (nps <= 2) { threadMh = threads['2"']?.mh_per_connection || 1.3; threadSz = '2"'; }
         else { threadMh = threads['4"']?.mh_per_connection || 2.0; threadSz = '4"'; }
-        return { mh: threadMh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} (threaded) → ${threadMh} MH/connection (${threadSz} thread)`, sizeMatchExact: weldMatch.exact, connectionCount: 1, connectionType: "thread" };
+        return {
+          mh: threadMh,
+          calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} (threaded) → ${threadMh} MH/connection (${threadSz} thread)`,
+          sizeMatchExact: weldMatch.exact,
+          connectionCount: 1,
+          connectionType: "thread",
+          rawFactor: threadMh,
+          rawFactorLabel: `${threadMh} MH/thread`,
+        } as any;
       }
       const mh = weldsCount * baseMH;
       const warn = jSizeWarn(weldMatch);
-      return { mh, calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${weldsCount} weld(s) × ${baseMH.toFixed(2)} MH/weld = ${mh.toFixed(4)} MH/unit${warn}`, sizeMatchExact: weldMatch.exact, connectionCount: weldsCount, connectionType: "weld" };
+      return {
+        mh,
+        calcBasis: `Justin: ${fittingLabel} ${weldMatch.matchKey} → ${weldsCount} weld(s) × ${baseMH.toFixed(2)} MH/weld = ${mh.toFixed(4)} MH/unit${warn}`,
+        sizeMatchExact: weldMatch.exact,
+        connectionCount: weldsCount,
+        connectionType: "weld",
+        rawFactor: baseMH,
+        rawFactorLabel: `${baseMH.toFixed(2)} MH/weld`,
+      } as any;
     }
   }
 
@@ -5556,6 +5594,105 @@ function mapTakeoffToEstimateCategory(discipline: string, category: string): str
 // ============================================================
 // WELD INFERENCE FROM FITTINGS (Feature 2)
 // ============================================================
+
+// For Justin/Industry methods: infer ONE field-weld row per pipe line
+// with quantity > 40 LF. Each 40' boundary crossed = +1 field weld.
+//   40 LF → 0 extra (one stick)
+//   80 LF → 1 extra (two sticks, one joint between them)
+//   83 LF → 2 extra (three sticks, two joints)
+//   120 LF → 2 extra
+//   121 LF → 3 extra
+// The inferred row inherits material/schedule from the parent pipe so the
+// downstream calc picks the right STD/SCH80/SS weld factor column.
+export function inferPipeFieldWelds(items: any[]): any[] {
+  const welds: any[] = [];
+  for (const it of items) {
+    const cat = (it.category || "").toLowerCase();
+    const desc = (it.description || "").toLowerCase();
+    const isPipe = cat === "pipe" || (desc.includes("pipe") && !desc.includes("support") && !desc.includes("shoe"));
+    if (!isPipe) continue;
+    // Skip if this pipe row was itself synthesized by inference (avoid loops).
+    const note = (it.weldAssumption || "").toString();
+    if (note.includes("auto-inferred") || note.includes("field-weld")) continue;
+    const lf = Math.max(0, Number(it.quantity) || 0);
+    if (lf <= 40) continue;
+    const extraWelds = Math.floor((lf - 1) / 40);
+    if (extraWelds <= 0) continue;
+    // Build the inferred field-weld row. Inherit size, material, schedule, spec.
+    const inferredId = (it.id ? `${it.id}-fw` : `pipe-fw-${welds.length + 1}`);
+    const sizeStr = it.size || "";
+    welds.push({
+      id: inferredId,
+      category: "weld",
+      description: `Field weld for ${sizeStr} ${it.itemMaterial || (desc.includes("ss") || desc.includes("stainless") ? "SS" : "CS")} pipe run (${lf} LF → ${extraWelds} extra weld${extraWelds === 1 ? "" : "s"})`,
+      size: sizeStr,
+      quantity: extraWelds,
+      unit: "EA",
+      itemMaterial: it.itemMaterial,
+      itemSchedule: it.itemSchedule,
+      itemElevation: it.itemElevation,
+      itemPipeLocation: it.itemPipeLocation,
+      itemAlloyGroup: it.itemAlloyGroup,
+      spec: it.spec,
+      materialUnitCost: 0,
+      laborUnitCost: 0,
+      laborHoursPerUnit: 0,
+      materialExtension: 0,
+      laborExtension: 0,
+      totalCost: 0,
+      notes: `Auto-inferred field weld for ${lf} LF pipe run (1 weld per 40' boundary)`,
+      weldAssumption: "auto-inferred field-weld for pipe run",
+      revisionClouded: it.revisionClouded,
+      workType: it.workType,
+      includeInBom: false,  // these are labor-only; they're NOT a BOM material item
+      includeInTakeoff: false,
+      includeInEstimate: true,
+    });
+  }
+  return welds;
+}
+
+// Ensure exactly the right pipe-field-weld rows exist. Removes stale ones
+// (from prior imports), removes any auto-inferred FITTING welds (those are
+// never wanted for Justin/Industry), inserts a fresh field-weld row under
+// each pipe line with > 40 LF.
+export function ensurePipeFieldWeldRows(items: any[]): any[] {
+  // Drop any prior auto-inferred rows (both fitting welds and pipe field welds);
+  // we'll regenerate the pipe field welds fresh below.
+  const cleaned = items.filter(it => {
+    const note = (it.weldAssumption || "").toString();
+    return !note.includes("auto-inferred");
+  });
+  const fieldWelds = inferPipeFieldWelds(cleaned);
+  // Interleave: place each field-weld row immediately AFTER its parent pipe
+  // row so the BOM stays visually grouped (pipe → its field welds → next item).
+  if (fieldWelds.length === 0) return cleaned;
+  const result: any[] = [];
+  for (const it of cleaned) {
+    result.push(it);
+    const cat = (it.category || "").toLowerCase();
+    const desc = (it.description || "").toLowerCase();
+    const isPipe = cat === "pipe" || (desc.includes("pipe") && !desc.includes("support") && !desc.includes("shoe"));
+    if (!isPipe) continue;
+    // Match the field-weld row to this pipe row by id-suffix or by size/material.
+    const matchingFw = fieldWelds.find(fw =>
+      (it.id && fw.id === `${it.id}-fw`) ||
+      (fw.size === it.size && (fw.itemMaterial || "CS") === (it.itemMaterial || "CS"))
+    );
+    if (matchingFw) result.push(matchingFw);
+  }
+  return result;
+}
+
+// Helper: is this row an auto-inferred FITTING weld (the kind we want to
+// strip for Justin/Industry since fittings carry their welds inline)?
+export function isAutoInferredFittingWeld(item: any): boolean {
+  const note = (item.weldAssumption || "").toString();
+  if (!note.includes("auto-inferred")) return false;
+  // The new field-weld inferred rows tag themselves with 'field-weld' so we
+  // can distinguish them from the legacy fitting-weld inferred rows.
+  return !note.includes("field-weld");
+}
 
 function inferWeldsFromFittings(items: any[]): any[] {
   const welds: any[] = [];
@@ -6098,9 +6235,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return computeEstimateItem(estimateItem);
     });
 
-    // Feature 2: Weld Count Inference from Fittings
-    const inferredWelds = inferWeldsFromFittings(estimateItems);
-    const allEstimateItems = [...estimateItems, ...inferredWelds].map((item, idx) => ({ ...item, lineNumber: idx + 1 }));
+    // Do NOT auto-infer fitting welds on import. The estimate table is a 1:1
+    // mirror of the BOM. For Justin/Industry, the fitting's labor (and weld
+    // count) is carried inline on the fitting row via welds_per_fitting ×
+    // factor. Pipe-field welds (one extra per 40' boundary on a run > 40 LF)
+    // get added by ensurePipeFieldWeldRows below — those are the only
+    // welds that aren't already implicit in the parent BOM row.
+    const withFieldWelds = ensurePipeFieldWeldRows(estimateItems);
+    const allEstimateItems = withFieldWelds.map((item, idx) => ({ ...item, lineNumber: idx + 1 }));
 
     const estimateProject = storage.createEstimateProject({
       name: `${takeoffProject.name} — Estimate`,
@@ -6176,14 +6318,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return computeEstimateItem(estimateItem);
     });
 
-    // Infer welds (fitting welds + pipe-joint welds for 40' runs) so the
-    // revision estimate matches how Justin actually prices change orders.
-    // The caller can disable this by passing { inferWelds: false } in the body.
-    let finalItems = estimateItems;
-    if (shouldInferWelds) {
-      const inferredWelds = inferWeldsFromFittings(estimateItems);
-      finalItems = [...estimateItems, ...inferredWelds].map((item, idx) => ({ ...item, lineNumber: idx + 1 }));
-    }
+    // Only add pipe-field-weld rows for runs > 40 LF. Fitting welds are
+    // never inferred separately — they're inline on the fitting line via
+    // welds_per_fitting × weld_factor in the Justin/Industry calculators.
+    const withFieldWelds = ensurePipeFieldWeldRows(estimateItems);
+    const finalItems = withFieldWelds.map((item, idx) => ({ ...item, lineNumber: idx + 1 }));
 
     const revLabel = (revisionLabel && typeof revisionLabel === "string") ? revisionLabel.trim() : (takeoffProject.revision || "Revision");
     const estimateProject = storage.createEstimateProject({
@@ -6481,7 +6620,16 @@ Picou Group Contractors`;
     const perDiemPerHour = perDiem / 10; // assuming 10-hr workdays
     const effectiveRate = blendedRate + perDiemPerHour;
 
-    const updatedItems = (project.items || []).map(item => {
+    // For Justin/Industry: reconcile the line set first — strip any stale
+    // auto-inferred fitting weld rows and (re)create pipe-field-weld rows for
+    // any pipe line with > 40 LF. This guarantees the estimate is BOM-faithful
+    // with the only synthetic rows being pipe-field welds.
+    const justinOrIndustryMethod = method === "justin" || method === "industry";
+    const baseItems = justinOrIndustryMethod
+      ? ensurePipeFieldWeldRows(project.items || [])
+      : (project.items || []);
+
+    const updatedItems = baseItems.map(item => {
       // Excluded rows are pass-through — keep whatever labor/cost they had,
       // since they don't contribute to totals anyway and re-running the
       // calculator on them would overwrite values the user might want to
@@ -6489,21 +6637,17 @@ Picou Group Contractors`;
       if ((item as any).includeInEstimate === false) {
         return item;
       }
-      // Justin and Industry methods always bake welds into the fitting line
-      // (welds_per_fitting × weld_factor). Any auto-inferred weld rows in the
-      // BOM would double-count, so zero them out and flag the basis. The user
-      // can also Strip them via the toolbar button — this is the safety net.
-      // Bill's method still respects the legacy fittingWeldMode setting since
-      // Bill's worksheet may genuinely use bundled multipliers.
-      const isAutoInferred = typeof (item as any).weldAssumption === "string" &&
-        ((item as any).weldAssumption as string).includes("auto-inferred");
-      const justinOrIndustry = method === "justin" || method === "industry";
-      if (isAutoInferred && (justinOrIndustry || fittingWeldMode === "auto-welds")) {
+      // For Justin/Industry, ensurePipeFieldWeldRows already stripped any
+      // auto-inferred FITTING weld rows (only pipe field-weld rows remain).
+      // Bill's method may still have stale fitting-weld rows from a prior
+      // import; zero those out here if the user has chosen auto-welds mode.
+      const bill_isAutoInferredFitting = method === "bill" && isAutoInferredFittingWeld(item);
+      if (bill_isAutoInferredFitting && fittingWeldMode === "auto-welds") {
         return computeEstimateItem({
           ...item,
           laborHoursPerUnit: 0,
           laborUnitCost: 0,
-          calculationBasis: `${justinOrIndustry ? method.charAt(0).toUpperCase() + method.slice(1) + "’s method" : "Auto-welds mode"}: this auto-inferred weld is already counted on the parent fitting line. 0 MH to avoid double-count. (Click 'Strip Auto-Inferred Welds' to remove these rows entirely.)`,
+          calculationBasis: `Auto-welds mode: this auto-inferred weld is already counted on the parent fitting line. 0 MH to avoid double-count.`,
           sizeMatchExact: true,
           connectionCount: 0,
           connectionType: "none",
@@ -6538,6 +6682,8 @@ Picou Group Contractors`;
       // Connection metadata captured from whichever calculator branch runs.
       let connectionCount: number | undefined;
       let connectionType: string | undefined;
+      let rawFactor: number | undefined;
+      let rawFactorLabel: string | undefined;
 
       if (method === "bill") {
         const result = calculateBillLaborHours(item, itemMat, itemSched, estimatorData.bill, itemPipeLoc, itemElev, itemAlloy, fittingWeldMode);
@@ -6547,6 +6693,8 @@ Picou Group Contractors`;
         sizeMatchExact = result.sizeMatchExact;
         connectionCount = (result as any).connectionCount;
         connectionType = (result as any).connectionType;
+        rawFactor = (result as any).rawFactor;
+        rawFactorLabel = (result as any).rawFactorLabel;
         if (result.materialCostSource) materialCostSource = result.materialCostSource;
         // Bill's EI method doesn't have rack-specific rates, so apply rackFactor for rack work
         if (lineWorkType === "rack" && rackFactor > 1) {
@@ -6563,6 +6711,8 @@ Picou Group Contractors`;
         sizeMatchExact = iResult.sizeMatchExact;
         connectionCount = (iResult as any).connectionCount;
         connectionType = (iResult as any).connectionType;
+        rawFactor = (iResult as any).rawFactor;
+        rawFactorLabel = (iResult as any).rawFactorLabel;
         const dataDefault = estimatorData.industry?.cost_params?.contingency_factor ?? 0.10;
         const override = (project as any).contingencyOverride;
         const contingencyFactor = (typeof override === "number" && !Number.isNaN(override)) ? (override / 100) : dataDefault;
@@ -6576,6 +6726,8 @@ Picou Group Contractors`;
         sizeMatchExact = jResult.sizeMatchExact;
         connectionCount = (jResult as any).connectionCount;
         connectionType = (jResult as any).connectionType;
+        rawFactor = (jResult as any).rawFactor;
+        rawFactorLabel = (jResult as any).rawFactorLabel;
         // Contingency: project's contingencyOverride takes priority over Justin's
         // data-file default (15%). User-entered as a percent.
         const dataDefault = estimatorData.justin?.cost_params?.contingency_factor || 0.15;
@@ -6598,6 +6750,8 @@ Picou Group Contractors`;
         sizeMatchExact,
         connectionCount,
         connectionType,
+        rawFactor,
+        rawFactorLabel,
       };
       // If Bill's method provided a material cost adjust and item has no material cost set, apply it
       if (method === "bill" && materialUnitCostAdjust > 0 && (item.materialUnitCost === 0 || item.materialUnitCost === undefined)) {

@@ -1203,27 +1203,36 @@ export default function EstimatingPage() {
                         <FileSpreadsheet size={13} className="mr-1.5" />
                         Export Industry (Page)
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => inferWeldsMutation.mutate(p.id)}
-                        disabled={inferWeldsMutation.isPending || p.items.length === 0}
-                        data-testid="btn-infer-welds"
-                      >
-                        <Wand2 size={13} className="mr-1.5" />
-                        {inferWeldsMutation.isPending ? "Inferring..." : "Infer Welds from Fittings"}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => stripInferredWeldsMutation.mutate(p.id)}
-                        disabled={stripInferredWeldsMutation.isPending || p.items.length === 0}
-                        data-testid="btn-strip-inferred-welds"
-                        title="Remove every row tagged 'auto-inferred' \u2014 useful if you're in Bundled mode and the BOM has been over-counted"
-                      >
-                        <Trash2 size={13} className="mr-1.5" />
-                        {stripInferredWeldsMutation.isPending ? "Stripping..." : "Strip Auto-Inferred Welds"}
-                      </Button>
+                      {/* Infer / Strip weld buttons are only relevant for Bill's method.
+                          Justin and Industry handle weld math inline on the fitting row
+                          (welds_per_fitting × weld_factor), so there's nothing for the
+                          user to manually infer or strip. Pipe-field welds are auto-added
+                          by ensurePipeFieldWeldRows on import / recalculate. */}
+                      {p.estimateMethod !== "justin" && p.estimateMethod !== "industry" && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => inferWeldsMutation.mutate(p.id)}
+                            disabled={inferWeldsMutation.isPending || p.items.length === 0}
+                            data-testid="btn-infer-welds"
+                          >
+                            <Wand2 size={13} className="mr-1.5" />
+                            {inferWeldsMutation.isPending ? "Inferring..." : "Infer Welds from Fittings"}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => stripInferredWeldsMutation.mutate(p.id)}
+                            disabled={stripInferredWeldsMutation.isPending || p.items.length === 0}
+                            data-testid="btn-strip-inferred-welds"
+                            title="Remove every row tagged 'auto-inferred' \u2014 useful if you're in Bundled mode and the BOM has been over-counted"
+                          >
+                            <Trash2 size={13} className="mr-1.5" />
+                            {stripInferredWeldsMutation.isPending ? "Stripping..." : "Strip Auto-Inferred Welds"}
+                          </Button>
+                        </>
+                      )}
                       <Button
                         variant="outline"
                         size="sm"
@@ -1364,10 +1373,12 @@ export default function EstimatingPage() {
                               { field: "materialUnitCost" as SortField, label: "Mat $/Unit", cls: "text-right w-20" },
                               { field: "laborUnitCost" as SortField, label: "Labor $/Unit", cls: "text-right w-20" },
                               { field: "laborHoursPerUnit" as SortField, label: "Hrs/Unit", cls: "text-right w-16" },
-                              // Connection count + type column. Surfaces the
-                              // physical connection driving the MH math, e.g.
-                              // '2 welds' for an elbow or '1 bolt-up' for a flange.
-                              { field: null as any, label: "Conn", cls: "text-left w-24" },
+                              // Connection count column — shows the qty × per-unit math:
+                              // pipe rows show 'N LF', fitting rows '2 welds', flange '1 bolt-up'.
+                              { field: null as any, label: "Count", cls: "text-left w-24" },
+                              // Factor column — raw, unchanged number from the method's table.
+                              // For a 3" SS elbow this is 4.68. Never multiplied by anything.
+                              { field: null as any, label: "Factor", cls: "text-left w-28" },
                               { field: "materialExtension" as SortField, label: "Mat Total", cls: "text-right w-24" },
                               { field: "laborExtension" as SortField, label: "Labor Total", cls: "text-right w-24" },
                               { field: "totalCost" as SortField, label: "Total", cls: "text-right w-24" },
@@ -1391,13 +1402,13 @@ export default function EstimatingPage() {
                         <tbody>
                           {p.items.length === 0 ? (
                             <tr>
-                              <td colSpan={15} className="text-center py-8 text-muted-foreground">
+                              <td colSpan={16} className="text-center py-8 text-muted-foreground">
                                 No items. Use quick entry above or import from takeoff.
                               </td>
                             </tr>
                           ) : displayItems.length === 0 ? (
                             <tr>
-                              <td colSpan={15} className="text-center py-6 text-muted-foreground">
+                              <td colSpan={16} className="text-center py-6 text-muted-foreground">
                                 No items match filter.
                               </td>
                             </tr>
@@ -1501,50 +1512,56 @@ export default function EstimatingPage() {
                                     )}
                                   </td>
                                 ))}
-                                {/* Connection count + type for the WHOLE line, not per-unit.
-                                    Shows total connections this line represents:
-                                    - Fitting line with qty=4 elbows → '8 welds' (4 elbows × 2 welds each)
-                                    - Fitting line with qty=2 tees   → '6 welds' (2 tees × 3 welds each)
-                                    - Flange line with qty=6 flanges → '6 bolt-ups'
-                                    - Explicit weld row qty=12       → '12 welds' (each unit IS one weld)
-                                    - Pipe row                       → 'pipe'
-                                    - Hardware / supports / no joint → '—'
-                                    For fittings the per-unit count includes both welds AND threads. We
-                                    show '4 elbows × 2 = 8 welds' in the tooltip for transparency. */}
+                                {/* Count column — the connection count for this line.
+                                    Pipe rows show 'N LF'. Fitting rows show 'qty × N welds = total'.
+                                    Flanges show 'qty bolt-ups'. Threaded shows 'qty threads'.
+                                    Hardware (stud bolts, gaskets, supports) shows '—'. */}
                                 <td className="px-2 py-1.5 text-[11px] text-muted-foreground">
                                   {(() => {
                                     const cntPerUnit = (item as any).connectionCount;
                                     const typ = (item as any).connectionType as string | undefined;
                                     const calcBasis = (item as any).calculationBasis || "";
+                                    const qty = item.quantity || 0;
+                                    // Pipe → show LF
+                                    if (typ === "pipe") {
+                                      return <span className="font-mono" title={calcBasis}>{qty.toLocaleString()} LF</span>;
+                                    }
                                     if (typ === undefined || cntPerUnit === undefined) {
                                       return <span className="text-muted-foreground/40" title={calcBasis}>—</span>;
                                     }
                                     if (typ === "none" || cntPerUnit === 0) {
-                                      return <span className="text-muted-foreground/40" title={calcBasis}>{typ === "pipe" ? "pipe" : "—"}</span>;
+                                      return <span className="text-muted-foreground/40" title={calcBasis}>—</span>;
                                     }
-                                    // For explicit weld rows, the line's qty IS already the total
-                                    // weld count — don't multiply again. For everything else (fittings,
-                                    // flanges, threads), multiply qty × connections-per-unit.
+                                    // Explicit weld rows: qty IS the count. Everything else: qty × per-unit.
                                     const cat = (item.category || "").toLowerCase();
                                     const desc = (item.description || "").toLowerCase();
                                     const isExplicitWeldRow = cat === "weld" || desc.startsWith("bw ") || desc.includes(" bw ") || desc.startsWith("fw ") || desc.includes(" fw ") || desc.startsWith("sw ") || desc.includes(" sw ");
-                                    const totalCount = isExplicitWeldRow ? item.quantity : (item.quantity * cntPerUnit);
+                                    const totalCount = isExplicitWeldRow ? qty : (qty * cntPerUnit);
                                     const plural = totalCount !== 1;
                                     const label = typ === "weld" ? (plural ? "welds" : "weld")
                                       : typ === "bolt-up" ? (plural ? "bolt-ups" : "bolt-up")
                                       : typ === "thread" ? (plural ? "threads" : "thread")
                                       : typ === "socket-weld" ? (plural ? "SWs" : "SW")
                                       : typ;
-                                    // Friendly tooltip: show the multiplication for fittings/flanges so
-                                    // the user can verify '4 elbows × 2 welds/elbow = 8 welds'.
                                     const tooltipDetail = !isExplicitWeldRow && cntPerUnit > 0
-                                      ? `${item.quantity} × ${cntPerUnit} ${cntPerUnit === 1 ? label.replace(/s$/, "") : label}/unit = ${totalCount} ${label}\n\n${calcBasis}`
+                                      ? `${qty} × ${cntPerUnit} ${cntPerUnit === 1 ? label.replace(/s$/, "") : label}/unit = ${totalCount} ${label}\n\n${calcBasis}`
                                       : calcBasis;
                                     return (
                                       <span className="font-mono" title={tooltipDetail}>
                                         {Number.isFinite(totalCount) ? totalCount.toLocaleString() : totalCount} {label}
                                       </span>
                                     );
+                                  })()}
+                                </td>
+                                {/* Factor column — the LITERAL number from the method's table.
+                                    For Justin a 3" SS BW is 4.68 MH/weld. Never adjusted. */}
+                                <td className="px-2 py-1.5 text-[11px] text-muted-foreground font-mono" title={(item as any).calculationBasis || ""}>
+                                  {(() => {
+                                    const lbl = (item as any).rawFactorLabel as string | undefined;
+                                    const rf = (item as any).rawFactor as number | undefined;
+                                    if (lbl) return <span>{lbl}</span>;
+                                    if (rf != null) return <span>{rf.toFixed(3)}</span>;
+                                    return <span className="text-muted-foreground/40">—</span>;
                                   })()}
                                 </td>
                                 <td className="px-2 py-1.5 text-right font-mono text-blue-600 dark:text-blue-400">{fmt$(item.materialExtension || 0)}</td>

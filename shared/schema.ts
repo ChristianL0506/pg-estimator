@@ -110,6 +110,11 @@ export const estimateItemSchema = z.object({
   //                                                          (e.g. pipe support, gasket)
   connectionCount: z.number().optional(),
   connectionType: z.enum(["weld", "bolt-up", "thread", "socket-weld", "pipe", "none"]).optional(),
+  // Raw factor from the method's table (e.g. 4.68 MH/weld for 3" SS BW).
+  // Surfaced in the UI's Factor column so the user can see the literal number
+  // that drives the row's MH — unchanged by quantity, contingency, or anything.
+  rawFactor: z.number().optional(),
+  rawFactorLabel: z.string().optional(),
   // Per-line work type: "rack" work at elevation takes more labor
   workType: z.enum(["standard", "rack"]).optional(),
   // Whether item was within a revision cloud in the source takeoff

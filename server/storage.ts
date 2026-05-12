@@ -417,6 +417,13 @@ try {
 try {
   db.exec(`ALTER TABLE estimate_items ADD COLUMN connectionType TEXT`);
 } catch (e: any) { /* exists */ }
+// Raw factor from the method's table (e.g. 4.68 MH/weld).
+try {
+  db.exec(`ALTER TABLE estimate_items ADD COLUMN rawFactor REAL`);
+} catch (e: any) { /* exists */ }
+try {
+  db.exec(`ALTER TABLE estimate_items ADD COLUMN rawFactorLabel TEXT`);
+} catch (e: any) { /* exists */ }
 
 // Per-line scope flags on takeoff and estimate items. Default to 1 (included)
 // so legacy rows behave as before. The estimator can flip these off per row
@@ -717,6 +724,8 @@ function rowToEstimateItem(row: any): EstimateItem {
     weldAssumption: row.weldAssumption || undefined,
     connectionCount: row.connectionCount != null ? Number(row.connectionCount) : undefined,
     connectionType: row.connectionType || undefined,
+    rawFactor: row.rawFactor != null ? Number(row.rawFactor) : undefined,
+    rawFactorLabel: row.rawFactorLabel || undefined,
     workType: row.workType || undefined,
     revisionClouded: row.revisionClouded === 1 || row.revisionClouded === true,
     includeInBom: row.includeInBom !== 0,
@@ -778,7 +787,7 @@ const stmts = {
   deleteTakeoffItems: db.prepare(`DELETE FROM takeoff_items WHERE projectId = ?`),
 
   insertEstimateProject: db.prepare(`INSERT INTO estimate_projects (id, name, projectNumber, client, location, sourceTakeoffId, createdAt, laborRate, overtimeRate, doubleTimeRate, perDiem, overtimePercent, doubleTimePercent, estimateMethod, fittingWeldMode, markups_json, scope_adders_json, contingencyOverride) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  insertEstimateItem: db.prepare(`INSERT INTO estimate_items (id, projectId, lineNumber, category, description, size, quantity, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit, materialExtension, laborExtension, totalCost, notes, fromDatabase, itemMaterial, itemSchedule, itemElevation, itemPipeLocation, itemAlloyGroup, calculationBasis, sizeMatchExact, materialCostSource, workType, revisionClouded, weldAssumption, includeInBom, includeInTakeoff, includeInEstimate, connectionCount, connectionType) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insertEstimateItem: db.prepare(`INSERT INTO estimate_items (id, projectId, lineNumber, category, description, size, quantity, unit, materialUnitCost, laborUnitCost, laborHoursPerUnit, materialExtension, laborExtension, totalCost, notes, fromDatabase, itemMaterial, itemSchedule, itemElevation, itemPipeLocation, itemAlloyGroup, calculationBasis, sizeMatchExact, materialCostSource, workType, revisionClouded, weldAssumption, includeInBom, includeInTakeoff, includeInEstimate, connectionCount, connectionType, rawFactor, rawFactorLabel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getEstimateProjects: db.prepare(`SELECT * FROM estimate_projects ORDER BY createdAt DESC`),
   getEstimateProject: db.prepare(`SELECT * FROM estimate_projects WHERE id = ?`),
   getEstimateProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM estimate_items GROUP BY projectId`),
@@ -911,7 +920,9 @@ const insertEstimateItemsTransaction = db.transaction((projectId: string, items:
       (item as any).includeInTakeoff === false ? 0 : 1,
       (item as any).includeInEstimate === false ? 0 : 1,
       (item as any).connectionCount != null ? Number((item as any).connectionCount) : null,
-      (item as any).connectionType || null
+      (item as any).connectionType || null,
+      (item as any).rawFactor != null ? Number((item as any).rawFactor) : null,
+      (item as any).rawFactorLabel || null
     );
   }
 });
