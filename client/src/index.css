@@ -298,78 +298,113 @@
 /* ============================================================
    PRINT STYLESHEET
    ============================================================
-   When the user clicks "Print Page" on takeoff/estimate, this
-   takes over so the printed PDF is clean and readable:
-   - Hide the app shell (sidebar, header, toolbars, buttons)
-   - Force light theme regardless of dark-mode setting
+   Goal: print the page EXACTLY as the user sees it, just without
+   the app sidebar / nav / action buttons. Page-native colors,
+   cards, badges, status pills, and alternating row stripes all
+   stay intact — we DO NOT blanket-white-out backgrounds.
+
+   - Hide sidebar, nav, action buttons, tab triggers (but reveal
+     all tab panels so every tab prints)
+   - Reveal scroll containers and max-height clips so every row
+     prints, not just what was on-screen
    - Allow tables to break across pages without splitting rows
-   - Keep section headers with their tables
-   - Show tab content for printable areas even if collapsed
-   Anything with data-print="hide" is dropped; data-print="block"
-   forces visibility.
+   - Page-break hints so cards and section headers stay together
+   - Anything tagged data-print="hide" or .no-print is dropped
    ============================================================ */
 @media print {
-  /* Force light theme on the printed page even if user is in dark mode */
-  html, body, [data-theme] {
+  /* Letter, tighter margins so more content fits */
+  @page { margin: 0.4in; size: letter; }
+
+  /* Preserve the page's colors/backgrounds (badges, headers, stripes)
+     so the print looks like the screen, not a black-and-white text dump. */
+  html, body {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
     background: white !important;
-    color: black !important;
   }
-  body * {
-    color: black !important;
-    background: white !important;
-    border-color: #ccc !important;
-    box-shadow: none !important;
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
-  /* Hide app chrome by default */
+  /* Hide the app chrome: sidebar, top bar, footer, chat assistant,
+     command palette, and anything explicitly tagged. */
   nav, aside, header[role="banner"], footer,
-  [role="toolbar"],
   [data-print="hide"],
   .no-print {
     display: none !important;
   }
 
-  /* Make sure buttons/select dropdowns don't appear; keep their text */
-  button, select, input[type="file"], input[type="checkbox"], input[type="radio"] {
+  /* Hide buttons / tab triggers — they have no meaning on paper.
+     We DON'T blanket-hide every input because some tables show
+     calculated values inside read-only inputs. */
+  button, select,
+  input[type="file"],
+  input[type="submit"],
+  input[type="reset"],
+  [role="tablist"], [role="tab"] {
     display: none !important;
   }
-  /* But allow inputs inside tables (e.g. read-only display) to remain */
-  table input { display: inline-block !important; border: none !important; padding: 0 !important; }
-
-  /* Tables: prefer not breaking inside rows; keep headers visible on each page */
-  table { page-break-inside: auto; width: 100% !important; font-size: 9pt; }
-  tr { page-break-inside: avoid; page-break-after: auto; }
-  thead { display: table-header-group; }
-  tfoot { display: table-footer-group; }
-
-  /* Keep cards together where possible; section title stays with content */
-  .print-section, [data-print-section] {
-    page-break-inside: avoid;
-    margin-bottom: 12pt;
-  }
-  h1, h2, h3, h4 {
-    page-break-after: avoid;
+  /* Read-only inputs inside tables print as plain text */
+  table input, table textarea {
+    display: inline-block !important;
+    border: none !important;
+    padding: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    -webkit-appearance: none !important;
   }
 
-  /* Reveal scroll containers so all content prints */
+  /* Sidebar is a flex sibling of main; once it's gone, let main
+     fill the page. */
+  main, [role="main"] {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Reveal scroll containers and max-height clips so the FULL
+     content prints — not just the visible viewport. */
   [class*="overflow-y-auto"],
   [class*="overflow-x-auto"],
+  [class*="overflow-auto"],
   [class*="max-h-"] {
     overflow: visible !important;
     max-height: none !important;
   }
 
-  /* Anything explicitly marked as "block on print" must show */
+  /* Force every tab panel visible — even Radix-hidden ones — so
+     BOM, Connections, and Pivot Summary all print at once. */
+  [role="tabpanel"],
+  [role="tabpanel"][hidden],
+  [data-state="inactive"][role="tabpanel"] {
+    display: block !important;
+    visibility: visible !important;
+  }
+
+  /* Table behavior: repeat header on each page, don't split rows. */
+  table { page-break-inside: auto; width: 100% !important; }
+  tr { page-break-inside: avoid; page-break-after: auto; }
+  thead { display: table-header-group; }
+  tfoot { display: table-footer-group; }
+
+  /* Cards and sections try to stay together. */
+  .print-section, [data-print-section] {
+    page-break-inside: avoid;
+    margin-bottom: 10pt;
+  }
+  h1, h2, h3, h4 { page-break-after: avoid; }
+
+  /* Explicit overrides. */
   [data-print="block"] { display: block !important; }
   [data-print="show"] { display: revert !important; }
 
-  /* Margins: standard letter */
-  @page { margin: 0.5in; size: letter; }
-
-  /* Avoid printing huge background images */
+  /* Avoid runaway image sizes. */
   img { max-width: 100% !important; }
 
-  /* Force tab panels visible so all content prints */
-  [role="tabpanel"] { display: block !important; }
-  [role="tabpanel"][hidden] { display: block !important; }
+  /* Slightly tighter font sizing so dense tables fit. */
+  body { font-size: 10pt; }
+  table { font-size: 9pt; }
 }

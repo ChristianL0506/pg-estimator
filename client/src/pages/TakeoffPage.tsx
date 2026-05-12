@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
-import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon, FolderOpen, FolderPlus, Folder, Plus, MoreVertical, FileSpreadsheet } from "lucide-react";
+import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon, FolderOpen, FolderPlus, Folder, Plus, MoreVertical, FileSpreadsheet, Printer } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +21,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -592,7 +594,7 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <span>{selectedProject.items.length} items</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0 flex-wrap md:flex-nowrap">
+                  <div className="flex items-center gap-2 shrink-0 flex-wrap md:flex-nowrap no-print" data-print="hide">
                     {availablePages.length > 0 && (
                       <Button
                         variant="outline"
@@ -615,61 +617,27 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <Plus size={14} className="mr-1.5" />
                       Add Row
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleExportPdf}
-                      data-testid="btn-export-pdf"
-                      title="Discipline-specific BOM PDF (Mechanical / Structural / Civil layout)"
-                    >
-                      <Download size={14} className="mr-1.5" />
-                      Export PDF
-                    </Button>
-                    {/* Print Page — uses the browser's native print dialog with
-                        the @media print stylesheet in index.css. Captures every
-                        section currently rendered: BOM table, summary pivot,
-                        connections summary. The user can save as PDF from the
-                        print dialog or send to a printer. */}
+                    {/* Print Page — visible top-level button. Uses the browser's
+                        native print dialog with the @media print stylesheet in
+                        index.css. Captures every section currently rendered:
+                        BOM, summary pivot, connections summary. */}
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => window.print()}
                       data-testid="btn-print-page"
-                      title="Open the browser print dialog. Save as PDF or print directly. Captures every section on the page."
+                      title="Open the browser print dialog. Save as PDF or print directly. Captures every section on the page exactly as you see it."
                     >
-                      <Download size={14} className="mr-1.5" />
+                      <Printer size={14} className="mr-1.5" />
                       Print Page
                     </Button>
-                    {/* Report PDF — server-generated formatted report. */}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-violet-700 border-violet-300 hover:bg-violet-50 dark:text-violet-400 dark:border-violet-700 dark:hover:bg-violet-900/30"
-                      onClick={async () => {
-                        try {
-                          const res = await apiRequest("GET", `/api/takeoff-projects/${selectedProject.id}/report-pdf`);
-                          if (!res.ok) throw new Error("Report generation failed");
-                          const blob = await res.blob();
-                          const a = document.createElement("a");
-                          a.href = URL.createObjectURL(blob);
-                          a.download = `${selectedProject.name} - Takeoff Report.pdf`;
-                          a.click();
-                          URL.revokeObjectURL(a.href);
-                          toast({ title: "Downloaded takeoff report" });
-                        } catch (err: any) {
-                          toast({ title: err.message || "Report failed", variant: "destructive" });
-                        }
-                      }}
-                      data-testid="btn-report-pdf"
-                      title="Generate a polished, branded PDF report with BOM, pivot summary, and connection counts. Good for sharing with supervisors or clients."
-                    >
-                      <FileSpreadsheet size={14} className="mr-1.5" />
-                      Report PDF
-                    </Button>
-                    {/* Two pairs of export buttons: full BOM/Connections, plus
-                        revision-only variants that only count items inside a
-                        revision cloud. The revision-only buttons are disabled
-                        if there are no clouded items on this takeoff. */}
+
+                    {/* All exports grouped into a single dropdown to keep the
+                        toolbar tidy. Includes:
+                          • BOM PDF (discipline-specific Mechanical / Structural / Civil)
+                          • BOM Excel (full + revision-only)
+                          • Connections Excel (full + revision-only)
+                        Revision variants disable when no items are clouded. */}
                     {(() => {
                       const revCount = (selectedProject.items || []).filter((it: any) => it.revisionClouded).length;
                       const revLabel = selectedProject.revision ? ` (${selectedProject.revision})` : "";
@@ -692,72 +660,69 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                         }
                       };
                       return (
-                        <>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
-                            onClick={() => downloadXlsx(
-                              `/api/takeoff-projects/${selectedProject.id}/export-bom`,
-                              `${selectedProject.name} - BOM.xlsx`,
-                              "Downloaded BOM workbook"
-                            )}
-                            data-testid="btn-export-bom"
-                          >
-                            <FileSpreadsheet size={14} className="mr-1.5" />
-                            Export BOM
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-900/30"
-                            disabled={revCount === 0}
-                            title={revCount === 0
-                              ? "No revision-clouded items on this takeoff. Mark items inside a cloud first."
-                              : `Export only the ${revCount} revision-clouded item${revCount === 1 ? "" : "s"}${revLabel}.`}
-                            onClick={() => downloadXlsx(
-                              `/api/takeoff-projects/${selectedProject.id}/export-bom?revisionOnly=1`,
-                              `${selectedProject.name} - BOM - Revision Only.xlsx`,
-                              `Downloaded revision-only BOM (${revCount} items)`
-                            )}
-                            data-testid="btn-export-bom-revision"
-                          >
-                            <FileSpreadsheet size={14} className="mr-1.5" />
-                            Export BOM (Rev{revCount > 0 ? `: ${revCount}` : ""})
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
-                            onClick={() => downloadXlsx(
-                              `/api/takeoff-projects/${selectedProject.id}/export-connections`,
-                              `${selectedProject.name} - Connections.xlsx`,
-                              "Downloaded Connections workbook"
-                            )}
-                            data-testid="btn-export-connections"
-                          >
-                            <FileSpreadsheet size={14} className="mr-1.5" />
-                            Export Connections
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-900/30"
-                            disabled={revCount === 0}
-                            title={revCount === 0
-                              ? "No revision-clouded items on this takeoff. Mark items inside a cloud first."
-                              : `Export connection counts only for the ${revCount} revision-clouded item${revCount === 1 ? "" : "s"}${revLabel}.`}
-                            onClick={() => downloadXlsx(
-                              `/api/takeoff-projects/${selectedProject.id}/export-connections?revisionOnly=1`,
-                              `${selectedProject.name} - Connections - Revision Only.xlsx`,
-                              `Downloaded revision-only Connections (${revCount} items)`
-                            )}
-                            data-testid="btn-export-connections-revision"
-                          >
-                            <FileSpreadsheet size={14} className="mr-1.5" />
-                            Export Connections (Rev{revCount > 0 ? `: ${revCount}` : ""})
-                          </Button>
-                        </>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" size="sm" data-testid="btn-exports">
+                              <Download size={14} className="mr-1.5" />
+                              Exports
+                              <ChevronDown size={12} className="ml-1.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="w-60">
+                            <DropdownMenuLabel>PDF</DropdownMenuLabel>
+                            <DropdownMenuItem onClick={handleExportPdf} data-testid="btn-export-pdf">
+                              <FileText size={13} className="mr-2" /> BOM PDF
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuLabel>BOM (Excel)</DropdownMenuLabel>
+                            <DropdownMenuItem
+                              data-testid="btn-export-bom"
+                              onClick={() => downloadXlsx(
+                                `/api/takeoff-projects/${selectedProject.id}/export-bom`,
+                                `${selectedProject.name} - BOM.xlsx`,
+                                "Downloaded BOM workbook"
+                              )}
+                            >
+                              <FileSpreadsheet size={13} className="mr-2" /> Full BOM
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              data-testid="btn-export-bom-revision"
+                              disabled={revCount === 0}
+                              onClick={() => downloadXlsx(
+                                `/api/takeoff-projects/${selectedProject.id}/export-bom?revisionOnly=1`,
+                                `${selectedProject.name} - BOM - Revision Only.xlsx`,
+                                `Downloaded revision-only BOM (${revCount} items)`
+                              )}
+                            >
+                              <FileSpreadsheet size={13} className="mr-2 text-amber-600" />
+                              Revision Only{revCount > 0 ? ` (${revCount})` : ""}
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuLabel>Connections (Excel)</DropdownMenuLabel>
+                            <DropdownMenuItem
+                              data-testid="btn-export-connections"
+                              onClick={() => downloadXlsx(
+                                `/api/takeoff-projects/${selectedProject.id}/export-connections`,
+                                `${selectedProject.name} - Connections.xlsx`,
+                                "Downloaded Connections workbook"
+                              )}
+                            >
+                              <FileSpreadsheet size={13} className="mr-2" /> Full Connections
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              data-testid="btn-export-connections-revision"
+                              disabled={revCount === 0}
+                              onClick={() => downloadXlsx(
+                                `/api/takeoff-projects/${selectedProject.id}/export-connections?revisionOnly=1`,
+                                `${selectedProject.name} - Connections - Revision Only.xlsx`,
+                                `Downloaded revision-only Connections (${revCount} items)`
+                              )}
+                            >
+                              <FileSpreadsheet size={13} className="mr-2 text-amber-600" />
+                              Revision Only{revCount > 0 ? ` (${revCount})` : ""}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       );
                     })()}
                     <Button

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart, AlertCircle, CheckCircle2, Printer, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import AppLayout from "@/components/AppLayout";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, apiUpload, queryClient } from "@/lib/queryClient";
@@ -1095,8 +1103,8 @@ export default function EstimatingPage() {
                       </CardContent>
                     </Card>
 
-                    {/* Quick entry bar */}
-                    <div className="flex gap-2">
+                    {/* Quick entry bar — hidden when printing the page */}
+                    <div className="flex gap-2 no-print" data-print="hide">
                       <Input
                         className="h-8 text-xs flex-1"
                         placeholder='Type: 3 4" butt welds, 100 LF 6" pipe, 50 CY concrete...'
@@ -1116,133 +1124,119 @@ export default function EstimatingPage() {
                       </Button>
                     </div>
 
-                    {/* Action buttons */}
-                    <div className="flex items-center gap-2 flex-wrap">
+                    {/* ------------------------------------------------------------------
+                        Action toolbar
+                        Organized into three groups so the page reads cleanly instead of
+                        showing a wall of 10+ buttons:
+                          1. Primary action  (Bid Proposal PDF — the customer deliverable)
+                          2. Internal exports dropdown (Bill's, Justin's, Industry, Print)
+                          3. Workflow actions (Apply DB costs, Versions, Quotes,
+                             Infer/Strip welds when applicable)
+                        Hidden when printing the page.
+                        ------------------------------------------------------------------ */}
+                    <div className="flex items-center gap-2 flex-wrap no-print" data-print="hide">
+                      {/* Primary: Customer-facing bid proposal */}
+                      <Button
+                        size="sm"
+                        className="bg-blue-600 hover:bg-blue-700 text-white"
+                        onClick={async () => {
+                          try { await generateBidReport(p); toast({ title: "Bid proposal downloaded" }); }
+                          catch (err: any) { toast({ title: err?.message || "Bid proposal failed", variant: "destructive" }); }
+                        }}
+                        disabled={p.items.length === 0}
+                        data-testid="btn-bid-report"
+                        title="Generate the customer-facing bid proposal PDF. Includes branding, scope summary, lump-sum price, terms, and signature lines. Cost breakdowns and internal detail are NOT exposed."
+                      >
+                        <FileText size={13} className="mr-1.5" />
+                        Bid Proposal PDF
+                      </Button>
+
+                      {/* Internal exports — grouped into one dropdown so they don't
+                          clutter the toolbar. These are the working spreadsheets the
+                          team uses internally (Bill's, Justin's, Industry) plus the
+                          internal BOM PDF and print-the-page option. */}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="outline" size="sm" data-testid="btn-internal-exports">
+                            <Download size={13} className="mr-1.5" />
+                            Internal Exports
+                            <ChevronDown size={12} className="ml-1.5" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-56">
+                          <DropdownMenuLabel>Print / PDF</DropdownMenuLabel>
+                          <DropdownMenuItem onClick={() => window.print()} data-testid="btn-print-page">
+                            <Printer size={13} className="mr-2" /> Print Page
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => exportEstimatePdf(p)} data-testid="btn-export-estimate">
+                            <FileText size={13} className="mr-2" /> BOM PDF (internal)
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuLabel>Excel Workbooks</DropdownMenuLabel>
+                          <DropdownMenuItem
+                            data-testid="btn-export-bill"
+                            onClick={async () => {
+                              try {
+                                const res = await apiRequest("GET", `/api/estimates/${p.id}/export-bill`);
+                                const blob = await res.blob();
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement("a");
+                                a.href = url; a.download = `${p.name} - Bills Format.xlsx`; a.click();
+                                URL.revokeObjectURL(url);
+                                toast({ title: "Downloaded Bill's format workbook" });
+                              } catch { toast({ title: "Export failed", variant: "destructive" }); }
+                            }}
+                          >
+                            <FileSpreadsheet size={13} className="mr-2" /> Bill's Format
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            data-testid="btn-export-justin"
+                            onClick={async () => {
+                              try {
+                                const res = await apiRequest("GET", `/api/estimates/${p.id}/export-justin`);
+                                const blob = await res.blob();
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement("a");
+                                a.href = url; a.download = `${p.name} - Justins Format.xlsx`; a.click();
+                                URL.revokeObjectURL(url);
+                                toast({ title: "Downloaded Justin's format workbook" });
+                              } catch { toast({ title: "Export failed", variant: "destructive" }); }
+                            }}
+                          >
+                            <FileSpreadsheet size={13} className="mr-2" /> Justin's Format
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            data-testid="btn-export-industry"
+                            onClick={async () => {
+                              try {
+                                const res = await apiRequest("GET", `/api/estimates/${p.id}/export-industry`);
+                                const blob = await res.blob();
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement("a");
+                                a.href = url; a.download = `${p.name} - Industry Standard.xlsx`; a.click();
+                                URL.revokeObjectURL(url);
+                                toast({ title: "Downloaded Industry Standard workbook" });
+                              } catch { toast({ title: "Export failed", variant: "destructive" }); }
+                            }}
+                          >
+                            <FileSpreadsheet size={13} className="mr-2" /> Industry Standard
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+
+                      {/* Workflow actions */}
                       <Button
                         variant="outline"
                         size="sm"
                         onClick={() => applyDbMutation.mutate(p.id)}
                         disabled={applyDbMutation.isPending}
                         data-testid="btn-apply-db"
+                        title="Refresh material and labor unit costs from the cost database"
                       >
                         <Database size={13} className="mr-1.5" />
                         Apply Database Costs
                       </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => exportEstimatePdf(p)}
-                        data-testid="btn-export-estimate"
-                        title="Simple BOM-style PDF of estimate line items"
-                      >
-                        <Download size={13} className="mr-1.5" />
-                        Export PDF
-                      </Button>
-                      {/* Print Page — fires window.print() with the @media print
-                          stylesheet active. Captures every section of the estimate:
-                          item table, scope adders, reconciliation, markups, totals. */}
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => window.print()}
-                        data-testid="btn-print-page"
-                        title="Open the browser print dialog. Save as PDF or print directly. Captures every section on the page."
-                      >
-                        <Download size={13} className="mr-1.5" />
-                        Print Page
-                      </Button>
-                      {/* Report PDF — server-generated formatted report */}
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-violet-700 border-violet-300 hover:bg-violet-50 dark:text-violet-400 dark:border-violet-700 dark:hover:bg-violet-900/30"
-                        onClick={async () => {
-                          try {
-                            const res = await apiRequest("GET", `/api/estimates/${p.id}/report-pdf`);
-                            if (!res.ok) throw new Error("Report generation failed");
-                            const blob = await res.blob();
-                            const a = document.createElement("a");
-                            a.href = URL.createObjectURL(blob);
-                            a.download = `${p.name} - Estimate Report.pdf`;
-                            a.click();
-                            URL.revokeObjectURL(a.href);
-                            toast({ title: "Downloaded estimate report" });
-                          } catch (err: any) {
-                            toast({ title: err.message || "Report failed", variant: "destructive" });
-                          }
-                        }}
-                        data-testid="btn-report-pdf"
-                        title="Generate a polished, branded PDF report with project info, BOM, labor breakdown, scope adders, and totals. Good for sending to a supervisor or client."
-                      >
-                        <FileSpreadsheet size={13} className="mr-1.5" />
-                        Report PDF
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
-                        onClick={async () => {
-                          try {
-                            const res = await apiRequest("GET", `/api/estimates/${p.id}/export-bill`);
-                            const blob = await res.blob();
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url;
-                            a.download = `${p.name} - Bills Format.xlsx`;
-                            a.click();
-                            URL.revokeObjectURL(url);
-                            toast({ title: "Downloaded Bill's format workbook" });
-                          } catch { toast({ title: "Export failed", variant: "destructive" }); }
-                        }}
-                        data-testid="btn-export-bill"
-                      >
-                        <FileSpreadsheet size={13} className="mr-1.5" />
-                        Export Bill's Format
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
-                        onClick={async () => {
-                          try {
-                            const res = await apiRequest("GET", `/api/estimates/${p.id}/export-justin`);
-                            const blob = await res.blob();
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url;
-                            a.download = `${p.name} - Justins Format.xlsx`;
-                            a.click();
-                            URL.revokeObjectURL(url);
-                            toast({ title: "Downloaded Justin's format workbook" });
-                          } catch { toast({ title: "Export failed", variant: "destructive" }); }
-                        }}
-                        data-testid="btn-export-justin"
-                      >
-                        <FileSpreadsheet size={13} className="mr-1.5" />
-                        Export Justin's Format
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-400 dark:border-emerald-700 dark:hover:bg-emerald-900/30"
-                        onClick={async () => {
-                          try {
-                            const res = await apiRequest("GET", `/api/estimates/${p.id}/export-industry`);
-                            const blob = await res.blob();
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url;
-                            a.download = `${p.name} - Industry Standard.xlsx`;
-                            a.click();
-                            URL.revokeObjectURL(url);
-                            toast({ title: "Downloaded Industry Standard workbook" });
-                          } catch { toast({ title: "Export failed", variant: "destructive" }); }
-                        }}
-                        data-testid="btn-export-industry"
-                      >
-                        <FileSpreadsheet size={13} className="mr-1.5" />
-                        Export Industry (Page)
-                      </Button>
+
                       {/* Infer / Strip weld buttons are only relevant for Bill's method.
                           Justin and Industry handle weld math inline on the fitting row
                           (welds_per_fitting × weld_factor), so there's nothing for the
@@ -1258,7 +1252,7 @@ export default function EstimatingPage() {
                             data-testid="btn-infer-welds"
                           >
                             <Wand2 size={13} className="mr-1.5" />
-                            {inferWeldsMutation.isPending ? "Inferring..." : "Infer Welds from Fittings"}
+                            {inferWeldsMutation.isPending ? "Inferring..." : "Infer Welds"}
                           </Button>
                           <Button
                             variant="outline"
@@ -1269,19 +1263,11 @@ export default function EstimatingPage() {
                             title="Remove every row tagged 'auto-inferred' \u2014 useful if you're in Bundled mode and the BOM has been over-counted"
                           >
                             <Trash2 size={13} className="mr-1.5" />
-                            {stripInferredWeldsMutation.isPending ? "Stripping..." : "Strip Auto-Inferred Welds"}
+                            {stripInferredWeldsMutation.isPending ? "Stripping..." : "Strip Auto Welds"}
                           </Button>
                         </>
                       )}
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => { setShowVersions(!showVersions); if (!showVersions) queryClient.invalidateQueries({ queryKey: ["/api/estimates", selectedId, "versions"] }); }}
-                        data-testid="btn-version-history"
-                      >
-                        <History size={13} className="mr-1.5" />
-                        Version History
-                      </Button>
+
                       <Button
                         variant="outline"
                         size="sm"
@@ -1290,18 +1276,16 @@ export default function EstimatingPage() {
                         data-testid="btn-rfq"
                       >
                         <ShoppingCart size={13} className="mr-1.5" />
-                        Request Material Quotes
+                        Request Quotes
                       </Button>
                       <Button
                         variant="outline"
                         size="sm"
-                        className="text-blue-700 border-blue-300 hover:bg-blue-50 dark:text-blue-400 dark:border-blue-700 dark:hover:bg-blue-900/30"
-                        onClick={() => generateBidReport(p)}
-                        disabled={p.items.length === 0}
-                        data-testid="btn-bid-report"
+                        onClick={() => { setShowVersions(!showVersions); if (!showVersions) queryClient.invalidateQueries({ queryKey: ["/api/estimates", selectedId, "versions"] }); }}
+                        data-testid="btn-version-history"
                       >
-                        <FileSpreadsheet size={13} className="mr-1.5" />
-                        Bid Report PDF
+                        <History size={13} className="mr-1.5" />
+                        Versions
                       </Button>
                     </div>
 
