@@ -620,9 +620,51 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       size="sm"
                       onClick={handleExportPdf}
                       data-testid="btn-export-pdf"
+                      title="Discipline-specific BOM PDF (Mechanical / Structural / Civil layout)"
                     >
                       <Download size={14} className="mr-1.5" />
                       Export PDF
+                    </Button>
+                    {/* Print Page — uses the browser's native print dialog with
+                        the @media print stylesheet in index.css. Captures every
+                        section currently rendered: BOM table, summary pivot,
+                        connections summary. The user can save as PDF from the
+                        print dialog or send to a printer. */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => window.print()}
+                      data-testid="btn-print-page"
+                      title="Open the browser print dialog. Save as PDF or print directly. Captures every section on the page."
+                    >
+                      <Download size={14} className="mr-1.5" />
+                      Print Page
+                    </Button>
+                    {/* Report PDF — server-generated formatted report. */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-violet-700 border-violet-300 hover:bg-violet-50 dark:text-violet-400 dark:border-violet-700 dark:hover:bg-violet-900/30"
+                      onClick={async () => {
+                        try {
+                          const res = await apiRequest("GET", `/api/takeoff-projects/${selectedProject.id}/report-pdf`);
+                          if (!res.ok) throw new Error("Report generation failed");
+                          const blob = await res.blob();
+                          const a = document.createElement("a");
+                          a.href = URL.createObjectURL(blob);
+                          a.download = `${selectedProject.name} - Takeoff Report.pdf`;
+                          a.click();
+                          URL.revokeObjectURL(a.href);
+                          toast({ title: "Downloaded takeoff report" });
+                        } catch (err: any) {
+                          toast({ title: err.message || "Report failed", variant: "destructive" });
+                        }
+                      }}
+                      data-testid="btn-report-pdf"
+                      title="Generate a polished, branded PDF report with BOM, pivot summary, and connection counts. Good for sharing with supervisors or clients."
+                    >
+                      <FileSpreadsheet size={14} className="mr-1.5" />
+                      Report PDF
                     </Button>
                     {/* Two pairs of export buttons: full BOM/Connections, plus
                         revision-only variants that only count items inside a

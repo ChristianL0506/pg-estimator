@@ -294,3 +294,82 @@
     background: linear-gradient(90deg, #01696F, #2563eb) !important;
   }
 }
+
+/* ============================================================
+   PRINT STYLESHEET
+   ============================================================
+   When the user clicks "Print Page" on takeoff/estimate, this
+   takes over so the printed PDF is clean and readable:
+   - Hide the app shell (sidebar, header, toolbars, buttons)
+   - Force light theme regardless of dark-mode setting
+   - Allow tables to break across pages without splitting rows
+   - Keep section headers with their tables
+   - Show tab content for printable areas even if collapsed
+   Anything with data-print="hide" is dropped; data-print="block"
+   forces visibility.
+   ============================================================ */
+@media print {
+  /* Force light theme on the printed page even if user is in dark mode */
+  html, body, [data-theme] {
+    background: white !important;
+    color: black !important;
+  }
+  body * {
+    color: black !important;
+    background: white !important;
+    border-color: #ccc !important;
+    box-shadow: none !important;
+  }
+
+  /* Hide app chrome by default */
+  nav, aside, header[role="banner"], footer,
+  [role="toolbar"],
+  [data-print="hide"],
+  .no-print {
+    display: none !important;
+  }
+
+  /* Make sure buttons/select dropdowns don't appear; keep their text */
+  button, select, input[type="file"], input[type="checkbox"], input[type="radio"] {
+    display: none !important;
+  }
+  /* But allow inputs inside tables (e.g. read-only display) to remain */
+  table input { display: inline-block !important; border: none !important; padding: 0 !important; }
+
+  /* Tables: prefer not breaking inside rows; keep headers visible on each page */
+  table { page-break-inside: auto; width: 100% !important; font-size: 9pt; }
+  tr { page-break-inside: avoid; page-break-after: auto; }
+  thead { display: table-header-group; }
+  tfoot { display: table-footer-group; }
+
+  /* Keep cards together where possible; section title stays with content */
+  .print-section, [data-print-section] {
+    page-break-inside: avoid;
+    margin-bottom: 12pt;
+  }
+  h1, h2, h3, h4 {
+    page-break-after: avoid;
+  }
+
+  /* Reveal scroll containers so all content prints */
+  [class*="overflow-y-auto"],
+  [class*="overflow-x-auto"],
+  [class*="max-h-"] {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  /* Anything explicitly marked as "block on print" must show */
+  [data-print="block"] { display: block !important; }
+  [data-print="show"] { display: revert !important; }
+
+  /* Margins: standard letter */
+  @page { margin: 0.5in; size: letter; }
+
+  /* Avoid printing huge background images */
+  img { max-width: 100% !important; }
+
+  /* Force tab panels visible so all content prints */
+  [role="tabpanel"] { display: block !important; }
+  [role="tabpanel"][hidden] { display: block !important; }
+}

@@ -7810,6 +7810,195 @@ Picou Group Contractors`;
     }
   });
 
+  // ===== ESTIMATE REPORT PDF =====
+  // Polished, branded multi-section PDF for the estimate:
+  //   - Title page (project name, client, location, method, generation date, key totals)
+  //   - Line item table (qty, conn count, factor, labor MH, total cost)
+  //   - Scope adders (hand-entered hours / flat costs)
+  //   - Markups + grand total breakdown
+  // Landscape for the line item table; standard for everything else.
+  app.get("/api/estimates/:id/report-pdf", async (req, res) => {
+    const project = storage.getEstimateProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Estimate not found" });
+    try {
+      const { default: jsPDF } = await import("jspdf");
+      const { default: autoTable } = await import("jspdf-autotable");
+      const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "letter" });
+      const fmtMoney = (n: number) => `$${(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const fmtNum = (n: number, d = 1) => (n || 0).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
+      // Compute totals the same way the UI does so the report is consistent
+      // with what the estimator sees on screen.
+      const items = project.items || [];
+      const totalMaterial = items.reduce((s: number, it: any) => s + (it.materialExtension || 0), 0);
+      const bomLabor = items.reduce((s: number, it: any) => s + (it.laborExtension || 0), 0);
+      const bomHours = items.reduce((s: number, it: any) => s + ((it.laborHoursPerUnit || 0) * (it.quantity || 0)), 0);
+      const stPercent = Math.max(0, (100 - (project.overtimePercent || 15) - (project.doubleTimePercent || 2)) / 100);
+      const otPercent = (project.overtimePercent || 15) / 100;
+      const dtPercent = (project.doubleTimePercent || 2) / 100;
+      const blendedRate = (project.laborRate || 56) * stPercent + (project.overtimeRate || 79) * otPercent + (project.doubleTimeRate || 100) * dtPercent;
+      const perDiemPerHour = (project.perDiem || 75) / 10;
+      const effectiveRate = blendedRate + perDiemPerHour;
+      const scopeAdders: any[] = (project as any).scopeAdders || [];
+      const adderHours = scopeAdders.reduce((s, a) => s + ((a.mode || "hours") === "hours" ? (a.hours || 0) : 0), 0);
+      const adderLabor = scopeAdders.reduce((s, a) => s + ((a.mode || "hours") === "hours" ? (a.hours || 0) * (a.ratePerHour ?? effectiveRate) : 0), 0);
+      const adderFlatCost = scopeAdders.reduce((s, a) => s + (a.mode === "cost" ? (a.flatCost || 0) : 0), 0);
+      const totalLabor = bomLabor + adderLabor;
+      const totalHours = bomHours + adderHours;
+      const subtotal = totalMaterial + totalLabor + adderFlatCost;
+      const markups = (project as any).markups || { overhead: 10, profit: 10, tax: 8.25, bond: 2 };
+      const overheadAmt = subtotal * (markups.overhead / 100);
+      const profitAmt = (subtotal + overheadAmt) * (markups.profit / 100);
+      const taxAmt = totalMaterial * (markups.tax / 100);
+      const bondAmt = (subtotal + overheadAmt + profitAmt + taxAmt) * (markups.bond / 100);
+      const grandTotal = subtotal + overheadAmt + profitAmt + taxAmt + bondAmt;
+
+      // ----- Title page -----
+      doc.setFontSize(20);
+      doc.setTextColor(30, 80, 140);
+      doc.text("PICOU GROUP CONTRACTORS", 40, 50);
+      doc.setFontSize(14);
+      doc.setTextColor(60, 60, 60);
+      doc.text(`Estimate Report — ${project.name}`, 40, 75);
+      doc.setFontSize(10);
+      doc.setTextColor(100, 100, 100);
+      const meta: string[] = [`Generated: ${new Date().toLocaleString()}`];
+      if (project.projectNumber) meta.push(`PN: ${project.projectNumber}`);
+      if (project.client) meta.push(`Client: ${project.client}`);
+      if (project.location) meta.push(`Location: ${project.location}`);
+      if (project.estimateMethod) {
+        const methodLabel = project.estimateMethod === "bill" ? "Bill's EI" : project.estimateMethod === "justin" ? "Justin's Factor" : project.estimateMethod === "industry" ? "Industry (Page)" : "Manual";
+        meta.push(`Method: ${methodLabel}`);
+      }
+      meta.push(`Items: ${items.length}`);
+      doc.text(meta.join("  \u2022  "), 40, 95);
+      doc.setDrawColor(30, 80, 140);
+      doc.setLineWidth(1);
+      doc.line(40, 105, 752, 105);
+
+      // Key totals block on title page
+      doc.setFontSize(12);
+      doc.setTextColor(30, 80, 140);
+      doc.text("Key Totals", 40, 135);
+      autoTable(doc, {
+        startY: 145,
+        body: [
+          ["Total Labor Hours", fmtNum(totalHours) + " hrs"],
+          ["Total Labor Cost", fmtMoney(totalLabor)],
+          ["Total Material Cost", fmtMoney(totalMaterial)],
+          ["Other Costs (scope adders)", fmtMoney(adderFlatCost)],
+          ["Subtotal", fmtMoney(subtotal)],
+          [`Overhead (${markups.overhead}%)`, fmtMoney(overheadAmt)],
+          [`Profit (${markups.profit}%)`, fmtMoney(profitAmt)],
+          [`Tax on Material (${markups.tax}%)`, fmtMoney(taxAmt)],
+          [`Bond (${markups.bond}%)`, fmtMoney(bondAmt)],
+          ["GRAND TOTAL", fmtMoney(grandTotal)],
+        ],
+        styles: { fontSize: 11, cellPadding: 6 },
+        columnStyles: { 0: { fontStyle: "bold", cellWidth: 250 }, 1: { halign: "right", cellWidth: 200 } },
+        didParseCell: (data) => {
+          if (data.row.index === 9) {
+            data.cell.styles.fontSize = 13;
+            data.cell.styles.fillColor = [30, 80, 140];
+            data.cell.styles.textColor = 255;
+            data.cell.styles.fontStyle = "bold";
+          }
+        },
+      });
+
+      // ----- Item table -----
+      doc.addPage();
+      doc.setFontSize(14);
+      doc.setTextColor(30, 80, 140);
+      doc.text("Bill of Materials with Labor & Cost", 40, 40);
+      const itemRows = items.map((it: any) => {
+        const cnt = it.connectionCount;
+        const typ = it.connectionType;
+        const cat = (it.category || "").toLowerCase();
+        const desc = (it.description || "").toLowerCase();
+        const isExplicitWeldRow = cat === "weld" || desc.startsWith("bw ") || desc.includes(" bw ");
+        let countLabel = "";
+        if (typ === "pipe") countLabel = `${it.quantity || 0} LF`;
+        else if (cnt != null && typ && typ !== "none") {
+          const total = isExplicitWeldRow ? (it.quantity || 0) : (it.quantity || 0) * cnt;
+          countLabel = `${total} ${typ === "weld" ? "welds" : typ === "bolt-up" ? "bolt-ups" : typ}`;
+        }
+        return [
+          String(it.lineNumber || ""),
+          (it.category || "").toUpperCase(),
+          it.size || "",
+          it.description || "",
+          fmtNum(it.quantity || 0, it.unit === "LF" ? 2 : 0),
+          it.unit || "EA",
+          countLabel,
+          it.rawFactorLabel || (it.rawFactor != null ? fmtNum(it.rawFactor, 3) : ""),
+          fmtNum(it.laborHoursPerUnit || 0, 3),
+          fmtNum((it.laborHoursPerUnit || 0) * (it.quantity || 0), 1),
+          fmtMoney(it.laborExtension || 0),
+          fmtMoney(it.materialExtension || 0),
+          fmtMoney(it.totalCost || 0),
+        ];
+      });
+      autoTable(doc, {
+        startY: 55,
+        head: [["#", "Category", "Size", "Description", "Qty", "Unit", "Count", "Factor", "MH/U", "Total MH", "Labor $", "Material $", "Total $"]],
+        body: itemRows,
+        styles: { fontSize: 6.5, cellPadding: 2.5, overflow: "linebreak" },
+        headStyles: { fillColor: [30, 80, 140], textColor: 255 },
+        columnStyles: {
+          3: { cellWidth: 160 },
+          7: { cellWidth: 70 },
+        },
+        didDrawPage: (data) => {
+          const pageCount = doc.getNumberOfPages();
+          doc.setFontSize(8);
+          doc.setTextColor(120, 120, 120);
+          doc.text(`Page ${data.pageNumber} of ${pageCount}`, doc.internal.pageSize.getWidth() - 90, doc.internal.pageSize.getHeight() - 20);
+        },
+      });
+
+      // ----- Scope adders -----
+      if (scopeAdders.length > 0) {
+        doc.addPage();
+        doc.setFontSize(14);
+        doc.setTextColor(30, 80, 140);
+        doc.text("Scope Adders", 40, 40);
+        const adderRows = scopeAdders.map((a: any) => {
+          const mode = a.mode || "hours";
+          const rate = a.ratePerHour ?? effectiveRate;
+          const cost = mode === "hours" ? (a.hours || 0) * rate : (a.flatCost || 0);
+          return [
+            a.label || "",
+            mode === "hours" ? "Hours" : "Flat $",
+            mode === "hours" ? fmtNum(a.hours || 0, 1) : "—",
+            mode === "hours" ? fmtMoney(rate) + "/hr" : "—",
+            fmtMoney(cost),
+            a.note || "",
+          ];
+        });
+        autoTable(doc, {
+          startY: 55,
+          head: [["Label", "Mode", "Hours", "Rate", "Cost", "Note"]],
+          body: adderRows,
+          styles: { fontSize: 9, cellPadding: 4 },
+          headStyles: { fillColor: [30, 80, 140], textColor: 255 },
+          columnStyles: { 5: { cellWidth: 260 } },
+          foot: [["TOTAL", "", fmtNum(adderHours, 1), "", fmtMoney(adderLabor + adderFlatCost), ""]],
+          footStyles: { fillColor: [220, 220, 220], textColor: 0, fontStyle: "bold" },
+        });
+      }
+
+      const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "");
+      const pdfBuffer = doc.output("arraybuffer");
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Estimate Report.pdf"`);
+      res.end(Buffer.from(pdfBuffer));
+    } catch (err: any) {
+      console.error("Estimate report error:", err);
+      res.status(500).json({ message: err.message || "Report failed" });
+    }
+  });
+
   // ===== DIAGNOSE ESTIMATE =====
   // Re-runs the active estimating method over every BOM row and returns a
   // detailed breakdown: which calculator branch matched, what inputs it used,
@@ -9499,6 +9688,173 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
     } catch (err: any) {
       console.error("BOM export error:", err);
       res.status(500).json({ message: err.message || "Export failed" });
+    }
+  });
+
+  // ===== TAKEOFF REPORT PDF =====
+  // A polished, branded multi-section PDF of the takeoff:
+  //   - Title page (project name, revision, item count, generation date)
+  //   - BOM table (every line item)
+  //   - Summary pivot (category × size)
+  //   - Connection rollup by size (shop/field BW/SW, bolt-ups, threaded)
+  // Page breaks between sections; landscape orientation for the BOM table.
+  app.get("/api/takeoff-projects/:id/report-pdf", async (req, res) => {
+    const project = await storage.getTakeoffProject(req.params.id);
+    if (!project) return res.status(404).json({ message: "Project not found" });
+    try {
+      const { default: jsPDF } = await import("jspdf");
+      const { default: autoTable } = await import("jspdf-autotable");
+      const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "letter" });
+
+      // ----- Title section -----
+      doc.setFontSize(20);
+      doc.setTextColor(30, 80, 140);
+      doc.text("PICOU GROUP CONTRACTORS", 40, 50);
+      doc.setFontSize(14);
+      doc.setTextColor(60, 60, 60);
+      doc.text(`Takeoff Report — ${project.name}`, 40, 75);
+      doc.setFontSize(10);
+      doc.setTextColor(100, 100, 100);
+      const meta: string[] = [
+        `Generated: ${new Date().toLocaleString()}`,
+        `Items: ${project.items.length}`,
+      ];
+      if (project.revision) meta.push(`Revision: ${project.revision}`);
+      if (project.discipline) meta.push(`Discipline: ${project.discipline}`);
+      const cloudedCount = project.items.filter((it: any) => it.revisionClouded).length;
+      if (cloudedCount > 0) meta.push(`Revision-clouded items: ${cloudedCount}`);
+      doc.text(meta.join("  \u2022  "), 40, 95);
+      doc.setDrawColor(30, 80, 140);
+      doc.setLineWidth(1);
+      doc.line(40, 105, 752, 105);
+
+      // ----- BOM table -----
+      doc.setFontSize(12);
+      doc.setTextColor(30, 80, 140);
+      doc.text("Bill of Materials", 40, 130);
+      const bomRows = (project.items || []).map((it: any) => [
+        String(it.lineNumber || ""),
+        (it.category || "").toUpperCase(),
+        it.size || "",
+        it.description || "",
+        it.unit === "LF" ? (it.quantity || 0).toFixed(2) : String(Math.round(it.quantity || 0)),
+        it.unit || "EA",
+        it.material || "",
+        it.schedule || "",
+        it.spec || "",
+        it.revisionClouded ? "●" : "",
+      ]);
+      autoTable(doc, {
+        startY: 140,
+        head: [["#", "Category", "Size", "Description", "Qty", "Unit", "Mat", "Sched", "Spec", "Rev"]],
+        body: bomRows,
+        styles: { fontSize: 7, cellPadding: 3, overflow: "linebreak" },
+        headStyles: { fillColor: [30, 80, 140], textColor: 255 },
+        columnStyles: { 3: { cellWidth: 220 } },
+        didDrawPage: (data) => {
+          // Footer with page number
+          const pageCount = doc.getNumberOfPages();
+          doc.setFontSize(8);
+          doc.setTextColor(120, 120, 120);
+          doc.text(`Page ${data.pageNumber} of ${pageCount}`, doc.internal.pageSize.getWidth() - 90, doc.internal.pageSize.getHeight() - 20);
+        },
+      });
+
+      // ----- Summary pivot -----
+      doc.addPage();
+      doc.setFontSize(14);
+      doc.setTextColor(30, 80, 140);
+      doc.text("Summary by Category × Size", 40, 50);
+      const pivot = new Map<string, { count: number; totalQty: number }>();
+      for (const it of project.items) {
+        const key = `${it.category || "other"}|${it.size || "N/A"}`;
+        const existing = pivot.get(key) || { count: 0, totalQty: 0 };
+        existing.count++;
+        existing.totalQty += it.quantity ?? 0;
+        pivot.set(key, existing);
+      }
+      const pivotRows = Array.from(pivot.entries()).map(([k, v]) => {
+        const [cat, size] = k.split("|");
+        return [cat, size, String(v.count), v.totalQty.toFixed(2)];
+      });
+      autoTable(doc, {
+        startY: 65,
+        head: [["Category", "Size", "Item Count", "Total Qty"]],
+        body: pivotRows,
+        styles: { fontSize: 9, cellPadding: 4 },
+        headStyles: { fillColor: [30, 80, 140], textColor: 255 },
+      });
+
+      // ----- Connection rollup -----
+      // Mirror the same rollup logic used elsewhere for consistency.
+      type ConnBucket = { shopBW: number; shopSW: number; fieldBW: number; fieldSW: number; boltUps: number; threaded: number };
+      const connSizeMap: Record<string, ConnBucket> = {};
+      const ensureConn = (size: string) => {
+        if (!connSizeMap[size]) connSizeMap[size] = { shopBW: 0, shopSW: 0, fieldBW: 0, fieldSW: 0, boltUps: 0, threaded: 0 };
+        return connSizeMap[size];
+      };
+      for (const item of project.items) {
+        if ((item as any)._dedupCandidate) continue;
+        const cat = (item.category || "").toLowerCase();
+        const size = item.size || "N/A";
+        const qty = item.quantity || 0;
+        const desc = (item.description || "").toLowerCase();
+        const isField = ((item as any).installLocation || "").toLowerCase() === "field";
+        const isThreaded = desc.includes("threaded") || desc.includes("screw") || desc.includes("npt");
+        const isSocketWeld = desc.includes("socket weld") || /\bsw\b/i.test(desc);
+        const r = ensureConn(size);
+        const addBW = (n: number) => { if (isField) r.fieldBW += n; else r.shopBW += n; };
+        const addSW = (n: number) => { if (isField) r.fieldSW += n; else r.shopSW += n; };
+        if (cat === "pipe" && qty >= 40) { r.fieldBW += Math.floor(qty / 40); continue; }
+        if (cat === "pipe") continue;
+        if (cat === "gasket" || cat === "bolt" || desc.includes("gasket") || desc.includes("stud") || desc.includes("bolt")) continue;
+        if (cat === "flange" || desc.includes("flange")) { addBW(qty); r.boltUps += Math.ceil(qty / 2); continue; }
+        if (isThreaded) { r.threaded += qty; continue; }
+        if (cat === "coupling" || cat === "union" || desc.includes("coupling") || desc.includes("nipple")) { addSW(qty * 2); continue; }
+        if (cat === "sockolet" || desc.includes("sockolet")) { addSW(qty * 2); continue; }
+        if (cat === "weldolet" || desc.includes("weldolet") || desc.includes("threadolet")) { addBW(qty); continue; }
+        const wf: Record<string, number> = { elbow: 2, tee: 3, reducer: 2, cap: 1 };
+        let welds = wf[cat];
+        if (welds === undefined) {
+          if (desc.includes("elbow") || desc.includes("ell")) welds = 2;
+          else if (desc.includes("tee")) welds = 3;
+          else if (desc.includes("reducer") || desc.includes("swage")) welds = 2;
+          else if (desc.includes("cap")) welds = 1;
+        }
+        if (welds && welds > 0) { const cnt = qty * welds; if (isSocketWeld) addSW(cnt); else addBW(cnt); }
+      }
+      const connRows = Object.entries(connSizeMap)
+        .sort((a, b) => (parseFloat(a[0]) || 0) - (parseFloat(b[0]) || 0))
+        .map(([size, c]) => [
+          size,
+          String(c.shopBW),
+          String(c.shopSW),
+          String(c.fieldBW),
+          String(c.fieldSW),
+          String(c.boltUps),
+          String(c.threaded),
+          String(c.shopBW + c.shopSW + c.fieldBW + c.fieldSW + c.boltUps + c.threaded),
+        ]);
+      const finalY = (doc as any).lastAutoTable?.finalY || 200;
+      doc.setFontSize(14);
+      doc.setTextColor(30, 80, 140);
+      doc.text("Connections by Size", 40, finalY + 30);
+      autoTable(doc, {
+        startY: finalY + 45,
+        head: [["Size", "Shop BW", "Shop SW", "Field BW", "Field SW", "Bolt-Ups", "Threaded", "Total"]],
+        body: connRows,
+        styles: { fontSize: 9, cellPadding: 4 },
+        headStyles: { fillColor: [30, 80, 140], textColor: 255 },
+      });
+
+      const safeName = project.name.replace(/[^a-zA-Z0-9 _-]/g, "");
+      const pdfBuffer = doc.output("arraybuffer");
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName} - Takeoff Report.pdf"`);
+      res.end(Buffer.from(pdfBuffer));
+    } catch (err: any) {
+      console.error("Takeoff report error:", err);
+      res.status(500).json({ message: err.message || "Report failed" });
     }
   });
 

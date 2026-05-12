@@ -1133,9 +1133,49 @@ export default function EstimatingPage() {
                         size="sm"
                         onClick={() => exportEstimatePdf(p)}
                         data-testid="btn-export-estimate"
+                        title="Simple BOM-style PDF of estimate line items"
                       >
                         <Download size={13} className="mr-1.5" />
                         Export PDF
+                      </Button>
+                      {/* Print Page — fires window.print() with the @media print
+                          stylesheet active. Captures every section of the estimate:
+                          item table, scope adders, reconciliation, markups, totals. */}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => window.print()}
+                        data-testid="btn-print-page"
+                        title="Open the browser print dialog. Save as PDF or print directly. Captures every section on the page."
+                      >
+                        <Download size={13} className="mr-1.5" />
+                        Print Page
+                      </Button>
+                      {/* Report PDF — server-generated formatted report */}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-violet-700 border-violet-300 hover:bg-violet-50 dark:text-violet-400 dark:border-violet-700 dark:hover:bg-violet-900/30"
+                        onClick={async () => {
+                          try {
+                            const res = await apiRequest("GET", `/api/estimates/${p.id}/report-pdf`);
+                            if (!res.ok) throw new Error("Report generation failed");
+                            const blob = await res.blob();
+                            const a = document.createElement("a");
+                            a.href = URL.createObjectURL(blob);
+                            a.download = `${p.name} - Estimate Report.pdf`;
+                            a.click();
+                            URL.revokeObjectURL(a.href);
+                            toast({ title: "Downloaded estimate report" });
+                          } catch (err: any) {
+                            toast({ title: err.message || "Report failed", variant: "destructive" });
+                          }
+                        }}
+                        data-testid="btn-report-pdf"
+                        title="Generate a polished, branded PDF report with project info, BOM, labor breakdown, scope adders, and totals. Good for sending to a supervisor or client."
+                      >
+                        <FileSpreadsheet size={13} className="mr-1.5" />
+                        Report PDF
                       </Button>
                       <Button
                         variant="outline"
