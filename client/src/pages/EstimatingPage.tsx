@@ -2295,7 +2295,9 @@ function ReconciliationPanel({ estimateId }: { estimateId: string }) {
     },
   });
 
-  const queryClient = useQueryClient();
+  // Uses the queryClient singleton imported at the top of this file — same
+  // pattern as every other mutation here. (useQueryClient() would also work
+  // but isn't imported in this module.)
   const linkBomMutation = useMutation({
     mutationFn: async (takeoffId: string | null) => {
       const res = await apiRequest("PATCH", `/api/estimates/${estimateId}`, { sourceTakeoffId: takeoffId });
