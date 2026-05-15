@@ -429,10 +429,29 @@ async function splitPdfIntoChunks(pdfPath: string, pageCount: number): Promise<{
   return chunks;
 }
 
+// Quote-character classes used in pipe-length parsing.
+// CAD/PDF exports use a surprising number of different glyphs for foot and
+// inch marks. We accept all of them:
+//   foot mark:  '  (ASCII APOSTROPHE U+0027)
+//               ‘  (LEFT SINGLE QUOTATION MARK U+2018)
+//               ’  (RIGHT SINGLE QUOTATION MARK U+2019)
+//               ′  (PRIME U+2032 — the typographically correct foot mark)
+//   inch mark:  "  (ASCII QUOTATION MARK U+0022)
+//               “  (LEFT DOUBLE QUOTATION MARK U+201C)
+//               ”  (RIGHT DOUBLE QUOTATION MARK U+201D)
+//               ″  (DOUBLE PRIME U+2033 — the typographically correct inch mark)
+// Without including ′ / ″, BOMs from some CAD exports came through with
+// QTY=0 because the parser silently fell back to parseFloat.
+const FOOT_MARK_CHARS = "['\u2018\u2019\u2032]";
+const INCH_MARK_CHARS = "[\"\u201C\u201D\u2033]";
+
 function parsePipeLength(raw: string): { feet: number; original: string; wasInches?: boolean } {
   const s = String(raw).trim();
-  // Match feet-inches: 16'-8", 3'-0", 0'-11", etc.
-  const m = s.match(/^(\d+)['''\u2019]\s*[-–]?\s*(\d+)?(?:\s*[-–]?\s*(\d+)\/(\d+))?\s*[""\u201D]?$/);
+  // Match feet-inches: 16'-8", 3'-0", 0'-11", 1′10–15/16″, etc.
+  const ftInRe = new RegExp(
+    `^(\\d+)${FOOT_MARK_CHARS}\\s*[-–]?\\s*(\\d+)?(?:\\s*[-–]?\\s*(\\d+)\\/(\\d+))?\\s*${INCH_MARK_CHARS}?$`,
+  );
+  const m = s.match(ftInRe);
   if (m) {
     const ft = parseInt(m[1], 10) || 0;
     const inches = parseInt(m[2] || "0", 10);
@@ -441,8 +460,11 @@ function parsePipeLength(raw: string): { feet: number; original: string; wasInch
     const totalInches = ft * 12 + inches + fracNum / fracDen;
     return { feet: Math.round((totalInches / 12) * 100) / 100, original: s };
   }
-  // Match inches-only: 11", 6", 8-1/2", etc. (double-quote means inches)
-  const inchMatch = s.match(/^(\d+)(?:\s*[-–]?\s*(\d+)\/(\d+))?\s*[""\u201D]$/);
+  // Match inches-only: 11", 6", 8-1/2", 2″, etc.
+  const inRe = new RegExp(
+    `^(\\d+)(?:\\s*[-–]?\\s*(\\d+)\\/(\\d+))?\\s*${INCH_MARK_CHARS}$`,
+  );
+  const inchMatch = s.match(inRe);
   if (inchMatch) {
     const inches = parseInt(inchMatch[1], 10) || 0;
     const fracNum = parseInt(inchMatch[2] || "0", 10);
@@ -466,7 +488,9 @@ function parsePipeLength(raw: string): { feet: number; original: string; wasInch
  */
 function correctPipeLengthIfInches(qty: number, rawQty: string, description: string, options?: { installLocation?: string; size?: string }): { correctedQty: number; wasCorrection: boolean; note: string } {
   // If the raw string already had feet/inch markers, parsePipeLength handled it
-  if (/[\u2018\u2019\u201C\u201D''""\u0027]/.test(rawQty)) {
+  // Any foot/inch mark (incl. typographic prime/double-prime U+2032/U+2033)
+  // means parsePipeLength already handled the conversion correctly. Bail out.
+  if (/['\u2018\u2019\u2032"\u201C\u201D\u2033\u0027]/.test(rawQty)) {
     return { correctedQty: qty, wasCorrection: false, note: "" };
   }
 
@@ -3244,9 +3268,9 @@ async function extractMechanicalChunk(
     const rq = rawQty.trim();
     let numericQty: number;
     const notes: string[] = [];
-    if (/['''\u2019]/.test(rq)) {
-      numericQty = parsePipeLength(rq).feet;
-    } else if (/[""\u201D]/.test(rq)) {
+    // Foot mark family: ASCII ' / left-single ‘ / right-single ’ / prime ′
+    // Inch mark family: ASCII " / left-double “ / right-double ” / double-prime ″
+    if (/['\u2018\u2019\u2032"\u201C\u201D\u2033]/.test(rq)) {
       numericQty = parsePipeLength(rq).feet;
     } else {
       numericQty = parseFloat(rq) || 1;
@@ -10252,6 +10276,28 @@ Be concise, practical, and helpful. Answer in 2-4 sentences when possible. Use s
           } else {
             connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
             sm.socketWelds += 2 * qty;
+          }
+        } else if (catLower === "union") {
+          // Union: in-line fitting with 2 mating ends. Most unions are threaded
+          // (most common 3000# forged-steel pattern), some are SW. The very rare
+          // flanged "union flange" is treated as 1 bolt-up. Mixed SW x NPT is
+          // possible (1 SW + 1 threaded) but uncommon.
+          // Added May-15 after Area 100 audit found 12 unions in the BOM
+          // generating 0 connections — the branch did not exist.
+          if (isMixedSwNpt) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "sw x npt mixed", connectionCount: 1 * qty, location });
+            sm.socketWelds += 1 * qty;
+            sm.threaded += 1 * qty;
+          } else if (isFlanged) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "bolt-up", connectionCount: 1 * qty, location });
+            sm.boltUps += qty;
+          } else if (isSocketWeld) {
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "socket weld", connectionCount: 2 * qty, location });
+            sm.socketWelds += 2 * qty;
+          } else {
+            // Default: threaded union (the most common pattern industry-wide).
+            connectionDetails.push({ size, fitting: item.description || catLower, qty, connectionType: "threaded", connectionCount: 2 * qty, location });
+            sm.threaded += 2 * qty;
           }
         } else if (catLower === "valve") {
           // Only socket-weld valves generate welds. Flanged/threaded/butterfly: 0 welds.
