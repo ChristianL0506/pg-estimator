@@ -1174,13 +1174,23 @@ ABSOLUTE RULES (read carefully — these prevent the most common failure modes)
      The sheetTitle you report MUST match the title block on the page you
      are actually looking at — not a sheet referenced in the index.
 
-  B. RETURN EMPTY ITEMS FOR THESE SHEET TYPES (set sheetType correctly, set items: []):
-       cover, key-plan, legend, title-block, sheet-index, general-notes,
-       structural-symbols, structural-abbreviations, wind-pressure-tables,
-       design-criteria, demolition-notes (notes-only, no demo plan).
-     If the page mixes a small note block with a real plan/elevation/
-     detail, classify by the DOMINANT content and include any visible
-     plan items — but do not invent items from referenced sheets.
+  B. RETURN EMPTY ITEMS *ONLY* FOR PURE NON-CONTENT SHEETS.
+     A sheet has no items (items: []) ONLY when its DOMINANT content is:
+       cover sheet / title block, sheet index list, abbreviations table,
+       structural symbols & legend, general structural notes (text only,
+       no plans), wind pressure tables, design criteria table.
+     A page is NOT a non-content sheet if any of the following is true:
+       - it shows a framing plan, foundation plan, roof plan, or piece plan
+       - it shows an elevation, section, or detail drawing
+       - it shows a column schedule, beam schedule, base plate schedule,
+         or footing schedule with actual sizes/marks
+       - it shows a demolition plan (vs. notes-only)
+     When in doubt, treat the page as content and extract what you can see.
+     The cost of missing a real beam is high; the cost of one extra row
+     with a flagged size is low — a downstream guard removes generic
+     placeholders. Do NOT invent items from referenced sheets, but DO
+     enumerate every visible member, even when the size has to be looked
+     up on a different schedule (use mark + size=null + flag for that).
 
   C. CAPTURE SIZES THAT ARE LITERALLY ON THE SHEET.
      If a beam is labeled W6x15 on the framing plan, the size field must
@@ -4087,39 +4097,54 @@ async function extractStructuralChunk(
       aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: ${f}`);
     }
 
-    // HALLUCINATION GUARD (added May-15 after Sugar Path BB3 audit).
-    // If the model classified this sheet as a non-content type (cover,
-    // legend, sheet-index, etc.) but ALSO returned items, those items are
-    // almost certainly hallucinated from the index / referenced sheet. The
-    // BB3 run produced 22 hallucinated W/C/L items on page 1 (the cover
-    // sheet) all sized N/A and all noting they came from sheet S4.13. Drop
-    // those and surface a flag.
-    const NON_CONTENT_SHEET_TYPES = new Set([
-      "cover", "key-plan", "legend", "title-block", "sheet-index",
-      "general-notes", "structural-symbols", "structural-abbreviations",
-      "wind-pressure-tables", "design-criteria",
-    ]);
+    // HALLUCINATION GUARD (added May-15 after Sugar Path BB3 audit; hardened
+    // after second BB3 run produced 22 fake items on the S0.00 cover/legend
+    // sheet). The model often won't self-classify as "cover" — it'll pick a
+    // permissive type like "elevation" and emit items it inferred from the
+    // sheet index. Use three signals to detect non-content sheets and drop
+    // any items that came from them.
+    const NON_CONTENT_KEYWORDS = [
+      "cover", "key-plan", "legend", "title-block", "sheet-index", "index",
+      "general-note", "structural-symbol", "structural-abbreviation",
+      "abbreviation", "symbol",
+      "wind-pressure", "design-criteria", "design-load",
+    ];
+    const NON_CONTENT_TITLE_REGEX = /(SHEET\s*INDEX|STRUCTURAL\s*ABBREVIATIONS|STRUCTURAL\s*SYMBOLS|STRUCTURAL\s*LEGEND|SYMBOLS\s*AND\s*LEGEND|GENERAL\s*NOTES?|GENERAL\s*STRUCTURAL\s*NOTES|DESIGN\s*CRITERIA|DESIGN\s*LOAD|WIND\s*PRESSURE|COVER\s*SHEET|TITLE\s*SHEET)/i;
+    // Sheet numbers like S0.00, S00.01, S-000 (the leading zero series) are
+    // almost always non-content. Real BOM sheets start at S1.xx and up.
+    const NON_CONTENT_SHEET_NUM_REGEX = /^S?-?0+\.?\d*$/i; // S0, S0.0, S0.00, S00.01
     const sheetTypeLower = sheetType.toLowerCase().replace(/[_\s]+/g, "-");
-    if (NON_CONTENT_SHEET_TYPES.has(sheetTypeLower) && entries.length > 0) {
-      aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: dropped ${entries.length} hallucinated item(s) from non-content sheet type "${sheetType}"`);
+    const isNonContentType = NON_CONTENT_KEYWORDS.some(kw => sheetTypeLower.includes(kw));
+    const isNonContentTitle = sheetTitle ? NON_CONTENT_TITLE_REGEX.test(sheetTitle) : false;
+    const isNonContentSheetNum = sheetNumber ? NON_CONTENT_SHEET_NUM_REGEX.test(String(sheetNumber).trim()) : false;
+    if ((isNonContentType || isNonContentTitle || isNonContentSheetNum) && entries.length > 0) {
+      const reason = isNonContentType ? `type="${sheetType}"` : isNonContentTitle ? `title="${sheetTitle}"` : `sheet="${sheetNumber}"`;
+      aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: dropped ${entries.length} hallucinated item(s) from non-content sheet (${reason})`);
       continue; // Skip this page entirely
     }
 
     for (const entry of entries) {
       if (!entry.description || entry.description.length < 2) continue;
 
-      // SECONDARY HALLUCINATION GUARD: if the entry has no size (or is the
-      // literal string "N/A") AND no mark AND no length, it's a generic
-      // "VERTICAL COLUMN MEMBER, ELEVATION 1" placeholder. The model made
-      // it up. Skip it. Real takeoff items will have at least one of:
-      // a size token (W6x15), a member mark (C1, B2), a length, or a
-      // unit-quantified value (e.g. LF of decking).
+      // SECONDARY HALLUCINATION GUARD (tightened May-15 v2).
+      // Real takeoff items must have at least one of these specifics:
+      //   - a size token (W6x15, HSS6x6x1/4, L3x3x1/4, PIPE 4 STD, 3/4")
+      //   - a member mark (C1, B2, BP-1)
+      //   - a length in feet
+      //   - a quantity > 1 (qty=1 is the default; doesn't prove specificity)
+      // The old version accepted qty>0 which let qty=1 placeholders through.
+      // Also: descriptions that are pure generic phrasing ("VERTICAL COLUMN
+      // MEMBER", "HORIZONTAL BEAM", "DIAGONAL CROSS-BRACING MEMBER") with
+      // no other specifics get dropped — the model made them up.
       const hasSize = entry.size && String(entry.size).trim() && String(entry.size).trim().toUpperCase() !== "N/A";
       const hasMark = entry.mark && String(entry.mark).trim();
       const hasLength = entry.lengthFt != null && Number(entry.lengthFt) > 0;
-      const hasReasonableQty = Number(entry.quantity) > 0;
-      if (!hasSize && !hasMark && !hasLength && !hasReasonableQty) {
-        aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: dropped placeholder item "${String(entry.description).substring(0, 60)}" (no size/mark/length)`);
+      const hasMultiQty = Number(entry.quantity) > 1;
+      const desc = String(entry.description || "").toUpperCase();
+      const isGenericDesc = /^(VERTICAL|HORIZONTAL|DIAGONAL)?\s*(COLUMN|BEAM|BRACE|BRACING|CROSS-?BRACING|MEMBER|LINTEL)/.test(desc.trim())
+        && !/(W\d|C\d|HSS\d|L\d|PL|PLATE|BP|BASE\s*PLATE|SHEAR\s*TAB|GUSSET|MARK|SCHEDULE|SIZE|x\d|\")/i.test(entry.description || "");
+      if ((!hasSize && !hasMark && !hasLength && !hasMultiQty) || (isGenericDesc && !hasSize && !hasMark)) {
+        aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: dropped placeholder item "${String(entry.description).substring(0, 60)}" (no size/mark/length, generic description)`);
         continue;
       }
 
@@ -4290,10 +4315,13 @@ async function finalEmptyPageSweep(
       // which the primary path already attempted. Abort.
       break;
     }
-    const minPage = Math.min(...pagesWithItems);
-    const maxPage = Math.max(...pagesWithItems);
+    // BB3 v2 audit fix (May-15): the sweep used to compute minPage/maxPage
+    // from pagesWithItems and only retry pages inside that window. That
+    // meant pages BEYOND the last extracted page (e.g. pages 57-61 when the
+    // last item came from page 56) never got swept. Now retry every page
+    // from `startPage` to `totalPages` that has no items.
     const emptyPages: number[] = [];
-    for (let p = minPage; p <= maxPage; p++) {
+    for (let p = startPage; p <= startPage + totalPages - 1; p++) {
       if (!pagesWithItems.has(p)) emptyPages.push(p);
     }
     if (emptyPages.length === 0) {
