@@ -1139,6 +1139,7 @@ async function extractWithVision(
         }
 
         let parseSuccess = false;
+        let returnedEmpty = false;
         try {
           const parsed = JSON.parse(jsonStr);
           if (parsed.pages && Array.isArray(parsed.pages)) {
@@ -1146,7 +1147,8 @@ async function extractWithVision(
               if (page.pageNum && Array.isArray(page.items)) {
                 results.set(page.pageNum, { items: page.items, drawingNumber: page.drawingNumber || null, weldCount: page.weldCount || null, continuations: page.continuations || [] });
                 if (page.items.length === 0) {
-                  console.warn(`  Warning: Page ${page.pageNum} returned 0 items`);
+                  console.warn(`  Warning: Page ${page.pageNum} returned 0 items (attempt ${attempt + 1})`);
+                  returnedEmpty = true;
                 }
               }
             }
@@ -1157,6 +1159,35 @@ async function extractWithVision(
         } catch (parseErr) {
           console.error(`  Failed to parse AI response (attempt ${attempt + 1}) for batch at page ${batch[0].pageNum}:`, parseErr);
           console.error(`  Response: ${responseText.substring(0, 500)}`);
+        }
+        // EMPTY-RESULT IN-LINE RETRY (added May-15 after Area 100 audit)
+        // ----------------------------------------------------------------
+        // If the parse succeeded but the model returned items=[] for every
+        // page in the batch, immediately retry the batch ONCE with a stronger
+        // "be thorough" hint appended. This catches the 56% of misses that
+        // showed up at position 2 of every 10-page chunk during the Area 100
+        // 560-page run — the model occasionally whiffs a page on first pass
+        // and a single re-prompt with the same image recovers it. We only
+        // do this on the FIRST attempt to avoid loops; if both passes return
+        // empty, the downstream suspect-page recovery handles it.
+        if (parseSuccess && returnedEmpty && attempt === 0) {
+          const allEmpty = batch.every(p => {
+            const r = results.get(p.pageNum);
+            return !r || r.items.length === 0;
+          });
+          if (allEmpty) {
+            console.warn(`  All pages in batch returned empty \u2014 triggering one in-line retry with thoroughness hint`);
+            // Mutate the prompt in-place for the next loop iteration. The
+            // backoff is short (2s) and the model gets one more chance with
+            // the SAME image. If it still returns empty, we accept the empty
+            // result and let the downstream suspect-page recovery handle it.
+            content[content.length - 1] = {
+              type: "text" as const,
+              text: prompt + "\n\nIMPORTANT: A prior attempt on this page returned ZERO items. The page DOES contain a BOM table. Scan the right side and bottom of the image carefully \u2014 BOM tables are sometimes positioned away from the obvious center. If you genuinely see no BOM at all (title page, plan view with no parts list, or a continuation note), return items: [] again. Otherwise extract every row you can see.",
+            };
+            lastApiErr = null;
+            continue; // Go to attempt=1 with the augmented prompt
+          }
         }
         if (parseSuccess) {
           lastApiErr = null;
@@ -3787,6 +3818,122 @@ async function extractCivilChunk(
 }
 
 // ============================================================
+// FINAL SWEEP — close the gap on still-empty pages
+// ============================================================
+// Added May-15 after the Area 100 audit. The Area 100 run (560 pages)
+// returned 73 pages with zero items. The existing recovery pass had a
+// 25-page cap, so 48 of those pages were never even attempted a second
+// time. This helper runs after the primary recovery passes and keeps
+// retrying still-empty pages in batches until either:
+//   - no more empty pages remain, OR
+//   - a sweep makes zero progress (the model genuinely can't extract
+//     anything from those pages — most likely a title page or a non-BOM
+//     drawing sheet), OR
+//   - we hit the maxSweeps cap (defensive bound on API cost).
+//
+// Returns the updated items array and per-sweep counts for logging.
+async function finalEmptyPageSweep(
+  items: any[],
+  pdfPath: string,
+  discipline: string,
+  startPage: number,
+  totalPages: number,
+  maxSweeps: number = 3,
+  batchSize: number = 50,
+): Promise<{ items: any[]; sweepsRun: number; recoveredPages: number[]; finalEmptyPages: number[] }> {
+  if (!fs.existsSync(pdfPath)) {
+    return { items, sweepsRun: 0, recoveredPages: [], finalEmptyPages: [] };
+  }
+
+  let currentItems = items;
+  const recoveredAll: number[] = [];
+  let sweep = 0;
+
+  for (sweep = 1; sweep <= maxSweeps; sweep++) {
+    // Find pages with zero items in the GLOBAL page range. We trust the
+    // pageCount the caller passed because some pages legitimately had no
+    // BOM (title pages, plan views) and were filtered upstream by
+    // isTitlePage(); those filtered pages will not be in the input image
+    // set at all, and re-rendering them is harmless — the extractor will
+    // return items: [] again and they stay empty, costing one API call.
+    const pagesWithItems = new Set<number>();
+    for (const it of currentItems) {
+      if (typeof it.sourcePage === "number") pagesWithItems.add(it.sourcePage);
+    }
+    if (pagesWithItems.size === 0) {
+      // Nothing was ever extracted — sweep would just retry everything,
+      // which the primary path already attempted. Abort.
+      break;
+    }
+    const minPage = Math.min(...pagesWithItems);
+    const maxPage = Math.max(...pagesWithItems);
+    const emptyPages: number[] = [];
+    for (let p = minPage; p <= maxPage; p++) {
+      if (!pagesWithItems.has(p)) emptyPages.push(p);
+    }
+    if (emptyPages.length === 0) {
+      console.log(`  Final sweep ${sweep}: no empty pages remain \u2014 stopping.`);
+      break;
+    }
+
+    console.log(`  Final sweep ${sweep}/${maxSweeps}: ${emptyPages.length} still-empty page(s) to retry (in batches of ${batchSize}).`);
+
+    // Process in batches so we don't blow up the API cost or hold huge
+    // amounts of memory for re-rendered images at once.
+    let recoveredThisSweep = 0;
+    for (let b = 0; b < emptyPages.length; b += batchSize) {
+      const batch = emptyPages.slice(b, b + batchSize);
+      try {
+        const r = await reExtractLowConfidencePages(currentItems, pdfPath, discipline, startPage, {
+          extraPages: batch,
+          renderMode: "fullpage",
+          pageLimit: batch.length, // Don't truncate \u2014 try all of them
+        });
+        if (r.reExtractedPages.length > 0) {
+          currentItems = r.reExtractedItems;
+          // Count how many of the batch pages NOW have items
+          const afterPages = new Set<number>();
+          for (const it of currentItems) {
+            if (typeof it.sourcePage === "number") afterPages.add(it.sourcePage);
+          }
+          for (const p of batch) {
+            if (afterPages.has(p)) {
+              recoveredThisSweep++;
+              recoveredAll.push(p);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn(`  Final sweep batch failed: ${err.message?.substring(0, 100)}`);
+      }
+    }
+
+    console.log(`  Final sweep ${sweep} done: recovered ${recoveredThisSweep} of ${emptyPages.length} empty page(s).`);
+    if (recoveredThisSweep === 0) {
+      // No progress \u2014 further sweeps won't help either. Stop early.
+      console.log(`  Final sweep ${sweep} made no progress \u2014 stopping sweeps.`);
+      break;
+    }
+  }
+
+  // Compute the final still-empty list for the warning summary.
+  const finalPagesWithItems = new Set<number>();
+  for (const it of currentItems) {
+    if (typeof it.sourcePage === "number") finalPagesWithItems.add(it.sourcePage);
+  }
+  const finalEmpty: number[] = [];
+  if (finalPagesWithItems.size > 0) {
+    const minP = Math.min(...finalPagesWithItems);
+    const maxP = Math.max(...finalPagesWithItems);
+    for (let p = minP; p <= maxP; p++) {
+      if (!finalPagesWithItems.has(p)) finalEmpty.push(p);
+    }
+  }
+
+  return { items: currentItems, sweepsRun: sweep - 1, recoveredPages: recoveredAll, finalEmptyPages: finalEmpty };
+}
+
+// ============================================================
 // BACKGROUND PROCESSING
 // ============================================================
 
@@ -3905,7 +4052,20 @@ async function processUploadedPdf(
         allItems.push(...chunkResult.items);
         if (i === 0 && chunkResult.metadata) metadata = chunkResult.metadata;
         chunksCompleted++;
-        console.log(`  Chunk ${chunkNum} complete: ${chunkResult.items.length} items (total: ${allItems.length})`);
+        // Per-chunk empty-page diagnostic (added May-15). Lists exactly which
+        // global pages within this chunk came back with zero items so we can
+        // spot per-chunk position biases (e.g. "position 2 of every 10-page
+        // chunk" was the Area 100 fingerprint).
+        const chunkPagesWithItems = new Set<number>();
+        for (const it of chunkResult.items) {
+          if (typeof it.sourcePage === "number") chunkPagesWithItems.add(it.sourcePage);
+        }
+        const chunkEmptyPages: number[] = [];
+        for (let gp = chunk.startPage; gp <= chunk.endPage; gp++) {
+          if (!chunkPagesWithItems.has(gp)) chunkEmptyPages.push(gp);
+        }
+        const emptyTag = chunkEmptyPages.length > 0 ? ` \u2014 EMPTY pages in this chunk: ${chunkEmptyPages.join(", ")}` : "";
+        console.log(`  Chunk ${chunkNum} complete: ${chunkResult.items.length} items (total: ${allItems.length})${emptyTag}`);
 
         // Save partial results after each chunk — assign lineNumbers first (DB requires NOT NULL)
         const itemsToSave = allItems.map((item: any, idx: number) => ({ ...item, lineNumber: idx + 1 }));
@@ -3958,7 +4118,11 @@ async function processUploadedPdf(
           const reExtractResult = await reExtractLowConfidencePages(allItems, pdfPath, discipline, 1, {
             extraPages: suspectPages,
             renderMode: "fullpage",
-            pageLimit: 25,
+            // Lifted from 25 → 200 after the Area 100 audit (May-15). On a
+            // 560-page run there were 73 suspect/empty pages, and the old
+            // cap silently dropped 48 of them. 200 is enough headroom for
+            // a 1000+ page package while still bounding API cost.
+            pageLimit: 200,
           });
           if (reExtractResult.reExtractedPages.length > 0) {
             allItems.length = 0;
@@ -3982,6 +4146,28 @@ async function processUploadedPdf(
           }
         } catch (recoveryErr: any) {
           console.warn(`  Pipe-row safety-net failed: ${recoveryErr.message?.substring(0, 100)}`);
+        }
+      }
+
+      // FINAL SWEEP — close the gap on still-empty pages. Added May-15 after
+      // the Area 100 audit: 73 of 560 pages came back empty, and the primary
+      // recovery only handled 25 of them. This sweep keeps retrying empty
+      // pages in batches of 50 until none remain or progress stalls.
+      if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+        try {
+          const sweepResult = await finalEmptyPageSweep(allItems, pdfPath, discipline, 1, pageCount);
+          if (sweepResult.recoveredPages.length > 0) {
+            allItems.length = 0;
+            allItems.push(...sweepResult.items);
+            warnings.push(`Final sweep: recovered BOM on ${sweepResult.recoveredPages.length} previously-empty page(s) across ${sweepResult.sweepsRun} sweep pass(es).`);
+          }
+          if (sweepResult.finalEmptyPages.length > 0) {
+            const sample = sweepResult.finalEmptyPages.slice(0, 25).join(", ");
+            const more = sweepResult.finalEmptyPages.length > 25 ? `, ... (${sweepResult.finalEmptyPages.length - 25} more)` : "";
+            warnings.push(`${sweepResult.finalEmptyPages.length} page(s) still have no BOM extracted after all retries: ${sample}${more}. Verify these against the drawings \u2014 they may be legitimately empty (title pages, plan views) or genuinely missed.`);
+          }
+        } catch (sweepErr: any) {
+          console.warn(`  Final empty-page sweep failed: ${sweepErr.message?.substring(0, 100)}`);
         }
       }
 
@@ -4498,7 +4684,9 @@ async function processUploadedPdf(
       const reExtractResult = await reExtractLowConfidencePages(allItems, pdfPath, discipline, startPage, {
         extraPages: suspectPages,
         renderMode: "fullpage",
-        pageLimit: 25,
+        // Lifted from 25 → 200 after the Area 100 audit (May-15). See call
+        // site above for full context.
+        pageLimit: 200,
       });
       if (reExtractResult.reExtractedPages.length > 0) {
         // BUG FIX: actually use the result. Old code computed reExtractedItems
@@ -4525,6 +4713,28 @@ async function processUploadedPdf(
       }
     } catch (recoveryErr: any) {
       console.warn(`  Pipe-row safety-net failed: ${recoveryErr.message?.substring(0, 100)}`);
+    }
+  }
+
+  // Step: FINAL SWEEP — close the gap on still-empty pages (May-15 fix).
+  // Mirrors the same sweep used in the streaming path. See finalEmptyPageSweep()
+  // for the rationale.
+  if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+    try {
+      const startPage = chunks[0]?.startPage || 1;
+      const sweepResult = await finalEmptyPageSweep(allItems, pdfPath, discipline, startPage, pageCount);
+      if (sweepResult.recoveredPages.length > 0) {
+        allItems.length = 0;
+        allItems.push(...sweepResult.items);
+        warnings.push(`Final sweep: recovered BOM on ${sweepResult.recoveredPages.length} previously-empty page(s) across ${sweepResult.sweepsRun} sweep pass(es).`);
+      }
+      if (sweepResult.finalEmptyPages.length > 0) {
+        const sample = sweepResult.finalEmptyPages.slice(0, 25).join(", ");
+        const more = sweepResult.finalEmptyPages.length > 25 ? `, ... (${sweepResult.finalEmptyPages.length - 25} more)` : "";
+        warnings.push(`${sweepResult.finalEmptyPages.length} page(s) still have no BOM extracted after all retries: ${sample}${more}. Verify these against the drawings \u2014 they may be legitimately empty (title pages, plan views) or genuinely missed.`);
+      }
+    } catch (sweepErr: any) {
+      console.warn(`  Final empty-page sweep failed: ${sweepErr.message?.substring(0, 100)}`);
     }
   }
 
