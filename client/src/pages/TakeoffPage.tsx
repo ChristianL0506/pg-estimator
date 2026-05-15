@@ -593,6 +593,11 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       {selectedProject.drawingDate && <span>Date: {selectedProject.drawingDate}</span>}
                       <span>{selectedProject.items.length} items</span>
                     </div>
+                    {/* Scope tags row — AI-suggested at user request, edited inline.
+                        Tags are used by the Performance page and the future
+                        conversational Quick-Estimate to match new bids against
+                        similar past projects. */}
+                    <ScopeTagsRow project={selectedProject} />
                   </div>
                   <div className="flex items-center gap-2 shrink-0 flex-wrap md:flex-nowrap">
                     {availablePages.length > 0 && (
@@ -1044,5 +1049,105 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
         </div>
       </div>
     </AppLayout>
+  );
+}
+
+// ============================================================
+// SCOPE TAGS ROW
+// ============================================================
+// Displays the takeoff's scope tags as badge pills with an inline
+// "Suggest tags" button that calls the AI. Users can remove a tag by
+// clicking the x on its pill, or add a tag manually with the input.
+// Tags drive cross-project matching (Performance page bid-vs-actual
+// comparison; Quick-Estimate scope-similarity search).
+function ScopeTagsRow({ project }: { project: any }) {
+  const { toast } = useToast();
+  const tags: string[] = Array.isArray(project?.scopeTags) ? project.scopeTags : [];
+  const [adding, setAdding] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const saveTags = async (next: string[]) => {
+    setBusy(true);
+    try {
+      await apiRequest("PATCH", `/api/takeoff-projects/${project.id}/tags`, { scopeTags: next });
+      await queryClient.invalidateQueries({ queryKey: ["/api/takeoff-projects", project.id] });
+      await queryClient.invalidateQueries({ queryKey: ["takeoff-projects"] });
+    } catch (e: any) {
+      toast({ title: e?.message || "Failed to save tags", variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const suggest = async () => {
+    setBusy(true);
+    try {
+      const res = await apiRequest("POST", `/api/takeoff-projects/${project.id}/suggest-tags`, {});
+      const data = await res.json();
+      const suggested: string[] = Array.isArray(data?.tags) ? data.tags : [];
+      // Merge with existing, dedupe, save.
+      const next = Array.from(new Set([...tags, ...suggested])).slice(0, 8);
+      await saveTags(next);
+      toast({ title: `Suggested ${suggested.length} tag(s) (${data?.source || "ai"})` });
+    } catch (e: any) {
+      toast({ title: e?.message || "Suggest failed", variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeTag = async (t: string) => {
+    await saveTags(tags.filter(x => x !== t));
+  };
+
+  const addTag = async () => {
+    const t = adding.trim().toLowerCase().replace(/\s+/g, "-");
+    if (!t) return;
+    if (tags.includes(t)) { setAdding(""); return; }
+    await saveTags([...tags, t].slice(0, 8));
+    setAdding("");
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+      <span className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mr-1">Scope</span>
+      {tags.length === 0 && (
+        <span className="text-xs text-muted-foreground italic">No tags yet</span>
+      )}
+      {tags.map(t => (
+        <Badge key={t} variant="secondary" className="text-xs gap-1 pr-1.5">
+          {t}
+          <button
+            type="button"
+            onClick={() => removeTag(t)}
+            disabled={busy}
+            className="opacity-60 hover:opacity-100 disabled:opacity-30"
+            aria-label={`Remove ${t}`}
+          >
+            <XIcon size={11} />
+          </button>
+        </Badge>
+      ))}
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-6 px-2 text-xs"
+        onClick={suggest}
+        disabled={busy}
+        title="Ask the AI to suggest scope tags from the BOM contents. Suggestions are added to the existing tags; you can remove any you don't want."
+      >
+        <Plus size={11} className="mr-1" />
+        {busy ? "Working..." : "Suggest tags"}
+      </Button>
+      {/* Inline add — kept lightweight so the row stays one line on common widths */}
+      <input
+        type="text"
+        value={adding}
+        onChange={e => setAdding(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addTag(); } }}
+        placeholder="add tag…"
+        className="h-6 px-2 text-xs rounded border bg-background w-28 focus:outline-none focus:ring-1 focus:ring-ring"
+      />
+    </div>
   );
 }

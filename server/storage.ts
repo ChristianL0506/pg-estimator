@@ -448,6 +448,23 @@ try {
   db.exec(`ALTER TABLE estimate_projects ADD COLUMN contingencyOverride REAL`);
 } catch (e: any) { /* Column already exists */ }
 
+// ----- Bid-vs-Actual extensions to completed_projects (added May-15) -----
+// Each ALTER TABLE is in its own try/catch because better-sqlite3 doesn't have
+// IF NOT EXISTS on ALTER, and we don't want a single failure to skip the rest.
+try { db.exec(`ALTER TABLE completed_projects ADD COLUMN sourceTakeoffId TEXT`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE completed_projects ADD COLUMN sourceEstimateId TEXT`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE completed_projects ADD COLUMN discipline TEXT`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE completed_projects ADD COLUMN bidLaborHours REAL`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE completed_projects ADD COLUMN bidMaterialCost REAL`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE completed_projects ADD COLUMN bidTotalCost REAL`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE completed_projects ADD COLUMN actualLaborByCategoryJson TEXT`); } catch (e: any) { /* exists */ }
+
+// Scope tags on takeoff projects — AI-suggested at upload, user-confirmable
+// from the takeoff page. JSON array of strings.
+try { db.exec(`ALTER TABLE takeoff_projects ADD COLUMN scopeTagsJson TEXT DEFAULT '[]'`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE takeoff_projects ADD COLUMN client TEXT`); } catch (e: any) { /* exists */ }
+try { db.exec(`ALTER TABLE takeoff_projects ADD COLUMN location TEXT`); } catch (e: any) { /* exists */ }
+
 // Create corrections table for tracking human edits
 db.exec(`
   CREATE TABLE IF NOT EXISTS corrections (
@@ -645,6 +662,14 @@ setTimeout(() => runAutoBackup("Initial"), 5 * 60 * 1000);
 // ============================================================
 
 function serializeTakeoffProject(row: any, items: TakeoffItem[]): TakeoffProject {
+  // Scope tags are stored as JSON. Default to empty array if absent / invalid.
+  let scopeTags: string[] = [];
+  if (row.scopeTagsJson) {
+    try {
+      const parsed = JSON.parse(row.scopeTagsJson);
+      if (Array.isArray(parsed)) scopeTags = parsed.filter((t: any) => typeof t === "string");
+    } catch { /* keep empty */ }
+  }
   return {
     id: row.id,
     name: row.name,
@@ -657,6 +682,9 @@ function serializeTakeoffProject(row: any, items: TakeoffItem[]): TakeoffProject
     createdAt: row.createdAt,
     items,
     archived: row.archived === 1,
+    scopeTags,
+    client: row.client || undefined,
+    location: row.location || undefined,
   };
 }
 
@@ -780,6 +808,10 @@ const stmts = {
   getTakeoffProjectsByDiscipline: db.prepare(`SELECT * FROM takeoff_projects WHERE discipline = ? ORDER BY createdAt DESC`),
   getTakeoffProjectItemCount: db.prepare(`SELECT projectId, COUNT(*) as itemCount FROM takeoff_items GROUP BY projectId`),
   updateTakeoffProjectMetadata: db.prepare(`UPDATE takeoff_projects SET lineNumber = COALESCE(?, lineNumber), area = COALESCE(?, area), revision = COALESCE(?, revision), drawingDate = COALESCE(?, drawingDate) WHERE id = ?`),
+  // Scope-tag and identity update for a takeoff. COALESCE so any null/undefined
+  // arg leaves the existing value untouched. Used by the Performance feature
+  // and by the AI-suggest-tags endpoint.
+  updateTakeoffProjectTagsAndIdentity: db.prepare(`UPDATE takeoff_projects SET scopeTagsJson = COALESCE(?, scopeTagsJson), client = COALESCE(?, client), location = COALESCE(?, location) WHERE id = ?`),
   archiveTakeoffProject: db.prepare(`UPDATE takeoff_projects SET archived = ? WHERE id = ?`),
   getTakeoffProject: db.prepare(`SELECT * FROM takeoff_projects WHERE id = ?`),
   getTakeoffItems: db.prepare(`SELECT * FROM takeoff_items WHERE projectId = ? ORDER BY lineNumber`),
@@ -831,11 +863,14 @@ const stmts = {
   deleteCorrectionPattern: db.prepare(`DELETE FROM correction_patterns WHERE id = ?`),
   deleteAllCorrectionPatterns: db.prepare(`DELETE FROM correction_patterns`),
 
-  // Completed Projects (Project History)
-  insertCompletedProject: db.prepare(`INSERT INTO completed_projects (id, name, client, location, scopeDescription, startDate, endDate, welderHours, fitterHours, helperHours, foremanHours, operatorHours, totalManhours, materialCost, laborCost, totalCost, peakCrewSize, durationDays, tags, notes, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  // Completed Projects (Project History + Bid-vs-Actual)
+  insertCompletedProject: db.prepare(`INSERT INTO completed_projects (id, name, client, location, scopeDescription, startDate, endDate, welderHours, fitterHours, helperHours, foremanHours, operatorHours, totalManhours, materialCost, laborCost, totalCost, peakCrewSize, durationDays, tags, notes, createdAt, sourceTakeoffId, sourceEstimateId, discipline, bidLaborHours, bidMaterialCost, bidTotalCost, actualLaborByCategoryJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getCompletedProjects: db.prepare(`SELECT * FROM completed_projects ORDER BY createdAt DESC`),
   getCompletedProject: db.prepare(`SELECT * FROM completed_projects WHERE id = ?`),
   deleteCompletedProject: db.prepare(`DELETE FROM completed_projects WHERE id = ?`),
+  // Update statement covers everything except id/createdAt. Used by the
+  // Performance page when the user enters actuals on a closed project.
+  updateCompletedProject: db.prepare(`UPDATE completed_projects SET name = ?, client = ?, location = ?, scopeDescription = ?, startDate = ?, endDate = ?, welderHours = ?, fitterHours = ?, helperHours = ?, foremanHours = ?, operatorHours = ?, totalManhours = ?, materialCost = ?, laborCost = ?, totalCost = ?, peakCrewSize = ?, durationDays = ?, tags = ?, notes = ?, sourceTakeoffId = ?, sourceEstimateId = ?, discipline = ?, bidLaborHours = ?, bidMaterialCost = ?, bidTotalCost = ?, actualLaborByCategoryJson = ? WHERE id = ?`),
   searchCompletedProjects: db.prepare(`SELECT * FROM completed_projects WHERE scopeDescription LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\' ORDER BY createdAt DESC`),
 
   // Targeted cost lookup for auto-pricing
@@ -998,6 +1033,19 @@ class Storage {
     if (!row) return undefined;
     replaceTakeoffItemsTransaction(id, items);
     return serializeTakeoffProject(row, items);
+  }
+
+  // Save AI-suggested or user-edited scope tags + identity (client/location).
+  // Any field omitted from the input is left as-is in the DB via COALESCE on
+  // the prepared statement. tags is serialized to JSON.
+  updateTakeoffProjectTagsAndIdentity(id: string, data: { scopeTags?: string[]; client?: string; location?: string }): void {
+    const tagsJson = data.scopeTags ? JSON.stringify(data.scopeTags) : null;
+    stmts.updateTakeoffProjectTagsAndIdentity.run(
+      tagsJson,
+      data.client ?? null,
+      data.location ?? null,
+      id,
+    );
   }
 
   updateTakeoffProjectMetadata(id: string, metadata: { lineNumber?: string; area?: string; revision?: string; drawingDate?: string }): void {
@@ -1454,37 +1502,12 @@ class Storage {
     return row || undefined;
   }
 
-  // ---- Completed Projects (Project History) ----
+  // ---- Completed Projects (Project History + Bid-vs-Actual) ----
 
-  getCompletedProjects(): CompletedProject[] {
-    return (stmts.getCompletedProjects.all() as any[]).map(row => ({
-      id: row.id,
-      name: row.name,
-      client: row.client || undefined,
-      location: row.location || undefined,
-      scopeDescription: row.scopeDescription,
-      startDate: row.startDate || undefined,
-      endDate: row.endDate || undefined,
-      welderHours: row.welderHours || 0,
-      fitterHours: row.fitterHours || 0,
-      helperHours: row.helperHours || 0,
-      foremanHours: row.foremanHours || 0,
-      operatorHours: row.operatorHours || 0,
-      totalManhours: row.totalManhours || 0,
-      materialCost: row.materialCost || 0,
-      laborCost: row.laborCost || 0,
-      totalCost: row.totalCost || 0,
-      peakCrewSize: row.peakCrewSize || undefined,
-      durationDays: row.durationDays || undefined,
-      tags: row.tags || undefined,
-      notes: row.notes || undefined,
-      createdAt: row.createdAt,
-    }));
-  }
-
-  getCompletedProject(id: string): CompletedProject | undefined {
-    const row = stmts.getCompletedProject.get(id) as any;
-    if (!row) return undefined;
+  // Single row mapper, used by both list and single-fetch. Keeps the bid-vs-
+  // actual fields populated even on legacy rows (they're added by ALTER TABLE
+  // so older rows simply have NULLs there).
+  private rowToCompletedProject(row: any): CompletedProject {
     return {
       id: row.id,
       name: row.name,
@@ -1507,7 +1530,24 @@ class Storage {
       tags: row.tags || undefined,
       notes: row.notes || undefined,
       createdAt: row.createdAt,
+      // Bid-vs-actual extensions (May-15)
+      sourceTakeoffId: row.sourceTakeoffId || undefined,
+      sourceEstimateId: row.sourceEstimateId || undefined,
+      discipline: row.discipline || undefined,
+      bidLaborHours: row.bidLaborHours != null ? Number(row.bidLaborHours) : undefined,
+      bidMaterialCost: row.bidMaterialCost != null ? Number(row.bidMaterialCost) : undefined,
+      bidTotalCost: row.bidTotalCost != null ? Number(row.bidTotalCost) : undefined,
+      actualLaborByCategoryJson: row.actualLaborByCategoryJson || undefined,
     };
+  }
+
+  getCompletedProjects(): CompletedProject[] {
+    return (stmts.getCompletedProjects.all() as any[]).map(row => this.rowToCompletedProject(row));
+  }
+
+  getCompletedProject(id: string): CompletedProject | undefined {
+    const row = stmts.getCompletedProject.get(id) as any;
+    return row ? this.rowToCompletedProject(row) : undefined;
   }
 
   addCompletedProject(data: any): CompletedProject {
@@ -1522,19 +1562,50 @@ class Storage {
       data.foremanHours || 0, data.operatorHours || 0, totalManhours,
       data.materialCost || 0, data.laborCost || 0, totalCost,
       data.peakCrewSize || null, data.durationDays || null,
-      data.tags || null, data.notes || null, createdAt
+      data.tags || null, data.notes || null, createdAt,
+      // Bid-vs-actual extensions — all optional, NULL when not provided
+      data.sourceTakeoffId || null, data.sourceEstimateId || null,
+      data.discipline || null,
+      data.bidLaborHours != null ? data.bidLaborHours : null,
+      data.bidMaterialCost != null ? data.bidMaterialCost : null,
+      data.bidTotalCost != null ? data.bidTotalCost : null,
+      data.actualLaborByCategoryJson || null,
     );
-    return {
-      id, name: data.name, client: data.client || undefined,
-      location: data.location || undefined, scopeDescription: data.scopeDescription,
-      startDate: data.startDate || undefined, endDate: data.endDate || undefined,
-      welderHours: data.welderHours || 0, fitterHours: data.fitterHours || 0,
-      helperHours: data.helperHours || 0, foremanHours: data.foremanHours || 0,
-      operatorHours: data.operatorHours || 0, totalManhours,
-      materialCost: data.materialCost || 0, laborCost: data.laborCost || 0, totalCost,
-      peakCrewSize: data.peakCrewSize || undefined, durationDays: data.durationDays || undefined,
-      tags: data.tags || undefined, notes: data.notes || undefined, createdAt,
-    };
+    return this.rowToCompletedProject({
+      id, ...data, totalManhours, totalCost, createdAt,
+    });
+  }
+
+  // Update an existing completed project. Used by the Performance page when
+  // the user enters or revises actuals for a closed project. Recomputes
+  // totalManhours and totalCost from the trade breakdowns if any of those
+  // are present in `data`, otherwise preserves existing values.
+  updateCompletedProject(id: string, data: any): CompletedProject | undefined {
+    const existing = this.getCompletedProject(id);
+    if (!existing) return undefined;
+    const merged: any = { ...existing, ...data };
+    // Recompute totals so the user can update individual trade rows without
+    // remembering to also update the totals.
+    merged.totalManhours = (merged.welderHours || 0) + (merged.fitterHours || 0)
+      + (merged.helperHours || 0) + (merged.foremanHours || 0) + (merged.operatorHours || 0);
+    merged.totalCost = (merged.materialCost || 0) + (merged.laborCost || 0);
+    stmts.updateCompletedProject.run(
+      merged.name, merged.client || null, merged.location || null,
+      merged.scopeDescription, merged.startDate || null, merged.endDate || null,
+      merged.welderHours || 0, merged.fitterHours || 0, merged.helperHours || 0,
+      merged.foremanHours || 0, merged.operatorHours || 0, merged.totalManhours,
+      merged.materialCost || 0, merged.laborCost || 0, merged.totalCost,
+      merged.peakCrewSize || null, merged.durationDays || null,
+      merged.tags || null, merged.notes || null,
+      merged.sourceTakeoffId || null, merged.sourceEstimateId || null,
+      merged.discipline || null,
+      merged.bidLaborHours != null ? merged.bidLaborHours : null,
+      merged.bidMaterialCost != null ? merged.bidMaterialCost : null,
+      merged.bidTotalCost != null ? merged.bidTotalCost : null,
+      merged.actualLaborByCategoryJson || null,
+      id,
+    );
+    return this.getCompletedProject(id);
   }
 
   deleteCompletedProject(id: string): boolean {

@@ -58,6 +58,13 @@ export const takeoffProjectSchema = z.object({
   items: z.array(takeoffItemSchema).default([]),
   summary: z.any().optional(),
   archived: z.boolean().optional().default(false),
+  // Scope tags (e.g. "tank-farm", "pump-pad", "warehouse", "pipe-rack").
+  // AI-suggested at upload time, user-confirmable from the takeoff page.
+  // Used by the conversational quick-estimate to match new bids against
+  // similar past projects.
+  scopeTags: z.array(z.string()).optional().default([]),
+  client: z.string().optional(),
+  location: z.string().optional(),
 });
 export type TakeoffProject = z.infer<typeof takeoffProjectSchema>;
 
@@ -322,6 +329,27 @@ export const completedProjectSchema = z.object({
   tags: z.string().optional(), // comma-separated: "conveyor,stainless,8-inch,tank farm"
   notes: z.string().optional(),
   createdAt: z.string(),
+
+  // ----- Bid-vs-Actual extensions (added May-15) -----
+  // These let us tie a completed project to the takeoff/estimate that drove
+  // the bid, so the Performance page can compare bid vs actual and the
+  // factor-recommendation engine has data to calibrate against.
+
+  // Source linkage — optional, both may be present for projects bid through
+  // the tool. Legacy projects entered by hand may have neither.
+  sourceTakeoffId: z.string().optional(),
+  sourceEstimateId: z.string().optional(),
+  discipline: takeoffDisciplineSchema.optional(),
+
+  // Bid snapshot — captured at the moment the outcome record is created so
+  // subsequent factor edits don't retro-modify historical bids.
+  bidLaborHours: z.number().optional(),
+  bidMaterialCost: z.number().optional(),
+  bidTotalCost: z.number().optional(),
+
+  // Optional per-category actual MH breakdown when the user has it from a
+  // labor distribution report. Stored as JSON string: {"pipe": 120, ...}
+  actualLaborByCategoryJson: z.string().optional(),
 });
 export type CompletedProject = z.infer<typeof completedProjectSchema>;
 
@@ -387,3 +415,5 @@ export const jobProgressSchema = z.object({
   pdfQuality: z.enum(["vector", "clean_scan", "poor_scan"]).optional(),
 });
 export type JobProgress = z.infer<typeof jobProgressSchema>;
+
+

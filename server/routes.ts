@@ -547,6 +547,81 @@ function correctPipeLengthIfInches(qty: number, rawQty: string, description: str
   return { correctedQty: qty, wasCorrection: false, note: "" };
 }
 
+// ============================================================
+// HEURISTIC SCOPE-TAG SUGGESTER (offline / fallback)
+// ============================================================
+// Used when no AI key is available, or when the AI returns nothing parseable.
+// Generates 2-5 scope tags from a takeoff project's BOM signature, file name,
+// drawing-number tokens, and discipline. Returns tags drawn from the same
+// controlled vocabulary the AI is asked to use, so downstream code can treat
+// AI and heuristic outputs interchangeably.
+function suggestTagsHeuristic(proj: any): string[] {
+  const out: Set<string> = new Set();
+  const name = String(proj?.name || "").toLowerCase();
+  const file = String(proj?.fileName || "").toLowerCase();
+  const discipline = String(proj?.discipline || "mechanical").toLowerCase();
+  const items: any[] = Array.isArray(proj?.items) ? proj.items : [];
+
+  // Name / filename keyword matches — strongest single signal because users
+  // already label projects with the scope ("Area-100-Tank-Farm-Piping").
+  const text = `${name} ${file}`;
+  const KEYWORDS: Record<string, string> = {
+    "tank farm": "tank-farm", "tank-farm": "tank-farm", "tankfarm": "tank-farm",
+    "pipe rack": "pipe-rack", "pipe-rack": "pipe-rack", "piperack": "pipe-rack",
+    "pump pad": "pump-pad", "pump-pad": "pump-pad",
+    "loading rack": "loading-rack", "loading-rack": "loading-rack",
+    "truck loading": "truck-loading", "truck-loading": "truck-loading",
+    "rail loading": "rail-loading", "rail-loading": "rail-loading",
+    "wastewater": "wastewater",
+    "warehouse": "warehouse",
+    "platform": "platform",
+    "foundation": "foundation",
+    "paving": "paving",
+    "underground": "underground-utilities",
+    "shutdown": "shutdown",
+    "revamp": "revamp",
+    "expansion": "expansion",
+    "maintenance": "maintenance",
+  };
+  for (const [needle, tag] of Object.entries(KEYWORDS)) {
+    if (text.includes(needle)) out.add(tag);
+  }
+
+  // BOM-content signals.
+  if (discipline === "mechanical") {
+    const hasPipe = items.some(it => (it.category || "").toLowerCase() === "pipe");
+    if (hasPipe) out.add("process-piping");
+    // Stainless vs carbon: count material text tokens
+    let ssCount = 0, csCount = 0;
+    for (const it of items) {
+      const d = String(it.description || "").toLowerCase();
+      const mat = String(it.material || "").toLowerCase();
+      if (/(316|304|stainless|ss\b|a182|a312|a403)/.test(d + " " + mat)) ssCount++;
+      if (/(a105|a106|a234|carbon steel|cs\b)/.test(d + " " + mat)) csCount++;
+    }
+    if (ssCount > csCount && ssCount > 5) out.add("stainless-steel");
+    else if (csCount > ssCount && csCount > 5) out.add("carbon-steel");
+
+    // Small-bore vs large-bore: look at size distribution.
+    let smallBore = 0, largeBore = 0;
+    for (const it of items) {
+      const s = String(it.size || "").match(/^(\d+(?:\.\d+)?)/);
+      if (!s) continue;
+      const n = parseFloat(s[1]);
+      if (n > 0 && n <= 2) smallBore++;
+      else if (n >= 4) largeBore++;
+    }
+    if (smallBore > largeBore * 1.5) out.add("sw-small-bore");
+    else if (largeBore > smallBore * 1.5) out.add("bw-large-bore");
+  } else if (discipline === "structural") {
+    out.add("structural-steel");
+  } else if (discipline === "civil") {
+    out.add("concrete-pad");
+  }
+
+  // Cap at 5 tags so we don't overwhelm the UI.
+  return Array.from(out).slice(0, 5);
+}
 
 function isTitlePage(text: string): boolean {
   // If no OCR text available (tesseract not installed), assume it's NOT a title page
@@ -8927,6 +9002,205 @@ Picou Group Contractors`;
     const deleted = storage.deleteCompletedProject(req.params.id);
     if (!deleted) return res.status(404).json({ error: "Project not found" });
     res.json({ deleted: true });
+  });
+
+  // ===== COMPLETED PROJECTS — BID vs ACTUAL (Performance feature) =====
+  // These endpoints are aliases / extensions of /api/project-history. They
+  // provide the Performance page with full CRUD plus an estimate-snapshot
+  // helper. The original /api/project-history endpoints stay for backward
+  // compatibility with the existing ProjectHistoryPage UI.
+
+  app.get("/api/completed-projects", (_req, res) => {
+    res.json(storage.getCompletedProjects());
+  });
+
+  app.get("/api/completed-projects/:id", (req, res) => {
+    const proj = storage.getCompletedProject(req.params.id);
+    if (!proj) return res.status(404).json({ error: "Not found" });
+    res.json(proj);
+  });
+
+  app.post("/api/completed-projects", (req, res) => {
+    const data = req.body || {};
+    if (!data.name || !data.scopeDescription) {
+      return res.status(400).json({ error: "name and scopeDescription are required" });
+    }
+    res.json(storage.addCompletedProject(data));
+  });
+
+  // PATCH: update any subset of fields. Used by the Performance page when the
+  // estimator enters actuals (or revises them) for a closed project.
+  app.patch("/api/completed-projects/:id", (req, res) => {
+    const updated = storage.updateCompletedProject(req.params.id, req.body || {});
+    if (!updated) return res.status(404).json({ error: "Not found" });
+    res.json(updated);
+  });
+
+  app.delete("/api/completed-projects/:id", (req, res) => {
+    const ok = storage.deleteCompletedProject(req.params.id);
+    if (!ok) return res.status(404).json({ error: "Not found" });
+    res.json({ deleted: true });
+  });
+
+  // Snapshot an existing estimate as a new CompletedProject in "bid" state.
+  // This captures the bid labor hours / material $ / total $ at the moment
+  // the user marks the bid as submitted, so subsequent factor edits don't
+  // retro-modify the historical bid record. The user later returns to enter
+  // actuals once the job closes.
+  app.post("/api/completed-projects/from-estimate", async (req, res) => {
+    const { estimateId } = req.body || {};
+    if (!estimateId) return res.status(400).json({ error: "estimateId is required" });
+    const est = storage.getEstimateProject(estimateId);
+    if (!est) return res.status(404).json({ error: "Estimate not found" });
+
+    // Compute totals from the estimate items. We do this here (not in the
+    // storage layer) so the storage layer stays narrow and the math is
+    // visible alongside the snapshot intent.
+    const items = est.items || [];
+    const bidMaterialCost = items.reduce((s: number, it: any) => s + (Number(it.materialExtension) || 0), 0);
+    const bidLaborCost = items.reduce((s: number, it: any) => s + (Number(it.laborExtension) || 0), 0);
+    const bidLaborHours = items.reduce((s: number, it: any) => s + ((Number(it.laborHoursPerUnit) || 0) * (Number(it.quantity) || 0)), 0);
+    // Bid total INCLUDES markups (overhead, profit, tax, bond) so it lines
+    // up with what the customer was actually quoted.
+    const subtotal = bidMaterialCost + bidLaborCost;
+    const m = (est as any).markups || {};
+    const overheadAmt = subtotal * ((m.overhead || 0) / 100);
+    const profitAmt = (subtotal + overheadAmt) * ((m.profit || 0) / 100);
+    const taxAmt = bidMaterialCost * ((m.tax || 0) / 100);
+    const bondAmt = (subtotal + overheadAmt + profitAmt + taxAmt) * ((m.bond || 0) / 100);
+    const bidTotalCost = subtotal + overheadAmt + profitAmt + taxAmt + bondAmt;
+
+    // Pull source takeoff (if any) so we can carry discipline and tags.
+    let discipline: string | undefined;
+    let scopeTags: string[] | undefined;
+    if ((est as any).sourceTakeoffId) {
+      const takeoff = await storage.getTakeoffProject((est as any).sourceTakeoffId);
+      if (takeoff) {
+        discipline = takeoff.discipline;
+        scopeTags = (takeoff as any).scopeTags;
+      }
+    }
+
+    const created = storage.addCompletedProject({
+      name: est.name,
+      client: (est as any).client || undefined,
+      location: (est as any).location || undefined,
+      scopeDescription: `Bid for ${est.name} (${items.length} line items)`,
+      sourceTakeoffId: (est as any).sourceTakeoffId || undefined,
+      sourceEstimateId: est.id,
+      discipline,
+      bidLaborHours: Math.round(bidLaborHours * 10) / 10,
+      bidMaterialCost: Math.round(bidMaterialCost * 100) / 100,
+      bidTotalCost: Math.round(bidTotalCost * 100) / 100,
+      // Tags live on the takeoff. Mirror them into the comma-string `tags`
+      // field used by the existing Project-History search.
+      tags: scopeTags && scopeTags.length > 0 ? scopeTags.join(", ") : undefined,
+    });
+    res.json(created);
+  });
+
+  // ===== TAKEOFF SCOPE TAGS — AI-suggest + user-confirm =====
+  // The user runs a takeoff, then the AI suggests scope tags ("tank-farm",
+  // "pipe-rack", "pump-pad"...) based on the BOM contents. The user clicks
+  // to confirm or edit. Tags drive the Quick-Estimate matching engine.
+
+  app.post("/api/takeoff-projects/:id/suggest-tags", async (req, res) => {
+    const proj = await storage.getTakeoffProject(req.params.id);
+    if (!proj) return res.status(404).json({ error: "Takeoff not found" });
+
+    // Gather a short summary of the BOM. We do NOT send the whole BOM — just
+    // the top categories and largest sizes so the model has enough signal to
+    // classify the work type.
+    const items = proj.items || [];
+    const catCounts: Record<string, number> = {};
+    const sizeCounts: Record<string, number> = {};
+    for (const it of items) {
+      const c = (it.category || "").toLowerCase();
+      const s = (it.size || "").toLowerCase();
+      catCounts[c] = (catCounts[c] || 0) + 1;
+      sizeCounts[s] = (sizeCounts[s] || 0) + 1;
+    }
+    const topCats = Object.entries(catCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const topSizes = Object.entries(sizeCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    // Sample drawing-number tokens from notes to surface the work type the
+    // ISOs are tagged with (e.g. "TF" for tank farm, "PR" for pipe rack).
+    const drawingTokens = Array.from(new Set(items
+      .map((it: any) => String(it.notes || ""))
+      .map(n => (n.match(/[A-Z]{2,5}-?\d{2,5}/g) || []).slice(0, 1).join(""))
+      .filter(t => t.length > 0))).slice(0, 20);
+
+    const summary = [
+      `Project name: ${proj.name}`,
+      `Discipline: ${proj.discipline}`,
+      `File: ${proj.fileName}`,
+      `Item count: ${items.length}`,
+      `Top categories: ${topCats.map(([k, v]) => `${k}(${v})`).join(", ")}`,
+      `Top sizes: ${topSizes.map(([k, v]) => `${k}(${v})`).join(", ")}`,
+      drawingTokens.length > 0 ? `Drawing-number tokens: ${drawingTokens.slice(0, 10).join(", ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    const client = getAnthropicClient();
+    if (!client || !getUserApiKey()) {
+      // Without an API key we fall back to simple heuristic tagging so the
+      // feature still produces something useful in offline / dev mode.
+      const heuristic = suggestTagsHeuristic(proj);
+      return res.json({ tags: heuristic, source: "heuristic" });
+    }
+
+    try {
+      const msg = await client.messages.create({
+        model: "claude-sonnet-4-5",
+        max_tokens: 256,
+        temperature: 0,
+        messages: [{
+          role: "user",
+          content: `You are categorizing an industrial-construction takeoff for Picou Group (a piping, mechanical, structural, and civil contractor).
+
+Based on the takeoff summary below, return 2-5 short scope tags from this controlled vocabulary (use only these exact tags, lowercase, hyphenated):
+  Mechanical / Piping: tank-farm, pipe-rack, pump-pad, loading-rack, truck-loading, rail-loading, process-piping, utility-piping, sw-small-bore, bw-large-bore, stainless-steel, carbon-steel, hot-tap, plant-piping, wastewater
+  Structural: warehouse, platform, pipe-support-steel, stairs-handrails, structural-steel, miscellaneous-steel
+  Civil: concrete-pad, foundation, paving, underground-utilities, earthwork, retaining-wall
+  General: revamp, new-construction, shutdown, expansion, maintenance
+
+Return ONLY a JSON array of tag strings, no commentary. Example: ["tank-farm", "sw-small-bore", "stainless-steel"]
+
+TAKEOFF SUMMARY:
+${summary}`,
+        }],
+      });
+      const txt = msg.content[0].type === "text" ? msg.content[0].text : "";
+      // Best-effort JSON parse. If it fails, fall back to heuristics.
+      let parsed: any = [];
+      try {
+        const m = txt.match(/\[[^\]]*\]/);
+        if (m) parsed = JSON.parse(m[0]);
+      } catch { /* fall through */ }
+      const tags = Array.isArray(parsed) ? parsed.filter((t: any) => typeof t === "string" && t.length > 0).slice(0, 5) : [];
+      if (tags.length === 0) {
+        return res.json({ tags: suggestTagsHeuristic(proj), source: "heuristic-fallback" });
+      }
+      return res.json({ tags, source: "ai" });
+    } catch (err: any) {
+      console.warn("suggest-tags failed:", err?.message);
+      return res.json({ tags: suggestTagsHeuristic(proj), source: "heuristic-fallback" });
+    }
+  });
+
+  // Save confirmed tags + optional client/location for a takeoff.
+  app.patch("/api/takeoff-projects/:id/tags", async (req, res) => {
+    const proj = await storage.getTakeoffProject(req.params.id);
+    if (!proj) return res.status(404).json({ error: "Takeoff not found" });
+    const body = req.body || {};
+    const tags = Array.isArray(body.scopeTags)
+      ? body.scopeTags.filter((t: any) => typeof t === "string" && t.trim().length > 0).slice(0, 12)
+      : undefined;
+    storage.updateTakeoffProjectTagsAndIdentity(req.params.id, {
+      scopeTags: tags,
+      client: typeof body.client === "string" ? body.client : undefined,
+      location: typeof body.location === "string" ? body.location : undefined,
+    });
+    const updated = await storage.getTakeoffProject(req.params.id);
+    res.json(updated);
   });
 
   // ===== WELD INFERENCE ENDPOINT (Feature 2) =====
