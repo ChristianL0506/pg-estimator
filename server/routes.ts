@@ -627,10 +627,58 @@ function isTitlePage(text: string): boolean {
   // If no OCR text available (tesseract not installed), assume it's NOT a title page
   // — Claude will handle filtering during extraction
   if (text.trim().length === 0) return false;
-  if (text.trim().length < 50) return true;
-  const hasBom = /\b(PIPE|ELBOW|TEE|VALVE|FLANGE|GASKET|BOLT|STUD|REDUCER|W\d+X|HSS|FOOTING|REBAR|STORM|SEWER|ASPHALT)\b/i.test(text);
-  if (!hasBom && /\bAREA\s+\d+\b/i.test(text)) return true;
-  if (/FOR REFERENCE ONLY/i.test(text) && !hasBom) return true;
+
+  // CONSERVATIVE FILTER (rewritten May-15 after the Sugar Path BB3 audit).
+  // The previous version dropped any page with <50 chars OCR or any page
+  // missing a piping-shape keyword. On structural drawings this falsely
+  // killed framing plans, elevations, and detail sheets — 42 of 61 pages
+  // were dropped on the Sugar Path run.
+  //
+  // The new policy: only drop pages we're VERY confident are non-content.
+  // We accept the cost of sending a few title pages to the model in
+  // exchange for never silently dropping a real drawing sheet.
+
+  const trimmed = text.trim();
+
+  // Look for any content-bearing keyword across ALL three disciplines.
+  // If we see ANY of these we keep the page — they appear on every kind
+  // of takeoff-relevant sheet.
+  const hasBom = new RegExp([
+    // Mechanical / piping
+    "\\bPIPE\\b", "\\bELBOW\\b", "\\bTEE\\b", "\\bVALVE\\b", "\\bFLANGE\\b",
+    "\\bGASKET\\b", "\\bBOLT\\b", "\\bSTUD\\b", "\\bREDUCER\\b",
+    "\\bCOUPLING\\b", "\\bUNION\\b", "\\bNIPPLE\\b",
+    // Structural — wide flanges, channels, HSS, angles, joists, deck
+    "W\\d+X\\d+", "C\\d+X\\d+", "HSS\\d", "L\\d+X\\d+",
+    "\\bJOIST\\b", "\\bDECK\\b", "\\bCOLUMN\\b", "\\bBEAM\\b",
+    "\\bGIRDER\\b", "\\bBRACE\\b", "\\bBASE PLATE\\b", "\\bANCHOR\\b",
+    "\\bSTAIR\\b", "\\bHANDRAIL\\b", "\\bLADDER\\b", "\\bPLATFORM\\b",
+    "\\bGRATING\\b", "\\bSHEAR TAB\\b", "\\bGUSSET\\b",
+    // Civil / concrete
+    "\\bFOOTING\\b", "\\bSLAB\\b", "\\bREBAR\\b", "\\bCONCRETE\\b",
+    "\\bSTORM\\b", "\\bSEWER\\b", "\\bASPHALT\\b", "\\bMANHOLE\\b",
+    "\\bFOUNDATION\\b", "\\bGRADE BEAM\\b",
+    // Sheet-callout patterns that indicate this is a drawing sheet (not
+    // a title block). A page with a detail callout like "3/S4.2" is a
+    // drawing or a detail sheet.
+    "\\b\\d+/S\\d+\\.\\d+", "\\bDETAIL\\b", "\\bSECTION\\b",
+    "\\bELEVATION\\b", "\\bFRAMING PLAN\\b", "\\bPLAN\\b",
+    "\\bSCHEDULE\\b", "\\bSPEC\\b",
+  ].join("|"), "i").test(trimmed);
+
+  if (hasBom) return false; // Keep it.
+
+  // No content keyword found. Now apply tight title-page heuristics:
+  // Very-short OCR (e.g. just "For Reference") with no content keyword.
+  if (trimmed.length < 30) return true;
+  // "FOR REFERENCE ONLY" stamps with nothing else.
+  if (/FOR REFERENCE ONLY/i.test(trimmed)) return true;
+  // Cover sheets typically have many large-text strings like "DRAWING INDEX"
+  // or "SHEET INDEX" and a project name, but no member callouts.
+  if (/SHEET INDEX|DRAWING INDEX|COVER SHEET/i.test(trimmed) && trimmed.length < 800) return true;
+
+  // Default: KEEP the page. The model is much better than the heuristic
+  // at deciding whether a page is takeoff-relevant.
   return false;
 }
 
@@ -1112,11 +1160,47 @@ DIMENSION CONVENTIONS
   - Total quantity (count of identical members) goes in quantity, unit=EA.
   - For linear items (decking, handrail, weld), use quantity in LF.
 
+ABSOLUTE RULES (read carefully — these prevent the most common failure modes)
+
+  A. NEVER FABRICATE CONTENT FROM ANOTHER SHEET.
+     The items you output for page N must come ONLY from what is visible in
+     the page-N image you were given. Do NOT enumerate a packaging-tower
+     elevation from your knowledge of how packaging towers look, do NOT
+     copy items from a referenced sheet that isn't in front of you, and do
+     NOT guess at sizes from member-mark patterns. If the page you're
+     looking at is the cover sheet, the abbreviations / symbols / sheet-
+     index page, or a general-notes page, return items: [] for that page
+     even if you can recall what other sheets in the set typically contain.
+     The sheetTitle you report MUST match the title block on the page you
+     are actually looking at — not a sheet referenced in the index.
+
+  B. RETURN EMPTY ITEMS FOR THESE SHEET TYPES (set sheetType correctly, set items: []):
+       cover, key-plan, legend, title-block, sheet-index, general-notes,
+       structural-symbols, structural-abbreviations, wind-pressure-tables,
+       design-criteria, demolition-notes (notes-only, no demo plan).
+     If the page mixes a small note block with a real plan/elevation/
+     detail, classify by the DOMINANT content and include any visible
+     plan items — but do not invent items from referenced sheets.
+
+  C. CAPTURE SIZES THAT ARE LITERALLY ON THE SHEET.
+     If a beam is labeled W6x15 on the framing plan, the size field must
+     be "W6x15" — not "N/A" and not "wide flange". If the size is illegible,
+     write null and add a flag — do NOT write "N/A" as a placeholder. If a
+     plan view shows members but only refers them to a column / beam
+     schedule, output the mark ("C1", "B2") with size=null and a flag
+     saying which schedule to consult.
+
+  D. SHEET-NUMBER FIDELITY.
+     sheetNumber must be read FROM THE TITLE BLOCK in the lower-right of
+     the page you're looking at (e.g. "S1.51", "S4.12", "S2.42"). Do NOT
+     write a sheet number you saw on a sheet-index list on a different page.
+
 VERIFICATION BEFORE OUTPUT
   - Every detail callout symbol visible on this sheet either has a matching item on this sheet OR an entry in flags.
   - Total member count should match a visual inspection (e.g. if you see 12 columns on a foundation plan, there should be 12 columns'-worth of column entries — either one row of qty 12 if identical, or multiple rows summing to 12).
   - Bolt counts align with the connection detail (e.g. 6 bolts per detail × 20 occurrences = 120 bolts).
   - Do NOT fabricate dimensions, sizes, or weights. If illegible, set the field to null and add a flag.
+  - If the page is a cover/legend/index/notes-only sheet, items MUST be the empty array.
 
 Return ONLY valid JSON (no markdown fences, no commentary):
 {
@@ -4003,13 +4087,42 @@ async function extractStructuralChunk(
       aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: ${f}`);
     }
 
-    // Sheets classified as pure notes / cover / title / key-plan rarely have
-    // takeoff-relevant items — but we still emit any items the model returned
-    // (in case it found something useful). We DON'T early-return; the model
-    // might be wrong about classification.
+    // HALLUCINATION GUARD (added May-15 after Sugar Path BB3 audit).
+    // If the model classified this sheet as a non-content type (cover,
+    // legend, sheet-index, etc.) but ALSO returned items, those items are
+    // almost certainly hallucinated from the index / referenced sheet. The
+    // BB3 run produced 22 hallucinated W/C/L items on page 1 (the cover
+    // sheet) all sized N/A and all noting they came from sheet S4.13. Drop
+    // those and surface a flag.
+    const NON_CONTENT_SHEET_TYPES = new Set([
+      "cover", "key-plan", "legend", "title-block", "sheet-index",
+      "general-notes", "structural-symbols", "structural-abbreviations",
+      "wind-pressure-tables", "design-criteria",
+    ]);
+    const sheetTypeLower = sheetType.toLowerCase().replace(/[_\s]+/g, "-");
+    if (NON_CONTENT_SHEET_TYPES.has(sheetTypeLower) && entries.length > 0) {
+      aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: dropped ${entries.length} hallucinated item(s) from non-content sheet type "${sheetType}"`);
+      continue; // Skip this page entirely
+    }
 
     for (const entry of entries) {
       if (!entry.description || entry.description.length < 2) continue;
+
+      // SECONDARY HALLUCINATION GUARD: if the entry has no size (or is the
+      // literal string "N/A") AND no mark AND no length, it's a generic
+      // "VERTICAL COLUMN MEMBER, ELEVATION 1" placeholder. The model made
+      // it up. Skip it. Real takeoff items will have at least one of:
+      // a size token (W6x15), a member mark (C1, B2), a length, or a
+      // unit-quantified value (e.g. LF of decking).
+      const hasSize = entry.size && String(entry.size).trim() && String(entry.size).trim().toUpperCase() !== "N/A";
+      const hasMark = entry.mark && String(entry.mark).trim();
+      const hasLength = entry.lengthFt != null && Number(entry.lengthFt) > 0;
+      const hasReasonableQty = Number(entry.quantity) > 0;
+      if (!hasSize && !hasMark && !hasLength && !hasReasonableQty) {
+        aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: dropped placeholder item "${String(entry.description).substring(0, 60)}" (no size/mark/length)`);
+        continue;
+      }
+
       const mappedCategory = mapStructuralCategory(entry.category || "other");
       const qty = parseFloat(String(entry.quantity || "1")) || 1;
       const isLfItem = ["LF", "SF", "CY", "TONS", "LBS", "FT"].includes(String(entry.unit || "EA").toUpperCase());
@@ -4470,10 +4583,10 @@ async function processUploadedPdf(
       }
 
       // FINAL SWEEP — close the gap on still-empty pages. Added May-15 after
-      // the Area 100 audit: 73 of 560 pages came back empty, and the primary
-      // recovery only handled 25 of them. This sweep keeps retrying empty
-      // pages in batches of 50 until none remain or progress stalls.
-      if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+      // the Area 100 audit (mechanical) and Sugar Path BB3 audit (structural).
+      // Originally mechanical-only; extended to structural after BB3 returned
+      // 42 empty pages out of 61. Civil also benefits.
+      if (fs.existsSync(pdfPath)) {
         try {
           const sweepResult = await finalEmptyPageSweep(allItems, pdfPath, discipline, 1, pageCount);
           if (sweepResult.recoveredPages.length > 0) {
@@ -5044,9 +5157,10 @@ async function processUploadedPdf(
   }
 
   // Step: FINAL SWEEP — close the gap on still-empty pages (May-15 fix).
-  // Mirrors the same sweep used in the streaming path. See finalEmptyPageSweep()
-  // for the rationale.
-  if (discipline === "mechanical" && fs.existsSync(pdfPath)) {
+  // Mirrors the same sweep used in the streaming path. Now runs on every
+  // discipline (was mechanical-only) after the Sugar Path BB3 structural
+  // audit found 42 empty pages out of 61.
+  if (fs.existsSync(pdfPath)) {
     try {
       const startPage = chunks[0]?.startPage || 1;
       const sweepResult = await finalEmptyPageSweep(allItems, pdfPath, discipline, startPage, pageCount);
