@@ -1,6 +1,6 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart, AlertCircle, CheckCircle2, Printer, FileText } from "lucide-react";
+import { Plus, Trash2, Download, Database, ChevronDown, ChevronRight, ChevronUp, Edit2, Check, X, Search, Calculator, Zap, FileSpreadsheet, Info, Settings2, ArrowUpDown, History, Upload, Wand2, ShoppingCart, AlertCircle, CheckCircle2, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1103,8 +1103,8 @@ export default function EstimatingPage() {
                       </CardContent>
                     </Card>
 
-                    {/* Quick entry bar — hidden when printing the page */}
-                    <div className="flex gap-2 no-print" data-print="hide">
+                    {/* Quick entry bar */}
+                    <div className="flex gap-2">
                       <Input
                         className="h-8 text-xs flex-1"
                         placeholder='Type: 3 4" butt welds, 100 LF 6" pipe, 50 CY concrete...'
@@ -1132,9 +1132,8 @@ export default function EstimatingPage() {
                           2. Internal exports dropdown (Bill's, Justin's, Industry, Print)
                           3. Workflow actions (Apply DB costs, Versions, Quotes,
                              Infer/Strip welds when applicable)
-                        Hidden when printing the page.
                         ------------------------------------------------------------------ */}
-                    <div className="flex items-center gap-2 flex-wrap no-print" data-print="hide">
+                    <div className="flex items-center gap-2 flex-wrap">
                       {/* Primary: Customer-facing bid proposal */}
                       <Button
                         size="sm"
@@ -1164,10 +1163,7 @@ export default function EstimatingPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start" className="w-56">
-                          <DropdownMenuLabel>Print / PDF</DropdownMenuLabel>
-                          <DropdownMenuItem onClick={() => window.print()} data-testid="btn-print-page">
-                            <Printer size={13} className="mr-2" /> Print Page
-                          </DropdownMenuItem>
+                          <DropdownMenuLabel>PDF</DropdownMenuLabel>
                           <DropdownMenuItem onClick={() => exportEstimatePdf(p)} data-testid="btn-export-estimate">
                             <FileText size={13} className="mr-2" /> BOM PDF (internal)
                           </DropdownMenuItem>

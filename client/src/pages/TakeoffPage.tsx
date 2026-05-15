@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
-import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon, FolderOpen, FolderPlus, Folder, Plus, MoreVertical, FileSpreadsheet, Printer } from "lucide-react";
+import { Trash2, Download, Calculator, ChevronDown, ChevronRight, FileText, Archive, ArchiveRestore, Eye, EyeOff, AlertTriangle, Image, GitCompare, Menu, X as XIcon, FolderOpen, FolderPlus, Folder, Plus, MoreVertical, FileSpreadsheet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -594,7 +594,7 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <span>{selectedProject.items.length} items</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0 flex-wrap md:flex-nowrap no-print" data-print="hide">
+                  <div className="flex items-center gap-2 shrink-0 flex-wrap md:flex-nowrap">
                     {availablePages.length > 0 && (
                       <Button
                         variant="outline"
@@ -617,21 +617,6 @@ export default function TakeoffPage({ discipline }: TakeoffPageProps) {
                       <Plus size={14} className="mr-1.5" />
                       Add Row
                     </Button>
-                    {/* Print Page — visible top-level button. Uses the browser's
-                        native print dialog with the @media print stylesheet in
-                        index.css. Captures every section currently rendered:
-                        BOM, summary pivot, connections summary. */}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => window.print()}
-                      data-testid="btn-print-page"
-                      title="Open the browser print dialog. Save as PDF or print directly. Captures every section on the page exactly as you see it."
-                    >
-                      <Printer size={14} className="mr-1.5" />
-                      Print Page
-                    </Button>
-
                     {/* All exports grouped into a single dropdown to keep the
                         toolbar tidy. Includes:
                           • BOM PDF (discipline-specific Mechanical / Structural / Civil)
