@@ -1023,29 +1023,138 @@ async function verifyExtractedItems(
 // STRUCTURAL BOM EXTRACTION
 // ============================================================
 
-const STRUCTURAL_PROMPT = `You are an expert structural engineer and estimator reading structural engineering drawings.
-Your job is to extract a COMPLETE structural Bill of Materials (BOM) / takeoff from the drawing.
-Accuracy is critical — this is used for material procurement and cost estimating.
+// ============================================================
+// STRUCTURAL TAKEOFF PROMPT
+// ============================================================
+// Adapted from the Picou Group "Structural Drawing Takeoff Specialist" spec
+// (May-15). The original spec describes a multi-sheet workflow with sheet
+// inventory, cross-reference resolution, and per-section quantification.
+// Our pipeline runs PER PAGE (one Claude call per drawing sheet), so we
+// embed the domain knowledge from the spec directly in the per-page prompt
+// and let the post-processor aggregate across pages.
+//
+// Per-page model contract:
+//   - Identify the sheet type (framing plan, foundation plan, schedule,
+//     detail, elevation, section, general-notes)
+//   - Extract every visible structural member, connection, fastener
+//   - Resolve callouts within the page (e.g. "6 - W14x30" in a schedule)
+//   - Flag cross-page references (e.g. "3/S4.2") but do NOT guess content
+//   - Flag illegible or ambiguous items in `flags` rather than fabricating
+const STRUCTURAL_PROMPT = `You are a Structural Drawing Takeoff Specialist with expertise in structural steel fabrication estimating, connection design, and construction document interpretation. You are reading a single structural drawing sheet (or a small batch of sheets). Produce an accurate, fabrication-ready bill of materials for the items visible on each sheet.
 
-WHAT TO EXTRACT:
-**STRUCTURAL STEEL:** Wide Flange Beams/Columns (W10x22, W14x30, etc.), HSS/Tube Steel (HSS 6x6x1/4), Angles (L3x3x1/4), Channels, Plates, Base Plates, Bracing, Misc Steel
-**CONNECTIONS:** Bolts (A325, A490), Anchor bolts, Welds, Clip angles, Gusset plates
-**CONCRETE:** Footings, Grade beams, Walls, Slabs, Columns/Piers (give volume in CY)
-**REBAR:** Bars by size (#3 through #11), Wire mesh, Anchor bolts, Dowels
+A single missed connection or miscounted bolt pattern can render a bid uncompetitive or cause fabrication delays. Be exhaustive within each sheet and flag anything that requires cross-reference to a sheet not in this batch.
 
-RULES:
-1. Read EVERY cell EXACTLY as printed. Do NOT guess, round, or estimate.
-2. For each item extract: mark (if any), description, size, quantity, unit, grade/spec, weight.
-3. Units: use EA (each), LF (linear feet), SF (square feet), CY (cubic yards), LBS (pounds), TONS.
-4. Member marks (B1, C1, etc.) go in the "mark" field.
-5. Grade/spec examples: A36, A992, A500-B, 3000 psi, 4000 psi, Grade 60.
-6. For concrete volumes, compute CY = (L x W x H in feet) / 27.
-7. SKIP: general notes, title blocks, revision clouds, drawing borders.
+WORKFLOW (apply to each page in the batch):
 
-Return ONLY valid JSON (no markdown, no extra text):
-{"pages": [{"pageNum": PAGE_NUMBER, "items": [
-  {"mark": "B1", "category": "wide_flange", "description": "BEAM W14x30", "size": "W14x30", "quantity": 4, "unit": "EA", "grade": "A992", "weight": 2400}
-]}]}`;
+1. SHEET CLASSIFICATION
+   First decide what KIND of sheet this is and set sheetType to ONE of:
+     - framing-plan, foundation-plan, roof-framing-plan
+     - elevation, section, detail
+     - schedule (column schedule, beam schedule, base-plate schedule, anchor-bolt schedule)
+     - general-notes, typical-details
+     - cover, title-block, key-plan, legend
+     - other
+
+2. MEMBER EXTRACTION (primary structural elements)
+   COLUMNS: section size (W10x49, HSS6x6x1/4, PIPE 4 STD, etc.), length, base-plate ID, anchor-bolt callout, splice locations. mark = column tag (C1, C2, ...).
+   BEAMS & GIRDERS: section size, span length, end-connection callouts, camber if specified. mark = beam tag (B1, G1, ...).
+   BRACING: diagonal/chevron/X-brace member, section size, gusset-plate dimensions, bolt pattern. mark = brace tag.
+   JOISTS & JOIST GIRDERS: series/depth/span (e.g. 22K6, 24KCS3), seat-angle, bridging type/spacing.
+   DECKING: type (composite, form deck, roof deck), gauge (e.g. 20 GA), span direction, attachment (welds/foot or screws/sf).
+   MISC STEEL: handrails (LF), stairs (count + flights), platforms (SF), embed plates (count + size), lintels (LF or count).
+
+3. CONNECTION QUANTIFICATION (critical for fabrication labor)
+   SHEAR CONNECTIONS: single/double shear tab, clip angle, seated. Count plates, weld type/size/length, bolt holes/diameter/grade.
+   MOMENT CONNECTIONS: flange plates (top+bottom), continuity plates inside columns, web shear connection. Bolts per flange (typically 4-12) and per web.
+   SPLICES: column splice (bolted plates or welded), beam splice. Distinguish gravity vs moment/seismic.
+   BASE PLATES: dimensions L x W x t, anchor-bolt count/diameter/type/embedment, grout-pocket depth, stiffeners.
+   BRACING CONNECTIONS: gusset plate (SF or LxW), bolt pattern, weld callouts.
+
+4. FASTENERS & ACCESSORIES
+   BOLTS: group by diameter (3/4", 7/8", 1"), grade (A325, A490), type (snug-tight, pretensioned, slip-critical).
+   ANCHOR BOLTS: diameter, embedment depth, type (hooked, headed, threaded rod).
+   WELDS: linear feet by type (fillet, CJP, PJP), size (e.g. 1/4", 5/16"), electrode if specified.
+   SHEAR STUDS: diameter, height, count per composite-deck detail.
+   MISC HARDWARE: bearing stiffeners, doubler plates, erection seats.
+
+5. CROSS-REFERENCE RESOLUTION (within this batch only)
+   - When a plan shows a connection symbol referencing a detail ("3/S4.2"), capture the reference token in connectionDetailId; do NOT guess what's on the referenced sheet.
+   - If a typical detail is marked TYP or appears in a schedule, count ALL visible instances on THIS sheet.
+   - If the schedule on this sheet defines a beam mark and the plan on this sheet uses it 14 times, output ONE row with quantity=14 and the schedule's section size.
+   - If a detail is referenced but the referenced sheet is NOT in this batch, ADD an entry to the flags array: "Detail X/Y referenced — not in this batch".
+
+6. QUANTITY CALCULATIONS
+   LENGTHS: measure center-to-center of supports unless noted; do NOT subtract for copes unless the detail explicitly dimensions them.
+   WEIGHTS: apply AISC weight (lb/ft) when known. For W-shapes the weight is the second number (W14x30 = 30 lb/ft). For HSS, anchor it to AISC tables only if you are confident.
+   AREAS: gusset / base / stiffener plates in SF.
+   UNIT COUNTS: tally pieces for columns, beams, bracing, stairs, railings.
+
+7. WHAT TO SKIP
+   - General notes (set sheetType=general-notes and return items=[]).
+   - Title block / revision cloud / drawing border.
+   - Architectural and MEP components.
+   - Anything you cannot read — flag it instead of guessing.
+
+CATEGORIES (use one of these for every item):
+  wide_flange, hss, channel, angle, pipe_column, plate, base_plate, gusset_plate, stiffener_plate,
+  bracing, joist, joist_girder, decking, miscellaneous_steel,
+  shear_connection, moment_connection, splice_connection, base_plate_connection, bracing_connection,
+  bolt, anchor_bolt, shear_stud, weld,
+  concrete, rebar, embed,
+  other
+
+UNITS (use one of these for every item):
+  EA (each), LF (linear feet), SF (square feet), CY (cubic yards), LBS (pounds), TONS, FT (feet for member length)
+
+DIMENSION CONVENTIONS
+  - Member size goes in size: "W14x30", "HSS6x6x1/4", "L3x3x1/4", "PIPE 4 STD"
+  - Length goes in lengthFt (numeric, feet) if the drawing shows it; otherwise omit.
+  - Total quantity (count of identical members) goes in quantity, unit=EA.
+  - For linear items (decking, handrail, weld), use quantity in LF.
+
+VERIFICATION BEFORE OUTPUT
+  - Every detail callout symbol visible on this sheet either has a matching item on this sheet OR an entry in flags.
+  - Total member count should match a visual inspection (e.g. if you see 12 columns on a foundation plan, there should be 12 columns'-worth of column entries — either one row of qty 12 if identical, or multiple rows summing to 12).
+  - Bolt counts align with the connection detail (e.g. 6 bolts per detail × 20 occurrences = 120 bolts).
+  - Do NOT fabricate dimensions, sizes, or weights. If illegible, set the field to null and add a flag.
+
+Return ONLY valid JSON (no markdown fences, no commentary):
+{
+  "pages": [
+    {
+      "pageNum": PAGE_NUMBER,
+      "sheetNumber": "S2.1" or null,
+      "sheetType": "framing-plan" | "foundation-plan" | "schedule" | "detail" | "elevation" | "section" | "general-notes" | "typical-details" | "cover" | "key-plan" | "legend" | "other",
+      "sheetTitle": "FOUNDATION PLAN" or null,
+      "flags": ["Detail 5/S8 referenced but S8 not in this batch"],
+      "items": [
+        {
+          "mark": "C1",
+          "category": "wide_flange",
+          "description": "COLUMN W12x65, A992",
+          "size": "W12x65",
+          "quantity": 4,
+          "unit": "EA",
+          "lengthFt": 14.0,
+          "grade": "A992",
+          "weight": 65,
+          "connectionDetailId": "3/S5.1",
+          "notes": "Base plate per BP-1 schedule"
+        },
+        {
+          "mark": null,
+          "category": "bolt",
+          "description": "A325-N HEX BOLTS, 3/4\" DIA, SNUG TIGHT, FOR SHEAR TAB CONNECTIONS",
+          "size": "3/4\"",
+          "quantity": 120,
+          "unit": "EA",
+          "grade": "A325-N",
+          "notes": "6 bolts × 20 shear tabs on this plan"
+        }
+      ]
+    }
+  ]
+}`;
 
 // ============================================================
 // CIVIL BOM EXTRACTION
@@ -1178,7 +1287,16 @@ async function extractWithVision(
         if (geminiResult && geminiResult.pages) {
           for (const page of geminiResult.pages) {
             if (page.pageNum && Array.isArray(page.items)) {
-              results.set(page.pageNum, { items: page.items, drawingNumber: page.drawingNumber || null, weldCount: page.weldCount || null, continuations: page.continuations || [] });
+              // Spread the whole page object so discipline-specific fields
+              // (structural: sheetType/sheetTitle/sheetNumber/flags;
+              // mechanical: weldCount/continuations) ride through.
+              results.set(page.pageNum, {
+                ...page,
+                items: page.items,
+                drawingNumber: page.drawingNumber || null,
+                weldCount: page.weldCount || null,
+                continuations: page.continuations || [],
+              });
             }
           }
           await new Promise(resolve => setTimeout(resolve, 4500));
@@ -1244,7 +1362,15 @@ async function extractWithVision(
           if (parsed.pages && Array.isArray(parsed.pages)) {
             for (const page of parsed.pages) {
               if (page.pageNum && Array.isArray(page.items)) {
-                results.set(page.pageNum, { items: page.items, drawingNumber: page.drawingNumber || null, weldCount: page.weldCount || null, continuations: page.continuations || [] });
+                // Spread whole page so discipline-specific fields ride through
+                // (structural sheetType/flags, mechanical weldCount, etc.)
+                results.set(page.pageNum, {
+                  ...page,
+                  items: page.items,
+                  drawingNumber: page.drawingNumber || null,
+                  weldCount: page.weldCount || null,
+                  continuations: page.continuations || [],
+                });
                 if (page.items.length === 0) {
                   console.warn(`  Warning: Page ${page.pageNum} returned 0 items (attempt ${attempt + 1})`);
                   returnedEmpty = true;
@@ -3216,23 +3342,67 @@ function computeConfidenceScore(item: any, pdfQuality?: "vector" | "clean_scan" 
 }
 
 function mapStructuralCategory(cat: string): string {
-  const validCategories = ["wide_flange", "hss_tube", "angle", "channel", "plate", "base_plate", "column", "bracing", "embed_plate", "bolt", "weld", "clip_angle", "gusset_plate", "anchor_bolt", "footing", "grade_beam", "concrete_wall", "slab", "concrete_column", "rebar", "wire_mesh", "dowel", "other"];
+  // Canonical category names that the downstream takeoff/estimate code expects.
+  // Expanded May-15 to cover the richer structural taxonomy emitted by the new
+  // STRUCTURAL_PROMPT (joists, decking, connection sub-types, shear studs, etc.).
+  const validCategories = [
+    "wide_flange", "hss_tube", "angle", "channel", "plate", "base_plate",
+    "column", "pipe_column", "bracing", "joist", "joist_girder", "decking",
+    "miscellaneous_steel",
+    "embed_plate", "gusset_plate", "stiffener_plate", "clip_angle",
+    "shear_connection", "moment_connection", "splice_connection",
+    "base_plate_connection", "bracing_connection",
+    "bolt", "anchor_bolt", "shear_stud", "weld",
+    "footing", "grade_beam", "concrete_wall", "slab", "concrete_column",
+    "concrete", "rebar", "wire_mesh", "dowel", "embed",
+    "other",
+  ];
   const lower = cat.toLowerCase().replace(/[^a-z_]/g, "_");
   if (validCategories.includes(lower)) return lower;
-  if (/wide[_\s]?flange|w[\d]+x|beam/i.test(cat)) return "wide_flange";
+
+  // Member sections
+  if (/wide[_\s]?flange|w[\d]+x|beam(?!\s*column)/i.test(cat)) return "wide_flange";
   if (/hss|tube[_\s]?steel/i.test(cat)) return "hss_tube";
+  if (/pipe[_\s]?col|pipe[_\s]?\d/i.test(cat)) return "pipe_column";
   if (/angle|^l\d/i.test(cat)) return "angle";
   if (/channel|^c\d|^mc\d/i.test(cat)) return "channel";
-  if (/^plate|^pl\s/i.test(cat)) return "plate";
+  if (/joist[_\s]?girder/i.test(cat)) return "joist_girder";
+  if (/joist/i.test(cat)) return "joist";
+  if (/deck(?:ing)?/i.test(cat)) return "decking";
+  if (/misc(?:ellaneous)?[_\s]?steel|stair|handrail|platform|lintel/i.test(cat)) return "miscellaneous_steel";
+
+  // Plates
+  if (/gusset/i.test(cat)) return "gusset_plate";
+  if (/stiffener/i.test(cat)) return "stiffener_plate";
+  if (/clip[_\s]?angle/i.test(cat)) return "clip_angle";
   if (/base[_\s]?plate/i.test(cat)) return "base_plate";
-  if (/column|pier/i.test(cat)) return "column";
-  if (/brac/i.test(cat)) return "bracing";
+  if (/embed[_\s]?plate|embed\b/i.test(cat)) return "embed_plate";
+  if (/^plate|^pl\s/i.test(cat)) return "plate";
+
+  // Connections
+  if (/shear[_\s]?conn|shear[_\s]?tab/i.test(cat)) return "shear_connection";
+  if (/moment[_\s]?conn/i.test(cat)) return "moment_connection";
+  if (/splice[_\s]?conn|splice/i.test(cat)) return "splice_connection";
+  if (/base[_\s]?plate[_\s]?conn/i.test(cat)) return "base_plate_connection";
+  if (/bracing[_\s]?conn/i.test(cat)) return "bracing_connection";
+
+  // Fasteners
+  if (/anchor[_\s]?bolt|anchor[_\s]?rod/i.test(cat)) return "anchor_bolt";
+  if (/shear[_\s]?stud|nelson[_\s]?stud|stud/i.test(cat)) return "shear_stud";
   if (/bolt(?!_)/i.test(cat)) return "bolt";
   if (/weld/i.test(cat)) return "weld";
-  if (/anchor[_\s]?bolt|anchor[_\s]?rod/i.test(cat)) return "anchor_bolt";
+
+  // Bracing + columns (catch-alls AFTER more specific matches)
+  if (/brac/i.test(cat)) return "bracing";
+  if (/column|pier/i.test(cat)) return "column";
+
+  // Concrete
   if (/footing|ftg/i.test(cat)) return "footing";
   if (/grade[_\s]?beam/i.test(cat)) return "grade_beam";
+  if (/concrete[_\s]?wall/i.test(cat)) return "concrete_wall";
+  if (/concrete[_\s]?col/i.test(cat)) return "concrete_column";
   if (/slab|sog/i.test(cat)) return "slab";
+  if (/concrete/i.test(cat)) return "concrete";
   if (/rebar|reinfor/i.test(cat)) return "rebar";
   if (/wire[_\s]?mesh|wwf/i.test(cat)) return "wire_mesh";
   if (/dowel/i.test(cat)) return "dowel";
@@ -3816,15 +3986,44 @@ async function extractStructuralChunk(
   const adjustedPageImages = pageImages.map(pi => ({ ...pi, globalPageNum: pi.pageNum + startPage - 1 }));
   const { results: visionResults } = await extractWithVision(pageImages, STRUCTURAL_PROMPT, "structural");
 
+  // Aggregate any cross-sheet flags so the takeoff post-processor can surface
+  // them as warnings on the project. Each entry: "page N (S2.1): <message>".
+  const aggregatedFlags: string[] = [];
+
   for (const page of adjustedPageImages) {
-    const pageData = visionResults.get(page.pageNum) || { items: [] };
+    const pageData: any = visionResults.get(page.pageNum) || { items: [] };
     const entries = pageData.items;
-    const pageDrawingNumber = pageData.drawingNumber || null;
+    const pageDrawingNumber = pageData.drawingNumber || pageData.sheetNumber || null;
+    // Sheet-level metadata from the new structural prompt.
+    const sheetType: string = String(pageData.sheetType || "other");
+    const sheetTitle: string | null = pageData.sheetTitle || null;
+    const sheetNumber: string | null = pageData.sheetNumber || pageDrawingNumber || null;
+    const sheetFlags: string[] = Array.isArray(pageData.flags) ? pageData.flags : [];
+    for (const f of sheetFlags) {
+      aggregatedFlags.push(`Page ${page.globalPageNum}${sheetNumber ? " (" + sheetNumber + ")" : ""}: ${f}`);
+    }
+
+    // Sheets classified as pure notes / cover / title / key-plan rarely have
+    // takeoff-relevant items — but we still emit any items the model returned
+    // (in case it found something useful). We DON'T early-return; the model
+    // might be wrong about classification.
+
     for (const entry of entries) {
       if (!entry.description || entry.description.length < 2) continue;
       const mappedCategory = mapStructuralCategory(entry.category || "other");
       const qty = parseFloat(String(entry.quantity || "1")) || 1;
-      const isLfItem = ["LF", "SF", "CY"].includes(String(entry.unit || "EA").toUpperCase());
+      const isLfItem = ["LF", "SF", "CY", "TONS", "LBS", "FT"].includes(String(entry.unit || "EA").toUpperCase());
+      const lengthFt = entry.lengthFt != null && Number.isFinite(Number(entry.lengthFt))
+        ? Math.round(Number(entry.lengthFt) * 100) / 100
+        : undefined;
+      // Build a richer notes line so the user can see sheet context, the AI-
+      // captured cross-reference, and any per-item note from the model.
+      const noteParts: string[] = [`Sheet ${page.globalPageNum}`];
+      if (sheetNumber) noteParts.push(sheetNumber);
+      if (sheetType && sheetType !== "other") noteParts.push(sheetType);
+      if (sheetTitle) noteParts.push(sheetTitle);
+      if (entry.connectionDetailId) noteParts.push(`detail ${entry.connectionDetailId}`);
+      if (entry.notes) noteParts.push(String(entry.notes).substring(0, 80));
       items.push({
         category: mappedCategory,
         mark: entry.mark || undefined,
@@ -3834,11 +4033,25 @@ async function extractStructuralChunk(
         unit: String(entry.unit || "EA").toUpperCase(),
         grade: entry.grade || undefined,
         weight: parseFloat(String(entry.weight || "0")) > 0 ? Math.round(parseFloat(String(entry.weight))) : undefined,
-        notes: `Sheet ${page.globalPageNum}${pageDrawingNumber ? " | " + pageDrawingNumber : ""}`,
+        notes: noteParts.join(" | "),
         sourcePage: page.globalPageNum,
         drawingNumber: pageDrawingNumber,
+        // Stash structural-specific fields under underscore-prefixed keys so
+        // downstream code can surface them without changing the canonical
+        // TakeoffItem schema.
+        _sheetType: sheetType || undefined,
+        _sheetNumber: sheetNumber || undefined,
+        _sheetTitle: sheetTitle || undefined,
+        _connectionDetailId: entry.connectionDetailId || undefined,
+        _lengthFt: lengthFt,
       });
     }
+  }
+
+  if (aggregatedFlags.length > 0) {
+    // Carry flags up via metadata so the upload route can append them to the
+    // project-level warnings list. processUploadedPdf reads .metadata.flags.
+    metadata.flags = aggregatedFlags;
   }
 
   if (startPage === 1 && pageImages.length > 0) {
@@ -4150,6 +4363,14 @@ async function processUploadedPdf(
         if (chunkResult.authFailures) totalAuthFailures += chunkResult.authFailures;
         allItems.push(...chunkResult.items);
         if (i === 0 && chunkResult.metadata) metadata = chunkResult.metadata;
+        // Surface structural cross-reference flags as project warnings so the
+        // user sees "Detail 5/S8 referenced but S8 not in this batch" right
+        // in the takeoff UI instead of buried in server logs.
+        if (chunkResult.metadata && Array.isArray((chunkResult.metadata as any).flags)) {
+          for (const f of (chunkResult.metadata as any).flags) {
+            warnings.push(String(f));
+          }
+        }
         chunksCompleted++;
         // Per-chunk empty-page diagnostic (added May-15). Lists exactly which
         // global pages within this chunk came back with zero items so we can
@@ -4568,6 +4789,13 @@ async function processUploadedPdf(
 
         allItems.push(...chunkResult.items);
         if (chunkIndex === 0 && chunkResult.metadata) metadata = chunkResult.metadata;
+        // Surface structural cross-reference flags ("Detail X/Y referenced but
+        // sheet not in this batch") as project warnings.
+        if (chunkResult.metadata && Array.isArray((chunkResult.metadata as any).flags)) {
+          for (const f of (chunkResult.metadata as any).flags) {
+            warnings.push(String(f));
+          }
+        }
 
         console.log(`  Extract chunk ${chunkNum} done: ${chunkResult.items.length} items (total: ${allItems.length})`);
         chunksCompleted++;
