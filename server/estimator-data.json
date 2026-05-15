@@ -1584,5 +1584,133 @@
       "flange": 1,
       "fitting": 2
     }
+  },
+  "bill_structural": {
+    "description": "Bill's Bid Sheet \u2014 Steel Labor side-table (Structural Steel MH Units, Q3:S13)",
+    "source": "Bills-Bid-Sheet.xlsm / 'Steel Labor' sheet, MH-Per-Ton lookup driven by member lb/ft",
+    "member_weight_bands": [
+      {
+        "name": "Light",
+        "lbs_per_lf_min": 0,
+        "lbs_per_lf_max": 20,
+        "mh_per_ton": 16
+      },
+      {
+        "name": "Medium",
+        "lbs_per_lf_min": 20,
+        "lbs_per_lf_max": 40,
+        "mh_per_ton": 12
+      },
+      {
+        "name": "Heavy",
+        "lbs_per_lf_min": 40,
+        "lbs_per_lf_max": null,
+        "mh_per_ton": 8
+      }
+    ],
+    "elevation_factors": {
+      "0-20": 1.0,
+      "20-40": 1.05,
+      "40-80": 1.1,
+      "80+": 1.2,
+      "demo": 0.5
+    },
+    "per_unit_factors": {
+      "welding": {
+        "mh": 0.08,
+        "unit": "LI"
+      },
+      "cutting": {
+        "mh": 0.1,
+        "unit": "LI"
+      },
+      "drilling": {
+        "mh": 0.5,
+        "unit": "EA"
+      },
+      "grating_plate": {
+        "mh": 0.14,
+        "unit": "SF"
+      },
+      "handrails_ladders": {
+        "mh": 0.27,
+        "unit": "LF"
+      },
+      "stair_treads": {
+        "mh": 0.5,
+        "unit": "EA"
+      },
+      "roofing_siding": {
+        "mh": 0.1,
+        "unit": "SF"
+      }
+    },
+    "mu_percent_default": 0.06
+  },
+  "bill_civil_concrete": {
+    "description": "Bill's Bid Sheet \u2014 Civil-Concrete Labor side-table",
+    "source": "Bills-Bid-Sheet.xlsm / 'Civil-Concrete Labor' sheet, MH-Per-Unit lookup",
+    "per_unit_factors": {
+      "excavation": {
+        "mh": 0.3,
+        "unit": "CY",
+        "notes": "Mass excavation"
+      },
+      "fine_grade": {
+        "mh": 0.03,
+        "unit": "SF",
+        "notes": "Subgrade prep"
+      },
+      "form": {
+        "mh": 0.17,
+        "unit": "SFCA",
+        "notes": "Form set per square foot of contact area"
+      },
+      "chamfer_expansion": {
+        "mh": 0.02,
+        "unit": "LF"
+      },
+      "rebar": {
+        "mh": 0.015,
+        "unit": "LB"
+      },
+      "concrete_place": {
+        "mh": 1.0,
+        "unit": "CY"
+      },
+      "anchor_bolts": {
+        "mh": 1.0,
+        "unit": "EA"
+      },
+      "finish": {
+        "mh": 0.03,
+        "unit": "SF"
+      },
+      "wreck_forms": {
+        "mh": 0.05,
+        "unit": "SFCA"
+      },
+      "backfill": {
+        "mh": 0.2,
+        "unit": "CY"
+      },
+      "grout": {
+        "mh": 4.0,
+        "unit": "CF",
+        "notes": "Pour-and-finish per cubic foot"
+      },
+      "roughen": {
+        "mh": 0.06,
+        "unit": "SF"
+      },
+      "bonding": {
+        "mh": 0.01,
+        "unit": "SF"
+      },
+      "special": {
+        "mh": 1.0,
+        "unit": "varies"
+      }
+    }
   }
 }

@@ -6108,6 +6108,153 @@ function computeEstimateItem(item: any) {
   };
 }
 
+// ============================================================
+// STRUCTURAL LABOR (Bill's Steel Labor side-table)
+// ============================================================
+// Estimates labor MH for a structural takeoff item using Bill's Bid Sheet
+// rules:
+//   - Members (wide flange, HSS, angle, channel, etc.) priced by section
+//     weight (lb/ft) → MH/Ton band [Light 16, Medium 12, Heavy 8] × tonnage
+//   - Per-unit items (handrails, stair treads, grating, decking, welds in
+//     LI, drilling holes) use the per_unit_factors block
+//   - Elevation multiplier applied to ALL labor MH
+//
+// Returns the MH this row contributes, plus a label describing the rule
+// used (so the estimator UI can show why a number is what it is).
+function computeStructuralLaborMH(item: {
+  category?: string;
+  quantity?: number;
+  weight?: number;       // lb/ft for member sections (W14x30 → 30)
+  lengthFt?: number;     // total length in feet (if known per row)
+  unit?: string;
+  installLocation?: string;
+  elevation?: string;    // "0' to 20'", "20' to 40'", "40' to 80'", "80' & Above", or "Demo"
+}): { mh: number; rule: string; mhPerUnit: number; unit: string } {
+  const data = getEstimatorData();
+  const factors = data?.bill_structural;
+  if (!factors) return { mh: 0, rule: "no structural factor table loaded", mhPerUnit: 0, unit: "" };
+
+  const qty = Number(item.quantity || 0);
+  const cat = String(item.category || "").toLowerCase();
+
+  // Elevation multiplier — default 1.0 (0-20 ft band)
+  const elevKey = (item.elevation || "").toLowerCase();
+  const elevFactors = factors.elevation_factors || {};
+  const elevMultiplier = (() => {
+    if (/demo/.test(elevKey)) return Number(elevFactors["demo"] ?? 0.5);
+    if (/80|above/.test(elevKey)) return Number(elevFactors["80+"] ?? 1.2);
+    if (/40.*80/.test(elevKey)) return Number(elevFactors["40-80"] ?? 1.1);
+    if (/20.*40/.test(elevKey)) return Number(elevFactors["20-40"] ?? 1.05);
+    return Number(elevFactors["0-20"] ?? 1.0);
+  })();
+
+  // PER-UNIT FACTORS (non-tonnage items)
+  const perUnit = factors.per_unit_factors || {};
+  // Map structural categories → perUnit key. Anything else falls through to
+  // tonnage-based calc.
+  const perUnitMap: Record<string, string> = {
+    "weld":              "welding",
+    "shear_stud":        "welding",        // shear studs are welded down
+    "miscellaneous_steel": "handrails_ladders", // catch-all, user can override
+    "decking":           "roofing_siding",
+    // Connections — we treat the WELD portion via the welding factor below.
+    // The plate/bolt portions roll into member tonnage and drilling.
+  };
+  // Explicit unit-based routing for items that ARE structural but priced
+  // by piece/foot rather than ton (handrail in LF, stair-tread in EA, etc.)
+  const unitU = String(item.unit || "").toUpperCase();
+  if (cat === "miscellaneous_steel" || /handrail|ladder/i.test(cat)) {
+    const f = perUnit.handrails_ladders;
+    if (f) {
+      const mhPerUnit = Number(f.mh) * elevMultiplier;
+      return { mh: qty * mhPerUnit, rule: `handrail/ladder ${f.mh} MH/${f.unit} × elev ${elevMultiplier}`, mhPerUnit, unit: f.unit };
+    }
+  }
+  if (/stair[_\s]?tread/i.test(cat) || (cat === "miscellaneous_steel" && unitU === "EA")) {
+    const f = perUnit.stair_treads;
+    if (f) {
+      const mhPerUnit = Number(f.mh) * elevMultiplier;
+      return { mh: qty * mhPerUnit, rule: `stair tread ${f.mh} MH/${f.unit} × elev ${elevMultiplier}`, mhPerUnit, unit: f.unit };
+    }
+  }
+  if (cat === "weld" || /weld/i.test(cat)) {
+    // Welds in this BOM are LINEAR INCHES (LI) per Bill's spec. If the user
+    // provided LF, we convert (1 LF = 12 LI).
+    const isLF = unitU === "LF";
+    const li = isLF ? qty * 12 : qty;
+    const f = perUnit.welding;
+    if (f) {
+      const mhPerUnit = Number(f.mh) * elevMultiplier;
+      return { mh: li * mhPerUnit, rule: `welding ${f.mh} MH/LI × elev ${elevMultiplier}${isLF ? " (converted from LF)" : ""}`, mhPerUnit, unit: "LI" };
+    }
+  }
+  if (cat === "decking" || /deck|sid/i.test(cat)) {
+    const f = perUnit.roofing_siding;
+    if (f) {
+      const mhPerUnit = Number(f.mh) * elevMultiplier;
+      return { mh: qty * mhPerUnit, rule: `deck/siding ${f.mh} MH/${f.unit} × elev ${elevMultiplier}`, mhPerUnit, unit: f.unit };
+    }
+  }
+  if (cat === "shear_stud") {
+    // Approximate: 1 LI per stud (Bill doesn't have a discrete stud factor).
+    const f = perUnit.welding;
+    if (f) {
+      const mhPerUnit = Number(f.mh) * elevMultiplier;
+      return { mh: qty * mhPerUnit, rule: `shear stud (1 LI/stud) ${f.mh} MH/LI × elev ${elevMultiplier}`, mhPerUnit, unit: "EA" };
+    }
+  }
+  if (cat === "plate" && unitU === "SF") {
+    const f = perUnit.grating_plate;
+    if (f) {
+      const mhPerUnit = Number(f.mh) * elevMultiplier;
+      return { mh: qty * mhPerUnit, rule: `plate/grating ${f.mh} MH/SF × elev ${elevMultiplier}`, mhPerUnit, unit: f.unit };
+    }
+  }
+
+  // MEMBER TONNAGE PATH — anything that isn't routed above (wide_flange,
+  // hss_tube, angle, channel, column, pipe_column, joist, joist_girder,
+  // bracing, base_plate, gusset_plate, stiffener_plate, embed_plate,
+  // bolts, anchor bolts, etc.) gets priced from the member-weight bands.
+  // We need a TONNAGE for this row. Derive from (qty × weight × lengthFt) / 2000.
+  const lbsPerLf = Number(item.weight || 0);
+  const lengthFt = Number(item.lengthFt || 0);
+  let tons = 0;
+  if (lbsPerLf > 0 && lengthFt > 0 && qty > 0) {
+    tons = (qty * lbsPerLf * lengthFt) / 2000;
+  } else if (lbsPerLf > 0 && qty > 0 && unitU === "LF") {
+    tons = (qty * lbsPerLf) / 2000;
+  } else if (unitU === "TONS" || unitU === "TON") {
+    tons = qty;
+  } else if (unitU === "LBS" || unitU === "LB") {
+    tons = qty / 2000;
+  }
+
+  if (tons <= 0) {
+    return { mh: 0, rule: "insufficient data (need lengthFt+weight, or unit=TONS/LBS)", mhPerUnit: 0, unit: unitU };
+  }
+
+  // Apply MU% (waste/coupons) — 6% default, added to weight not to MH directly.
+  const mu = Number(factors.mu_percent_default ?? 0.06);
+  const adjustedTons = tons * (1 + mu);
+
+  // Pick the weight band
+  const bands = Array.isArray(factors.member_weight_bands) ? factors.member_weight_bands : [];
+  const band = bands.find((b: any) => {
+    const lo = Number(b.lbs_per_lf_min ?? 0);
+    const hi = b.lbs_per_lf_max == null ? Infinity : Number(b.lbs_per_lf_max);
+    return lbsPerLf >= lo && lbsPerLf < hi;
+  }) || bands[bands.length - 1] || { mh_per_ton: 12, name: "Medium" };
+
+  const mhPerTon = Number(band.mh_per_ton);
+  const mh = adjustedTons * mhPerTon * elevMultiplier;
+  return {
+    mh,
+    rule: `${band.name} (${lbsPerLf} lb/ft) × ${mhPerTon} MH/ton × ${adjustedTons.toFixed(2)} tons (incl ${(mu * 100).toFixed(0)}% MU) × elev ${elevMultiplier}`,
+    mhPerUnit: mhPerTon,
+    unit: "TON",
+  };
+}
+
 function mapTakeoffToEstimateCategory(discipline: string, category: string): string {
   const validCategories = ["pipe", "elbow", "tee", "reducer", "valve", "flange", "gasket", "bolt", "cap", "coupling", "union", "weld", "support", "strainer", "trap", "fitting", "steel", "concrete", "rebar", "earthwork", "paving", "electrical", "other"];
   if (discipline === "mechanical") {
@@ -6773,6 +6920,29 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         (estimateItem as any).materialCostSource = "";
       }
 
+      // STRUCTURAL labor auto-fill from Bill's Steel Labor table.
+      // Mechanical labor comes from the cost-DB / Justin/Industry calc paths
+      // elsewhere. For structural we have no DB-priced match in most cases,
+      // so seed laborHoursPerUnit from Bill's factor lookup. The user can
+      // still override on the estimate page.
+      if (takeoffProject.discipline === "structural" && !estimateItem.laborHoursPerUnit) {
+        const r = computeStructuralLaborMH({
+          category: item.category,
+          quantity: item.quantity,
+          weight: (item as any).weight,
+          lengthFt: (item as any)._lengthFt,
+          unit: item.unit,
+          installLocation: (item as any).installLocation,
+          elevation: (item as any)._elevation,
+        });
+        if (r.mh > 0 && item.quantity > 0) {
+          estimateItem.laborHoursPerUnit = Math.round((r.mh / item.quantity) * 1000) / 1000;
+          (estimateItem as any).laborCostSource = "bill_structural";
+          // Append the rule label to notes so the user can audit it.
+          estimateItem.notes = (estimateItem.notes || "") + (estimateItem.notes ? " | " : "") + `MH rule: ${r.rule}`;
+        }
+      }
+
       return computeEstimateItem(estimateItem);
     });
 
@@ -6781,8 +6951,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // count) is carried inline on the fitting row via welds_per_fitting ×
     // factor. Pipe-field welds (one extra per 40' boundary on a run > 40 LF)
     // get added by ensurePipeFieldWeldRows below — those are the only
-    // welds that aren't already implicit in the parent BOM row.
-    const withFieldWelds = ensurePipeFieldWeldRows(estimateItems);
+    // welds that aren't already implicit in the parent BOM row. Field-weld
+    // inference is a MECHANICAL-piping concept only.
+    const withFieldWelds = takeoffProject.discipline === "mechanical" ? ensurePipeFieldWeldRows(estimateItems) : estimateItems;
     const allEstimateItems = withFieldWelds.map((item, idx) => ({ ...item, lineNumber: idx + 1 }));
 
     const estimateProject = storage.createEstimateProject({
